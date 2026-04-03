@@ -1,0 +1,9 @@
+[submodule "third_party/lvgl"]
+    path = third_party/lvgl
+    url = https://github.com/lvgl/lvgl.git
+    branch = release/v9.2
+
+[submodule "third_party/cjson"]
+    path = third_party/cjson
+    url = https://github.com/DaveGamble/cJSON.git
+    branch = master
