@@ -21,9 +21,9 @@
 
 /* ─── Display ─────────────────────────────────────────────────────────────── */
 #define MPT_DEFAULT_FB_DEVICE         "/dev/fb0"
-#define MPT_DEFAULT_TOUCH_DEVICE      "/dev/input/event0"
-#define MPT_DISPLAY_WIDTH             1280
-#define MPT_DISPLAY_HEIGHT            720
+#define MPT_DEFAULT_TOUCH_DEVICE      "/dev/input/event1"  /* Goodix TouchScreen */
+#define MPT_DISPLAY_WIDTH             720
+#define MPT_DISPLAY_HEIGHT            1280
 
 typedef struct {
     /* Paths */

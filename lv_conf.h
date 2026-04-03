@@ -1,6 +1,6 @@
 /**
  * lv_conf.h — LVGL configuration for mod-pi-touch
- * Target: Raspberry Pi, 7" touch display, 1280×720, framebuffer
+ * Target: Raspberry Pi 5, 7" touch display, 720×1280 portrait, framebuffer
  */
 
 #if 1 /* Set this to 1 to enable content */
@@ -20,9 +20,9 @@
 #define LV_DEF_REFR_PERIOD 16   /* ~60 fps */
 #define LV_INDEV_DEF_READ_PERIOD 16
 
-/* ─── Display resolution ───────────────────────────────────────────────────── */
-#define LV_HOR_RES_MAX 1280
-#define LV_VER_RES_MAX 720
+/* ─── Display resolution (720×1280 portrait) ───────────────────────────────── */
+#define LV_HOR_RES_MAX 720
+#define LV_VER_RES_MAX 1280
 
 /* ─── Linux framebuffer driver ─────────────────────────────────────────────── */
 #define LV_USE_LINUX_FBDEV 1
