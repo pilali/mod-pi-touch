@@ -282,7 +282,7 @@ void ui_app_show_input(const char *title, const char *placeholder,
     lv_obj_set_flex_flow(box, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(box, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_pad_all(box, 12, 0);
-    lv_obj_set_style_gap(box, 8, 0);
+    lv_obj_set_style_pad_row(box, 8, 0); lv_obj_set_style_pad_column(box, 8, 0);
 
     lv_obj_t *lbl = lv_label_create(box);
     lv_label_set_text(lbl, title);
@@ -300,7 +300,7 @@ void ui_app_show_input(const char *title, const char *placeholder,
     lv_obj_set_flex_align(row, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(row, 0, 0);
-    lv_obj_set_style_gap(row, 8, 0);
+    lv_obj_set_style_pad_row(row, 8, 0); lv_obj_set_style_pad_column(row, 8, 0);
 
     lv_obj_t *kbd = lv_keyboard_create(overlay);
     lv_keyboard_set_textarea(kbd, ta);
@@ -343,7 +343,7 @@ void ui_app_show_confirm(const char *title, const char *message,
     lv_obj_set_flex_flow(box, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(box, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_pad_all(box, 16, 0);
-    lv_obj_set_style_gap(box, 12, 0);
+    lv_obj_set_style_pad_row(box, 12, 0); lv_obj_set_style_pad_column(box, 12, 0);
 
     lv_obj_t *lbl_title = lv_label_create(box);
     lv_label_set_text(lbl_title, title);
@@ -360,7 +360,7 @@ void ui_app_show_confirm(const char *title, const char *message,
     lv_obj_set_flex_align(row, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(row, 0, 0);
-    lv_obj_set_style_gap(row, 8, 0);
+    lv_obj_set_style_pad_row(row, 8, 0); lv_obj_set_style_pad_column(row, 8, 0);
 
     confirm_ctx_t *ctx = malloc(sizeof(*ctx));
     ctx->cb = ok_cb; ctx->ud = userdata; ctx->overlay = overlay;

@@ -47,34 +47,32 @@ static void redraw_connections(void)
 
 /* ─── Block event handlers ───────────────────────────────────────────────────── */
 
-static void on_block_tap(lv_event_t *e)
+static void on_block_tap(void *userdata)
 {
-    int instance_id = (int)(intptr_t)lv_event_get_user_data(e);
+    int instance_id = (int)(intptr_t)userdata;
     pb_plugin_t *plug = pb_find_plugin(&g_pedalboard, instance_id);
     if (!plug) return;
 
-    /* Show parameter editor */
     ui_param_editor_show(instance_id, plug->label,
                          plug->ports, plug->port_count,
                          NULL, NULL);
 }
 
-static void on_block_bypass(lv_event_t *e)
+static void on_block_bypass(void *userdata)
 {
-    int instance_id = (int)(intptr_t)lv_event_get_user_data(e);
+    int instance_id = (int)(intptr_t)userdata;
     pb_plugin_t *plug = pb_find_plugin(&g_pedalboard, instance_id);
     if (!plug) return;
     plug->enabled = !plug->enabled;
     host_bypass(instance_id, !plug->enabled);
     g_pedalboard.modified = true;
     ui_app_update_title(g_pedalboard.name, true);
-    /* Update block visuals */
     ui_pedalboard_refresh();
 }
 
-static void on_block_remove(lv_event_t *e)
+static void on_block_remove(void *userdata)
 {
-    int instance_id = (int)(intptr_t)lv_event_get_user_data(e);
+    int instance_id = (int)(intptr_t)userdata;
     host_remove_plugin(instance_id);
     pb_remove_plugin(&g_pedalboard, instance_id);
     g_pedalboard.modified = true;

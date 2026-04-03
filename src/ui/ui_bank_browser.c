@@ -34,7 +34,7 @@ void ui_bank_browser_show(lv_obj_t *parent)
     lv_obj_set_flex_flow(parent, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(parent, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_pad_all(parent, 8, 0);
-    lv_obj_set_style_gap(parent, 8, 0);
+    lv_obj_set_style_pad_row(parent, 8, 0); lv_obj_set_style_pad_column(parent, 8, 0);
 
     /* Header */
     lv_obj_t *hdr = lv_obj_create(parent);
@@ -44,7 +44,7 @@ void ui_bank_browser_show(lv_obj_t *parent)
     lv_obj_set_style_bg_opa(hdr, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(hdr, 0, 0);
     lv_obj_set_style_pad_all(hdr, 0, 0);
-    lv_obj_set_style_gap(hdr, 8, 0);
+    lv_obj_set_style_pad_row(hdr, 8, 0); lv_obj_set_style_pad_column(hdr, 8, 0);
 
     lv_obj_t *btn_back = lv_btn_create(hdr);
     lv_obj_set_size(btn_back, 80, 36);

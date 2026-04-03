@@ -62,7 +62,7 @@ void ui_snapshot_bar_init(lv_obj_t *parent)
     lv_obj_set_flex_flow(parent, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(parent, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_pad_all(parent, 8, 0);
-    lv_obj_set_style_gap(parent, 6, 0);
+    lv_obj_set_style_pad_row(parent, 6, 0); lv_obj_set_style_pad_column(parent, 6, 0);
     lv_obj_clear_flag(parent, LV_OBJ_FLAG_SCROLLABLE);
 
     /* Placeholder label */
@@ -78,7 +78,7 @@ void ui_snapshot_bar_init(lv_obj_t *parent)
     lv_obj_set_style_bg_opa(g_btn_row, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(g_btn_row, 0, 0);
     lv_obj_set_style_pad_all(g_btn_row, 0, 0);
-    lv_obj_set_style_gap(g_btn_row, 6, 0);
+    lv_obj_set_style_pad_row(g_btn_row, 6, 0); lv_obj_set_style_pad_column(g_btn_row, 6, 0);
     lv_obj_add_flag(g_btn_row, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_scroll_dir(g_btn_row, LV_DIR_HOR);
 

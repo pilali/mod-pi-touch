@@ -9,22 +9,23 @@
 #define BLOCK_H  80
 
 typedef struct {
-    lv_event_cb_t on_tap;
-    lv_event_cb_t on_bypass;
-    lv_event_cb_t on_remove;
-    void         *userdata;
-    lv_obj_t     *bypass_dot;
-    bool          bypassed;
+    block_cb_t on_tap;
+    block_cb_t on_bypass;
+    block_cb_t on_remove;
+    void      *userdata;
+    bool       bypassed;
 } block_ctx_t;
 
-typedef struct { block_ctx_t *bc; lv_obj_t *menu; } menu_ctx_t;
+typedef struct {
+    block_ctx_t *bc;
+    lv_obj_t    *menu;
+} menu_ctx_t;
 
 static void menu_bypass_cb(lv_event_t *e)
 {
     menu_ctx_t *mc = lv_event_get_user_data(e);
     lv_obj_del(mc->menu);
-    lv_event_set_user_data(e, mc->bc->userdata);
-    if (mc->bc->on_bypass) mc->bc->on_bypass(e);
+    if (mc->bc->on_bypass) mc->bc->on_bypass(mc->bc->userdata);
     free(mc);
 }
 
@@ -32,16 +33,14 @@ static void menu_remove_cb(lv_event_t *e)
 {
     menu_ctx_t *mc = lv_event_get_user_data(e);
     lv_obj_del(mc->menu);
-    lv_event_set_user_data(e, mc->bc->userdata);
-    if (mc->bc->on_remove) mc->bc->on_remove(e);
+    if (mc->bc->on_remove) mc->bc->on_remove(mc->bc->userdata);
     free(mc);
 }
 
 static void block_tap_cb(lv_event_t *e)
 {
     block_ctx_t *ctx = lv_event_get_user_data(e);
-    lv_event_set_user_data(e, ctx->userdata);
-    if (ctx->on_tap) ctx->on_tap(e);
+    if (ctx->on_tap) ctx->on_tap(ctx->userdata);
 }
 
 static void block_long_press_cb(lv_event_t *e)
@@ -57,7 +56,8 @@ static void block_long_press_cb(lv_event_t *e)
     lv_obj_set_style_border_width(menu, 1, 0);
     lv_obj_set_flex_flow(menu, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_style_pad_all(menu, 4, 0);
-    lv_obj_set_style_gap(menu, 4, 0);
+    lv_obj_set_style_pad_row(menu, 4, 0);
+    lv_obj_set_style_pad_column(menu, 4, 0);
 
     menu_ctx_t *mc = malloc(sizeof(*mc));
     mc->bc = ctx; mc->menu = menu;
@@ -82,9 +82,9 @@ static void block_long_press_cb(lv_event_t *e)
 }
 
 lv_obj_t *ui_plugin_block_create(lv_obj_t *parent, pb_plugin_t *plug,
-                                  lv_event_cb_t on_tap,
-                                  lv_event_cb_t on_bypass,
-                                  lv_event_cb_t on_remove,
+                                  block_cb_t on_tap,
+                                  block_cb_t on_bypass,
+                                  block_cb_t on_remove,
                                   void *userdata)
 {
     block_ctx_t *ctx = malloc(sizeof(*ctx));
@@ -113,11 +113,10 @@ lv_obj_t *ui_plugin_block_create(lv_obj_t *parent, pb_plugin_t *plug,
     lv_obj_set_style_text_font(lbl, &lv_font_montserrat_14, 0);
     lv_obj_align(lbl, LV_ALIGN_TOP_LEFT, 0, 0);
 
-    ctx->bypass_dot = lv_label_create(block);
-    lv_label_set_text(ctx->bypass_dot, plug->enabled ? LV_SYMBOL_OK : LV_SYMBOL_CLOSE);
-    lv_obj_set_style_text_color(ctx->bypass_dot,
-        plug->enabled ? UI_COLOR_ACTIVE : UI_COLOR_BYPASS, 0);
-    lv_obj_align(ctx->bypass_dot, LV_ALIGN_BOTTOM_RIGHT, 0, 0);
+    lv_obj_t *dot = lv_label_create(block);
+    lv_label_set_text(dot, plug->enabled ? LV_SYMBOL_OK : LV_SYMBOL_CLOSE);
+    lv_obj_set_style_text_color(dot, plug->enabled ? UI_COLOR_ACTIVE : UI_COLOR_BYPASS, 0);
+    lv_obj_align(dot, LV_ALIGN_BOTTOM_RIGHT, 0, 0);
 
     lv_obj_add_event_cb(block, block_tap_cb,        LV_EVENT_CLICKED,      ctx);
     lv_obj_add_event_cb(block, block_long_press_cb, LV_EVENT_LONG_PRESSED, ctx);

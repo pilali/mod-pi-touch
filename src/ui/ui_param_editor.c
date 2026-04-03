@@ -115,7 +115,7 @@ void ui_param_editor_show(int instance_id, const char *plugin_label,
     lv_obj_set_style_pad_all(scroll, 0, 0);
     lv_obj_set_flex_flow(scroll, LV_FLEX_FLOW_ROW_WRAP);
     lv_obj_set_flex_align(scroll, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
-    lv_obj_set_style_gap(scroll, 16, 0);
+    lv_obj_set_style_pad_row(scroll, 16, 0); lv_obj_set_style_pad_column(scroll, 16, 0);
     lv_obj_add_flag(scroll, LV_OBJ_FLAG_SCROLLABLE);
 
     /* Create a control widget for each control input port */
@@ -133,7 +133,7 @@ void ui_param_editor_show(int instance_id, const char *plugin_label,
         lv_obj_set_style_pad_all(card, 8, 0);
         lv_obj_set_flex_flow(card, LV_FLEX_FLOW_COLUMN);
         lv_obj_set_flex_align(card, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-        lv_obj_set_style_gap(card, 4, 0);
+        lv_obj_set_style_pad_row(card, 4, 0); lv_obj_set_style_pad_column(card, 4, 0);
 
         /* Port name label */
         lv_obj_t *name_lbl = lv_label_create(card);
