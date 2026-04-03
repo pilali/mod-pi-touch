@@ -75,6 +75,12 @@ int main(int argc, char *argv[])
     }
     lv_linux_fbdev_set_file(disp, settings.fb_device);
 
+    /* Rotate 270° in software — physical framebuffer is 720×1280 portrait,
+     * this gives LVGL a logical 1280×720 landscape coordinate space.
+     * The touch reports in physical portrait (720×1280) without swapxy in
+     * config.txt; LVGL's indev rotation correctly maps it to landscape. */
+    lv_display_set_rotation(disp, LV_DISPLAY_ROTATION_270);
+
     /* Evdev touch input */
     lv_indev_t *indev = lv_evdev_create(LV_INDEV_TYPE_POINTER, settings.touch_device);
     if (!indev) {
