@@ -104,14 +104,10 @@ int lv2u_save_ttl(SordModel *model, const char *path, const char *base_uri)
     while (!sord_iter_end(it)) {
         SordQuad q;
         sord_iter_get(it, q);
-        SerdStatement stmt = {
-            .graph     = NULL,
-            .subject   = sord_node_to_serd_node(q[SORD_SUBJECT]),
-            .predicate = sord_node_to_serd_node(q[SORD_PREDICATE]),
-            .object    = sord_node_to_serd_node(q[SORD_OBJECT]),
-        };
-        serd_writer_write_statement(writer, 0, NULL,
-            stmt.subject, stmt.predicate, stmt.object, NULL, NULL);
+        const SerdNode *s = sord_node_to_serd_node(q[SORD_SUBJECT]);
+        const SerdNode *p = sord_node_to_serd_node(q[SORD_PREDICATE]);
+        const SerdNode *o = sord_node_to_serd_node(q[SORD_OBJECT]);
+        serd_writer_write_statement(writer, 0, NULL, s, p, o, NULL, NULL);
         sord_iter_next(it);
     }
     sord_iter_free(it);

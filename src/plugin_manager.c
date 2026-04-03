@@ -6,6 +6,8 @@
 #include <ctype.h>
 
 #include <lilv/lilv.h>
+#include <lv2/atom/atom.h>
+#include <lv2/midi/midi.h>
 #include "cJSON.h"
 
 /* ─── Internal state ─────────────────────────────────────────────────────────── */
@@ -37,7 +39,7 @@ static void extract_port(LilvPlugin *plugin, LilvPort *port, pm_port_info_t *pi)
 
     /* Type */
     LilvNode *audio  = lilv_new_uri(w, LV2_CORE__AudioPort);
-    LilvNode *midi   = lilv_new_uri(w, LV2_CORE__MidiPort);
+    LilvNode *midi   = lilv_new_uri(w, LV2_ATOM__AtomPort);  /* modern LV2 MIDI uses atom:AtomPort */
     LilvNode *ctrl   = lilv_new_uri(w, LV2_CORE__ControlPort);
     LilvNode *input  = lilv_new_uri(w, LV2_CORE__InputPort);
     LilvNode *output = lilv_new_uri(w, LV2_CORE__OutputPort);
