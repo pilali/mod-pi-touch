@@ -85,6 +85,8 @@
 /* ─── Drawing ───────────────────────────────────────────────────────────────── */
 #define LV_USE_DRAW_SW 1
 #define LV_DRAW_SW_COMPLEX 1
+/* Disable Helium SIMD ASM (Cortex-M55 only — not available on Pi 5 Cortex-A76) */
+#define LV_USE_DRAW_SW_ASM LV_DRAW_SW_ASM_NONE
 
 /* ─── Perf monitor (debug) ──────────────────────────────────────────────────── */
 #define LV_USE_PERF_MONITOR 0
