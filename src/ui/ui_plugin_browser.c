@@ -13,6 +13,8 @@ static lv_obj_t *g_search_ta   = NULL;
 static lv_obj_t *g_list        = NULL;
 static char      g_search[128] = "";
 
+static void plugin_select_cb(lv_event_t *e);
+
 static void refresh_list(void)
 {
     if (!g_list) return;
