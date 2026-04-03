@@ -37,11 +37,17 @@ void settings_init(mpt_settings_t *s)
 {
     memset(s, 0, sizeof(*s));
 
+    /* Resolve home directory dynamically */
+    const char *home = getenv("HOME");
+    if (!home || home[0] == '\0') home = "/home/pi";
+
+    char def_data[512], def_pb[512];
+    snprintf(def_data, sizeof(def_data), "%s/.mod-pi-touch", home);
+    snprintf(def_pb,   sizeof(def_pb),   "%s/.pedalboards",  home);
+
     /* Directories */
-    env_str("MPT_DATA_DIR",    s->data_dir,               sizeof(s->data_dir),
-            MPT_DEFAULT_DATA_DIR);
-    env_str("MPT_PEDALBOARDS", s->pedalboards_dir,         sizeof(s->pedalboards_dir),
-            MPT_DEFAULT_PEDALBOARDS_DIR);
+    env_str("MPT_DATA_DIR",    s->data_dir,               sizeof(s->data_dir),    def_data);
+    env_str("MPT_PEDALBOARDS", s->pedalboards_dir,         sizeof(s->pedalboards_dir), def_pb);
     env_str("MPT_FACTORY_DIR", s->factory_pedalboards_dir, sizeof(s->factory_pedalboards_dir),
             MPT_DEFAULT_FACTORY_DIR);
     env_str("LV2_PATH",        s->lv2_user_dir,            sizeof(s->lv2_user_dir),
