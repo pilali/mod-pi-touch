@@ -7,7 +7,7 @@
 
 #include <lvgl.h>
 #include <src/drivers/display/fb/lv_linux_fbdev.h>
-#include <src/drivers/indev/evdev/lv_evdev.h>
+#include <src/drivers/evdev/lv_evdev.h>
 
 #include "settings.h"
 #include "host_comm.h"

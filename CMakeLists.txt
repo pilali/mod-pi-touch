@@ -66,7 +66,7 @@ if(USE_FBDEV)
 endif()
 
 if(USE_EVDEV)
-    list(APPEND SOURCES ${LVGL_DIR}/src/drivers/indev/evdev/lv_evdev.c)
+    list(APPEND SOURCES ${LVGL_DIR}/src/drivers/evdev/lv_evdev.c)
     add_compile_definitions(LV_USE_EVDEV=1)
 endif()
 
