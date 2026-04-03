@@ -38,6 +38,13 @@ endif()
 set(LV_CONF_PATH ${CMAKE_SOURCE_DIR}/lv_conf.h CACHE STRING "" FORCE)
 add_subdirectory(${LVGL_DIR} lvgl EXCLUDE_FROM_ALL)
 
+# Remove Helium SIMD assembly — targets Cortex-M55, fails on Pi 5 Cortex-A76.
+# lv_conf_internal.h uses "#if 0 && defined(__ASSEMBLY__)" so C headers leak
+# into the assembler context regardless of LV_USE_DRAW_SW_ASM.
+get_target_property(_lvgl_srcs lvgl SOURCES)
+list(FILTER _lvgl_srcs EXCLUDE REGEX "helium")
+set_target_properties(lvgl PROPERTIES SOURCES "${_lvgl_srcs}")
+
 # ─── Source files ─────────────────────────────────────────────────────────────
 set(SOURCES
     src/main.c
