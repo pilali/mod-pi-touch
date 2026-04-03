@@ -75,11 +75,6 @@ int main(int argc, char *argv[])
     }
     lv_linux_fbdev_set_file(disp, settings.fb_device);
 
-    /* Rotate 270° — RPi Touch Display 2 is natively portrait (720×1280);
-     * rotating 270° gives landscape 1280×720. Touch coordinates are
-     * transformed automatically when the indev is attached to this display. */
-    lv_display_set_rotation(disp, LV_DISPLAY_ROTATION_270);
-
     /* Evdev touch input */
     lv_indev_t *indev = lv_evdev_create(LV_INDEV_TYPE_POINTER, settings.touch_device);
     if (!indev) {
