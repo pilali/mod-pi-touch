@@ -5,7 +5,7 @@
 /*
  * ui_app — Application root layout and navigation for mod-pi-touch
  *
- * Screen layout (1280×720):
+ * Screen layout (1280×720 landscape, after 270° rotation of native portrait):
  * ┌────────────────────────────────────────────────────────┐
  * │                   Top bar (60px)                       │
  * ├────────────────────────────────────────────────────────┤
@@ -20,7 +20,7 @@
 
 #define UI_TOP_BAR_H      60
 #define UI_SNAPSHOT_BAR_H 80
-#define UI_CANVAS_H       (1280 - UI_TOP_BAR_H - UI_SNAPSHOT_BAR_H)
+#define UI_CANVAS_H       (720 - UI_TOP_BAR_H - UI_SNAPSHOT_BAR_H)
 
 /* App screen identifiers */
 typedef enum {

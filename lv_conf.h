@@ -20,9 +20,9 @@
 #define LV_DEF_REFR_PERIOD 16   /* ~60 fps */
 #define LV_INDEV_DEF_READ_PERIOD 16
 
-/* ─── Display resolution (720×1280 portrait) ───────────────────────────────── */
-#define LV_HOR_RES_MAX 720
-#define LV_VER_RES_MAX 1280
+/* ─── Display resolution — logical after 270° rotation (landscape 1280×720) ── */
+#define LV_HOR_RES_MAX 1280
+#define LV_VER_RES_MAX 720
 
 /* ─── Linux framebuffer driver ─────────────────────────────────────────────── */
 #define LV_USE_LINUX_FBDEV 1
