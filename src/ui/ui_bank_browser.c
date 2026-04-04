@@ -82,6 +82,7 @@ static void refresh_pedalboard_list(void)
             if (dot) *dot = '\0';
             lv_obj_t *btn = lv_list_add_button(g_list, LV_SYMBOL_AUDIO, name);
             lv_obj_set_style_bg_color(btn, UI_COLOR_SURFACE, 0);
+            lv_obj_set_style_text_color(btn, UI_COLOR_TEXT, 0);
             lv_obj_add_event_cb(btn, pedal_select_cb, LV_EVENT_CLICKED, g_pb_paths[i]);
         }
     } else {
@@ -97,6 +98,7 @@ static void refresh_pedalboard_list(void)
             lv_obj_t *btn = lv_list_add_button(g_list, LV_SYMBOL_AUDIO,
                                                bank->pedals[i].title);
             lv_obj_set_style_bg_color(btn, UI_COLOR_SURFACE, 0);
+            lv_obj_set_style_text_color(btn, UI_COLOR_TEXT, 0);
             lv_obj_add_event_cb(btn, pedal_select_cb, LV_EVENT_CLICKED,
                                bank->pedals[i].bundle);
         }
