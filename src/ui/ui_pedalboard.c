@@ -84,6 +84,306 @@ static void on_block_remove(void *userdata)
     ui_pedalboard_refresh();
 }
 
+/* ─── Automatic graph layout ─────────────────────────────────────────────────
+ *
+ * Ignores stored canvas_x/y coordinates (kept for mod-ui compatibility).
+ * Computes positions from the connection graph:
+ *   - Columns = topological depth (longest path from sources)
+ *   - Rows    = position within column
+ *   - Each parent is vertically centered between its successors
+ *   - Each column is independently centered in the visible canvas height
+ */
+
+#define LAYOUT_BLOCK_W  160
+#define LAYOUT_BLOCK_H   80
+#define LAYOUT_H_GAP     80   /* horizontal gap between columns */
+#define LAYOUT_V_GAP     24   /* vertical gap between rows in same column */
+#define LAYOUT_STEP_X   (LAYOUT_BLOCK_W + LAYOUT_H_GAP)
+#define LAYOUT_STEP_Y   (LAYOUT_BLOCK_H + LAYOUT_V_GAP)
+#define LAYOUT_MAX_COLS  32
+#define LAYOUT_MAX_ADJ   16   /* max successors/predecessors per plugin */
+
+/* ─── I/O port indicators ────────────────────────────────────────────────────── */
+
+#define IO_DOT       18   /* circle/square diameter */
+#define IO_ROW_H     (IO_DOT + 14) /* vertical step between port indicators */
+#define IO_COL_W     72   /* width reserved on each side for I/O column */
+#define IO_LINE_X    26   /* x of the vertical bar within the I/O column */
+#define IO_LINE_W     2   /* thickness of the vertical bar */
+
+typedef struct {
+    char label[16]; /* "In 1", "In 2", "MIDI", "Out 1"… */
+    bool is_midi;
+} io_port_desc_t;
+
+/* Extract system port name from URI. Returns pointer into static buffer or NULL. */
+static const char *uri_to_sysport(const char *uri, const pedalboard_t *pb)
+{
+    char bundle_prefix[PB_PATH_MAX + 8];
+    snprintf(bundle_prefix, sizeof(bundle_prefix), "file://%s/", pb->path);
+    size_t prefix_len = strlen(bundle_prefix);
+
+    const char *rel = NULL;
+    if (strncmp(uri, bundle_prefix, prefix_len) == 0) {
+        rel = uri + prefix_len;
+    } else {
+        const char *path = (strncmp(uri, "file://", 7) == 0) ? uri + 7 : uri;
+        size_t blen = strlen(pb->path);
+        if (strncmp(path, pb->path, blen) == 0 && path[blen] == '/')
+            rel = path + blen + 1;
+    }
+    if (!rel) return NULL;
+    if (strchr(rel, '/')) return NULL; /* plugin port, not system */
+    return rel; /* "capture_1", "playback_2", "midi_capture_1" etc. */
+}
+
+/* Collect distinct system ports from 'from' (inputs) or 'to' (outputs) side.
+ * Returns count; fills descs[]. */
+static int collect_sysports(const pedalboard_t *pb, bool want_inputs,
+                              io_port_desc_t *descs, int max)
+{
+    int count = 0;
+    /* Gather unique names */
+    char names[16][64]; int n_names = 0;
+
+    for (int c = 0; c < pb->connection_count && n_names < 16; c++) {
+        const char *sp = want_inputs
+            ? uri_to_sysport(pb->connections[c].from, pb)
+            : uri_to_sysport(pb->connections[c].to,   pb);
+        if (!sp) continue;
+        /* Only inputs have "capture", outputs have "playback" */
+        bool is_cap  = (strstr(sp, "capture")  != NULL);
+        bool is_play = (strstr(sp, "playback") != NULL);
+        if (want_inputs  && !is_cap)  continue;
+        if (!want_inputs && !is_play) continue;
+        /* Deduplicate */
+        bool dup = false;
+        for (int k = 0; k < n_names; k++) if (strcmp(names[k], sp) == 0) { dup = true; break; }
+        if (!dup) snprintf(names[n_names++], 64, "%s", sp);
+    }
+
+    /* Sort: audio first (no "midi" prefix), then MIDI */
+    /* Simple bubble sort */
+    for (int a = 0; a < n_names - 1; a++)
+        for (int b = a+1; b < n_names; b++) {
+            bool a_midi = (strncmp(names[a], "midi", 4) == 0);
+            bool b_midi = (strncmp(names[b], "midi", 4) == 0);
+            if (!a_midi && !b_midi) continue; /* both audio — keep order */
+            if (a_midi && !b_midi) { char tmp[64]; memcpy(tmp,names[a],64); memcpy(names[a],names[b],64); memcpy(names[b],tmp,64); }
+        }
+
+    for (int i = 0; i < n_names && count < max; i++) {
+        bool is_midi = (strncmp(names[i], "midi", 4) == 0);
+        const char *num = strrchr(names[i], '_');
+        if (is_midi)
+            snprintf(descs[count].label, sizeof(descs[0].label), "MIDI");
+        else if (want_inputs)
+            snprintf(descs[count].label, sizeof(descs[0].label), "In %s",  num ? num+1 : "?");
+        else
+            snprintf(descs[count].label, sizeof(descs[0].label), "Out %s", num ? num+1 : "?");
+        descs[count].is_midi = is_midi;
+        count++;
+    }
+    return count;
+}
+
+/* Draw one I/O column (inputs on the left or outputs on the right).
+ * x_col is the left edge of the column area in the scroll container. */
+static void draw_io_column(lv_obj_t *parent, const io_port_desc_t *ports, int n,
+                            int x_col, int canvas_h, bool is_right)
+{
+    if (n == 0) return;
+
+    int total_h = n * IO_ROW_H - (IO_ROW_H - IO_DOT);
+    int start_y = (canvas_h - total_h) / 2;
+
+    /* Vertical bar */
+    lv_obj_t *bar = lv_obj_create(parent);
+    lv_obj_set_size(bar, IO_LINE_W, total_h + IO_DOT);
+    lv_obj_set_pos(bar, x_col + IO_LINE_X, start_y);
+    lv_obj_set_style_bg_color(bar, UI_COLOR_TEXT_DIM, 0);
+    lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(bar, 0, 0);
+    lv_obj_set_style_radius(bar, 1, 0);
+    lv_obj_clear_flag(bar, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+
+    for (int i = 0; i < n; i++) {
+        lv_coord_t cy = (lv_coord_t)(start_y + i * IO_ROW_H);
+
+        /* Circle (audio) or square (MIDI) */
+        lv_obj_t *dot = lv_obj_create(parent);
+        lv_obj_set_size(dot, IO_DOT, IO_DOT);
+        lv_obj_set_pos(dot, x_col + IO_LINE_X - IO_DOT/2, cy);
+        lv_obj_set_style_bg_color(dot,
+            ports[i].is_midi ? UI_COLOR_ACCENT : UI_COLOR_ACTIVE, 0);
+        lv_obj_set_style_bg_opa(dot, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_width(dot, 0, 0);
+        lv_obj_set_style_radius(dot,
+            ports[i].is_midi ? 3 : LV_RADIUS_CIRCLE, 0);
+        lv_obj_clear_flag(dot, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+
+        /* Label — to the right of the dot for inputs, left of the dot for outputs */
+        lv_obj_t *lbl = lv_label_create(parent);
+        lv_label_set_text(lbl, ports[i].label);
+        lv_obj_set_style_text_color(lbl, UI_COLOR_TEXT_DIM, 0);
+        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_12, 0);
+        if (is_right) {
+            /* Right column: label to the LEFT of the dot, right-aligned */
+            lv_obj_set_width(lbl, 44);
+            lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_RIGHT, 0);
+            lv_obj_set_pos(lbl, x_col + IO_LINE_X - IO_DOT/2 - 48, cy + 2);
+        } else {
+            /* Left column: label to the RIGHT of the dot */
+            lv_obj_set_pos(lbl, x_col + IO_LINE_X + IO_DOT/2 + 4, cy + 2);
+        }
+    }
+}
+
+/* Return the index in pb->plugins[] for the plugin whose symbol matches the
+ * URI, or -1 for system ports (capture/playback) and unknown URIs. */
+static int uri_to_plugin_idx(const char *uri, const pedalboard_t *pb)
+{
+    char bundle_prefix[PB_PATH_MAX + 8];
+    snprintf(bundle_prefix, sizeof(bundle_prefix), "file://%s/", pb->path);
+    size_t prefix_len = strlen(bundle_prefix);
+
+    const char *rel;
+    if (strncmp(uri, bundle_prefix, prefix_len) == 0) {
+        rel = uri + prefix_len;
+    } else {
+        const char *path = (strncmp(uri, "file://", 7) == 0) ? uri + 7 : uri;
+        size_t blen = strlen(pb->path);
+        if (strncmp(path, pb->path, blen) == 0 && path[blen] == '/')
+            rel = path + blen + 1;
+        else
+            return -1;
+    }
+
+    const char *slash = strchr(rel, '/');
+    if (!slash) return -1; /* hardware port */
+
+    char sym[PB_SYMBOL_MAX];
+    size_t slen = (size_t)(slash - rel);
+    if (slen >= sizeof(sym)) return -1;
+    memcpy(sym, rel, slen);
+    sym[slen] = '\0';
+
+    for (int i = 0; i < pb->plugin_count; i++)
+        if (strcmp(pb->plugins[i].symbol, sym) == 0)
+            return i;
+    return -1;
+}
+
+/* Compute display positions for each plugin in pb->plugins[].
+ * out_x / out_y arrays must have at least pb->plugin_count entries.
+ * canvas_h is the visible height to center into. */
+static void compute_layout(const pedalboard_t *pb,
+                            lv_coord_t *out_x, lv_coord_t *out_y,
+                            int canvas_h)
+{
+    int n = pb->plugin_count;
+    if (n == 0) return;
+
+    /* ── Build directed adjacency lists ── */
+    int adj_out[PB_MAX_PLUGINS][LAYOUT_MAX_ADJ], deg_out[PB_MAX_PLUGINS];
+    int adj_in [PB_MAX_PLUGINS][LAYOUT_MAX_ADJ], deg_in [PB_MAX_PLUGINS];
+    memset(deg_out, 0, sizeof(deg_out));
+    memset(deg_in,  0, sizeof(deg_in));
+
+    for (int c = 0; c < pb->connection_count; c++) {
+        int f = uri_to_plugin_idx(pb->connections[c].from, pb);
+        int t = uri_to_plugin_idx(pb->connections[c].to,   pb);
+        if (f < 0 || t < 0 || f == t) continue;
+        /* Deduplicate */
+        bool dup = false;
+        for (int k = 0; k < deg_out[f]; k++) if (adj_out[f][k] == t) { dup = true; break; }
+        if (!dup && deg_out[f] < LAYOUT_MAX_ADJ) adj_out[f][deg_out[f]++] = t;
+        dup = false;
+        for (int k = 0; k < deg_in[t]; k++)  if (adj_in[t][k]  == f) { dup = true; break; }
+        if (!dup && deg_in[t]  < LAYOUT_MAX_ADJ) adj_in[t][deg_in[t]++]   = f;
+    }
+
+    /* ── Assign columns via Kahn's BFS (longest path from sources) ── */
+    int col[PB_MAX_PLUGINS];
+    int topo[PB_MAX_PLUGINS], topo_n = 0;
+    int indeg_tmp[PB_MAX_PLUGINS];
+    memset(col, 0, sizeof(col));
+    for (int i = 0; i < n; i++) indeg_tmp[i] = deg_in[i];
+
+    int q[PB_MAX_PLUGINS]; int qh = 0, qt = 0;
+    for (int i = 0; i < n; i++) if (indeg_tmp[i] == 0) q[qt++] = i;
+
+    while (qh < qt) {
+        int u = q[qh++];
+        topo[topo_n++] = u;
+        for (int k = 0; k < deg_out[u]; k++) {
+            int v = adj_out[u][k];
+            if (col[u] + 1 > col[v]) col[v] = col[u] + 1;
+            if (--indeg_tmp[v] == 0) q[qt++] = v;
+        }
+    }
+
+    /* Remaining nodes (cycles / disconnected) placed in last column + 1 */
+    int max_col = 0;
+    for (int i = 0; i < n; i++) if (col[i] > max_col) max_col = col[i];
+    for (int i = 0; i < n; i++) {
+        bool found = false;
+        for (int k = 0; k < topo_n; k++) if (topo[k] == i) { found = true; break; }
+        if (!found) { col[i] = max_col + 1; topo[topo_n++] = i; }
+    }
+    max_col = 0;
+    for (int i = 0; i < n; i++) if (col[i] > max_col) max_col = col[i];
+
+    /* ── Group nodes by column in topological order → initial row assignment ── */
+    int  col_nodes[LAYOUT_MAX_COLS][PB_MAX_PLUGINS];
+    int  col_sz   [LAYOUT_MAX_COLS];
+    memset(col_sz, 0, sizeof(col_sz));
+    for (int ti = 0; ti < topo_n; ti++) {
+        int u = topo[ti], c = col[u];
+        if (c < LAYOUT_MAX_COLS) col_nodes[c][col_sz[c]++] = u;
+    }
+
+    /* row[] is floating-point: initially integer slots within each column */
+    float row[PB_MAX_PLUGINS];
+    for (int c = 0; c <= max_col; c++)
+        for (int j = 0; j < col_sz[c]; j++)
+            row[col_nodes[c][j]] = (float)j;
+
+    /* ── Center each parent between its immediate successors (right to left) ── */
+    for (int c = max_col - 1; c >= 0; c--) {
+        for (int j = 0; j < col_sz[c]; j++) {
+            int u = col_nodes[c][j];
+            float sum = 0.0f; int cnt = 0;
+            for (int k = 0; k < deg_out[u]; k++) {
+                int v = adj_out[u][k];
+                if (col[v] == c + 1) { sum += row[v]; cnt++; }
+            }
+            if (cnt > 0) row[u] = sum / (float)cnt;
+        }
+    }
+
+    /* ── Convert to pixel coordinates, centering each column independently ── */
+    for (int c = 0; c <= max_col; c++) {
+        if (col_sz[c] == 0) continue;
+
+        /* Find min/max row value in this column */
+        float rmin = row[col_nodes[c][0]], rmax = rmin;
+        for (int j = 1; j < col_sz[c]; j++) {
+            float r = row[col_nodes[c][j]];
+            if (r < rmin) rmin = r;
+            if (r > rmax) rmax = r;
+        }
+        float col_span_px = (rmax - rmin) * LAYOUT_STEP_Y;
+        int   start_y     = (canvas_h - LAYOUT_BLOCK_H - (int)col_span_px) / 2;
+
+        for (int j = 0; j < col_sz[c]; j++) {
+            int u = col_nodes[c][j];
+            out_x[u] = (lv_coord_t)(c * LAYOUT_STEP_X + 20);
+            out_y[u] = (lv_coord_t)(start_y + (int)((row[u] - rmin) * LAYOUT_STEP_Y));
+        }
+    }
+}
+
 /* ─── Refresh (rebuild UI from state) ───────────────────────────────────────── */
 
 void ui_pedalboard_refresh(void)
@@ -91,25 +391,51 @@ void ui_pedalboard_refresh(void)
     if (!g_canvas_scroll) return;
     /* Remove all block children, redraw */
     lv_obj_clean(g_canvas_scroll);
-    g_canvas = NULL;
+    g_canvas = NULL; /* canvas removed — scroll events must reach g_canvas_scroll */
 
-    /* Re-create canvas for lines */
-    g_canvas = lv_canvas_create(g_canvas_scroll);
-    lv_obj_set_size(g_canvas, CANVAS_W, CANVAS_H);
-    lv_obj_align(g_canvas, LV_ALIGN_TOP_LEFT, 0, 0);
-    lv_canvas_fill_bg(g_canvas, lv_color_hex(0x1A1A1A), LV_OPA_TRANSP);
+    /* ── Collect I/O ports ── */
+    io_port_desc_t io_in[16], io_out[16];
+    int n_in  = collect_sysports(&g_pedalboard, true,  io_in,  16);
+    int n_out = collect_sysports(&g_pedalboard, false, io_out, 16);
 
-    /* Create plugin blocks */
+    int left_offset = (n_in > 0) ? IO_COL_W : 16;
+
+    /* ── Compute plugin layout, then shift right to leave room for inputs ── */
+    lv_coord_t layout_x[PB_MAX_PLUGINS] = {0};
+    lv_coord_t layout_y[PB_MAX_PLUGINS] = {0};
+    compute_layout(&g_pedalboard, layout_x, layout_y, UI_CANVAS_H);
+
+    lv_coord_t max_right = 0;
+    for (int i = 0; i < g_pedalboard.plugin_count; i++) {
+        layout_x[i] += (lv_coord_t)left_offset;
+        lv_coord_t right = layout_x[i] + LAYOUT_BLOCK_W;
+        if (right > max_right) max_right = right;
+    }
+
+    /* ── Draw left I/O column (inputs) ── */
+    draw_io_column(g_canvas_scroll, io_in, n_in, 0, UI_CANVAS_H, false);
+
+    /* ── Create plugin blocks ── */
     for (int i = 0; i < g_pedalboard.plugin_count; i++) {
         pb_plugin_t *plug = &g_pedalboard.plugins[i];
         lv_obj_t *block = ui_plugin_block_create(
             g_canvas_scroll, plug,
             on_block_tap, on_block_bypass, on_block_remove,
             (void *)(intptr_t)plug->instance_id);
-        lv_obj_set_pos(block, (lv_coord_t)plug->canvas_x, (lv_coord_t)plug->canvas_y);
+        lv_obj_set_pos(block, layout_x[i], layout_y[i]);
     }
 
+    /* ── Draw right I/O column (outputs) ── */
+    int right_col_x = (g_pedalboard.plugin_count > 0)
+        ? (int)(max_right + LAYOUT_H_GAP / 2)
+        : left_offset;
+    draw_io_column(g_canvas_scroll, io_out, n_out, right_col_x, UI_CANVAS_H, true);
+
     redraw_connections();
+
+    /* ── Scroll to leftmost position (inputs visible) ── */
+    lv_obj_update_layout(g_canvas_scroll);
+    lv_obj_scroll_to(g_canvas_scroll, 0, 0, LV_ANIM_OFF);
 }
 
 /* ─── Init ───────────────────────────────────────────────────────────────────── */
