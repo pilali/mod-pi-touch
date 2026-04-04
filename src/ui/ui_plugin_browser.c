@@ -76,8 +76,9 @@ static void rebuild_category_tree(void)
     lv_obj_clean(g_scroll);
 
     for (int i = 0; i < g_cat_count; i++) {
-        /* Count plugins in this category */
-        int n_plugins = pm_plugins_in_category(g_cats[i], NULL, 0);
+        /* Get plugin count for this category */
+        int indices_tmp[512];
+        int n_plugins = pm_plugins_in_category(g_cats[i], indices_tmp, 512);
         if (n_plugins == 0) continue;
 
         /* Category header button */
@@ -98,11 +99,9 @@ static void rebuild_category_tree(void)
 
         if (!g_expanded[i]) continue;
 
-        /* Plugin rows — indented */
-        int indices[512];
-        int count = pm_plugins_in_category(g_cats[i], indices, 512);
-        for (int j = 0; j < count; j++) {
-            const pm_plugin_info_t *p = pm_plugin_at(indices[j]);
+        /* Plugin rows — indented (reuse indices_tmp filled above) */
+        for (int j = 0; j < n_plugins; j++) {
+            const pm_plugin_info_t *p = pm_plugin_at(indices_tmp[j]);
             if (!p) continue;
 
             lv_obj_t *row = lv_obj_create(g_scroll);
