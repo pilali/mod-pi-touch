@@ -5,6 +5,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <errno.h>
+#include <pwd.h>
 
 #include "cJSON.h"
 
@@ -37,21 +38,29 @@ void settings_init(mpt_settings_t *s)
 {
     memset(s, 0, sizeof(*s));
 
-    /* Resolve home directory dynamically */
-    const char *home = getenv("HOME");
+    /* Resolve home directory dynamically.
+     * When launched via sudo, $HOME is /root rather than the calling user's home.
+     * Use SUDO_USER env var (set by sudo) to find the real home directory. */
+    const char *home = NULL;
+    const char *sudo_user = getenv("SUDO_USER");
+    if (sudo_user && sudo_user[0] != '\0') {
+        struct passwd *pw = getpwnam(sudo_user);
+        if (pw && pw->pw_dir) home = pw->pw_dir;
+    }
+    if (!home || home[0] == '\0') home = getenv("HOME");
     if (!home || home[0] == '\0') home = "/home/pi";
 
-    char def_data[512], def_pb[512];
+    char def_data[512], def_pb[512], def_lv2[512];
     snprintf(def_data, sizeof(def_data), "%s/.mod-pi-touch", home);
     snprintf(def_pb,   sizeof(def_pb),   "%s/.pedalboards",  home);
+    snprintf(def_lv2,  sizeof(def_lv2),  "%s/.lv2",          home);
 
     /* Directories */
     env_str("MPT_DATA_DIR",    s->data_dir,               sizeof(s->data_dir),    def_data);
     env_str("MPT_PEDALBOARDS", s->pedalboards_dir,         sizeof(s->pedalboards_dir), def_pb);
     env_str("MPT_FACTORY_DIR", s->factory_pedalboards_dir, sizeof(s->factory_pedalboards_dir),
             MPT_DEFAULT_FACTORY_DIR);
-    env_str("LV2_PATH",        s->lv2_user_dir,            sizeof(s->lv2_user_dir),
-            MPT_DEFAULT_LV2_USER_DIR);
+    env_str("LV2_PATH",        s->lv2_user_dir,            sizeof(s->lv2_user_dir), def_lv2);
     snprintf(s->lv2_system_dir, sizeof(s->lv2_system_dir), "%s", MPT_DEFAULT_LV2_SYSTEM_DIR);
 
     /* Derived file paths */

@@ -88,8 +88,6 @@ int main(int argc, char *argv[])
                 settings.touch_device);
         /* Non-fatal: can run without touch for debugging */
     } else {
-        /* Associate indev with the rotated display so LVGL applies the correct
-         * coordinate transformation (ROTATION_270) when processing touch events. */
         lv_indev_set_display(indev, disp);
     }
 

@@ -1,15 +1,35 @@
 --- a/src/drivers/evdev/lv_evdev.c
 +++ b/src/drivers/evdev/lv_evdev.c
-@@ -100,8 +100,11 @@ static lv_point_t _evdev_process_pointer(lv_indev_t * indev, int x, int y)
-     int offset_x = lv_display_get_offset_x(disp);
-     int offset_y = lv_display_get_offset_y(disp);
+@@ -100,11 +100,22 @@ static lv_point_t _evdev_process_pointer(lv_indev_t * indev, int x, int y)
+     int swapped_x = dsc->swap_axes ? y : x;
+     int swapped_y = dsc->swap_axes ? x : y;
+
+-    int offset_x = lv_display_get_offset_x(disp);
+-    int offset_y = lv_display_get_offset_y(disp);
 -    int width = lv_display_get_horizontal_resolution(disp);
 -    int height = lv_display_get_vertical_resolution(disp);
-+    /* Use physical (pre-rotation) resolution so that evdev outputs coordinates
-+     * in physical display space. LVGL's indev rotation transform (lv_indev.c)
-+     * then maps them to the logical (post-rotation) coordinate space.
-+     * Using logical resolution here would cause a double transformation. */
-+    int width = lv_display_get_physical_horizontal_resolution(disp);
-+    int height = lv_display_get_physical_vertical_resolution(disp);
++    /* lv_display_get_offset_x/y apply rotation transforms and return wrong values
++     * for rotated displays. Since we run full-screen (no display offset), use 0.
++     *
++     * For rotated displays (90/270), evdev must output coords in the physical
++     * (pre-rotation) space so that LVGL indev_pointer_proc correctly maps them
++     * to logical landscape coordinates.
++     * Physical portrait width  = logical ver_res = lv_display_get_vertical_resolution()
++     * Physical portrait height = logical hor_res = lv_display_get_horizontal_resolution()
++     */
++    lv_display_rotation_t _rot = lv_display_get_rotation(disp);
++    int width, height;
++    if(_rot == LV_DISPLAY_ROTATION_90 || _rot == LV_DISPLAY_ROTATION_270) {
++        width  = lv_display_get_vertical_resolution(disp);
++        height = lv_display_get_horizontal_resolution(disp);
++    } else {
++        width  = lv_display_get_horizontal_resolution(disp);
++        height = lv_display_get_vertical_resolution(disp);
++    }
 
      lv_point_t p;
+-    p.x = _evdev_calibrate(swapped_x, dsc->min_x, dsc->max_x, offset_x, offset_x + width - 1);
+-    p.y = _evdev_calibrate(swapped_y, dsc->min_y, dsc->max_y, offset_y, offset_y + height - 1);
++    p.x = _evdev_calibrate(swapped_x, dsc->min_x, dsc->max_x, 0, width - 1);
++    p.y = _evdev_calibrate(swapped_y, dsc->min_y, dsc->max_y, 0, height - 1);
+     return p;
