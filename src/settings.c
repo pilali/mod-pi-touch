@@ -64,8 +64,10 @@ void settings_init(mpt_settings_t *s)
     snprintf(s->lv2_system_dir, sizeof(s->lv2_system_dir), "%s", MPT_DEFAULT_LV2_SYSTEM_DIR);
 
     /* Derived file paths */
-    snprintf(s->banks_file,       sizeof(s->banks_file),
-             "%s/%s", s->data_dir, MPT_DEFAULT_BANKS_FILE);
+    /* Banks are stored by mod-ui in ~/data/banks.json, not in our data dir. */
+    char def_banks[512];
+    snprintf(def_banks, sizeof(def_banks), "%s/data/banks.json", home);
+    env_str("MPT_BANKS_FILE", s->banks_file, sizeof(s->banks_file), def_banks);
     snprintf(s->last_state_file,  sizeof(s->last_state_file),
              "%s/%s", s->data_dir, MPT_DEFAULT_LAST_STATE_FILE);
     snprintf(s->prefs_file,       sizeof(s->prefs_file),

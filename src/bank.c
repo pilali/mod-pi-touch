@@ -40,7 +40,9 @@ int bank_load(const char *path, bank_list_t *list)
         bank_t *bank = &list->banks[list->bank_count];
         memset(bank, 0, sizeof(*bank));
 
-        cJSON *name = cJSON_GetObjectItem(bank_obj, "name");
+        /* mod-ui banks.json uses "title" at bank level; older format used "name" */
+        cJSON *name = cJSON_GetObjectItem(bank_obj, "title");
+        if (!cJSON_IsString(name)) name = cJSON_GetObjectItem(bank_obj, "name");
         if (cJSON_IsString(name))
             snprintf(bank->name, sizeof(bank->name), "%s", name->valuestring);
 

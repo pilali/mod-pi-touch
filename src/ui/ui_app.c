@@ -85,7 +85,7 @@ static void create_top_bar(void)
     lv_obj_set_style_bg_color(btn_banks, UI_COLOR_PRIMARY, 0);
     lv_obj_add_event_cb(btn_banks, btn_banks_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t *lbl = lv_label_create(btn_banks);
-    lv_label_set_text(lbl, LV_SYMBOL_LIST " Banks");
+    lv_label_set_text(lbl, LV_SYMBOL_LIST " Pedalboards");
     lv_obj_center(lbl);
 
     /* Pedalboard title (center) */
