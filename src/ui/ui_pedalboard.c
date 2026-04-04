@@ -140,6 +140,54 @@ void ui_pedalboard_init(lv_obj_t *parent)
 
 /* ─── Load / Save ────────────────────────────────────────────────────────────── */
 
+/* Convert a TTL port URI (ingen:tail / ingen:head) to a mod-host Jack port name.
+ *
+ * TTL stores full URIs like:
+ *   file:///path/to/pb.ttl/plugin_sym/port_sym  →  effect_<id>:port_sym
+ *   file:///path/to/pb.ttl/capture_1            →  system:capture_1
+ *   file:///path/to/pb.ttl/playback_1           →  system:playback_1
+ *   file:///path/to/pb.ttl/midi_capture_1       →  system:midi_capture_1
+ *   file:///path/to/pb.ttl/midi_playback_1      →  system:midi_playback_1
+ *
+ * Returns true if conversion succeeded. */
+static bool uri_to_jack_port(const char *uri, const pedalboard_t *pb,
+                              char *out, size_t outsz)
+{
+    /* Strip scheme + host to get the path portion after the .ttl file */
+    const char *ttl_marker = strstr(uri, ".ttl");
+    if (!ttl_marker) return false;
+    /* Advance past ".ttl" and the following "/" */
+    const char *after_ttl = ttl_marker + 4;
+    if (*after_ttl == '/') after_ttl++;
+
+    /* Split into at most two components: [plugin_sym/]port_sym */
+    const char *slash = strchr(after_ttl, '/');
+    if (!slash) {
+        /* Single component — hardware port */
+        const char *port_name = after_ttl;
+        snprintf(out, outsz, "system:%s", port_name);
+        return true;
+    }
+
+    /* Two components: plugin_sym / port_sym */
+    char plugin_sym[PB_SYMBOL_MAX];
+    size_t sym_len = (size_t)(slash - after_ttl);
+    if (sym_len >= sizeof(plugin_sym)) return false;
+    memcpy(plugin_sym, after_ttl, sym_len);
+    plugin_sym[sym_len] = '\0';
+
+    const char *port_sym = slash + 1;
+
+    /* Look up instance_id by symbol */
+    for (int i = 0; i < pb->plugin_count; i++) {
+        if (strcmp(pb->plugins[i].symbol, plugin_sym) == 0) {
+            snprintf(out, outsz, "effect_%d:%s", pb->plugins[i].instance_id, port_sym);
+            return true;
+        }
+    }
+    return false;
+}
+
 void ui_pedalboard_load(const char *bundle_path)
 {
     /* Save current if modified */
@@ -154,7 +202,57 @@ void ui_pedalboard_load(const char *bundle_path)
     }
     g_pb_loaded = true;
 
-    /* Load into mod-host */
+    /* ── Rebuild mod-host state ── */
+
+    /* 1. Clear all existing plugins */
+    host_remove_all();
+
+    /* 2. Add plugins, set bypass and port values */
+    for (int i = 0; i < g_pedalboard.plugin_count; i++) {
+        pb_plugin_t *plug = &g_pedalboard.plugins[i];
+        plug->instance_id = i; /* sequential instance IDs */
+
+        if (host_add_plugin(plug->instance_id, plug->uri) < 0) {
+            fprintf(stderr, "[pedalboard] Failed to add plugin %s\n", plug->uri);
+            continue;
+        }
+
+        if (!plug->enabled)
+            host_bypass(plug->instance_id, true);
+
+        if (plug->preset_uri[0])
+            host_preset_load(plug->instance_id, plug->preset_uri);
+
+        for (int j = 0; j < plug->port_count; j++) {
+            pb_port_t *port = &plug->ports[j];
+            host_param_set(plug->instance_id, port->symbol, port->value);
+        }
+
+        /* MIDI CC bindings */
+        for (int j = 0; j < plug->port_count; j++) {
+            pb_port_t *port = &plug->ports[j];
+            if (port->midi_channel >= 0 && port->midi_cc >= 0) {
+                host_midi_map(plug->instance_id, port->symbol,
+                              port->midi_channel, port->midi_cc,
+                              port->midi_min, port->midi_max);
+            }
+        }
+    }
+
+    /* 3. Make audio/MIDI connections */
+    for (int i = 0; i < g_pedalboard.connection_count; i++) {
+        pb_connection_t *conn = &g_pedalboard.connections[i];
+        char from[256], to[256];
+        if (uri_to_jack_port(conn->from, &g_pedalboard, from, sizeof(from)) &&
+            uri_to_jack_port(conn->to,   &g_pedalboard, to,   sizeof(to))) {
+            host_connect(from, to);
+        } else {
+            fprintf(stderr, "[pedalboard] Cannot resolve connection: %s → %s\n",
+                    conn->from, conn->to);
+        }
+    }
+
+    /* 4. Restore LV2 plugin state (internal state beyond control ports) */
     host_state_load(bundle_path);
 
     ui_app_update_title(g_pedalboard.name, false);

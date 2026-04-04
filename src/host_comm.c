@@ -369,6 +369,11 @@ int host_disconnect_all(const char *port)
     return host_comm_send_sync(cmd, NULL, 0, 3000);
 }
 
+int host_remove_all(void)
+{
+    return host_comm_send_sync("remove -1", NULL, 0, 5000);
+}
+
 int host_state_load(const char *dir)
 {
     char cmd[HOST_CMD_MAX];

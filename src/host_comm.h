@@ -44,6 +44,7 @@ int host_comm_send_sync(const char *cmd, char *val_buf, size_t val_bufsz, int ti
 
 /* ─── High-level helpers ──────────────────────────────────────────────────────── */
 
+int host_remove_all(void);
 int host_add_plugin(int instance, const char *uri);
 int host_remove_plugin(int instance);
 int host_bypass(int instance, bool bypass);
