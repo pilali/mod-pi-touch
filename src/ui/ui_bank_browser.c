@@ -25,6 +25,9 @@ static int   g_pb_count = 0;
 static lv_obj_t *g_filter_btns[FILTER_BTNS_MAX];
 static int       g_filter_btn_count = 0;
 
+/* Pending load path (used by save-confirm dialog callbacks) */
+static char g_pending_bundle[PB_PATH_MAX];
+
 /* ─── Helpers ────────────────────────────────────────────────────────────────── */
 
 static void free_pb_paths(void)
@@ -49,12 +52,120 @@ static void update_filter_styles(void)
 
 /* ─── List refresh ───────────────────────────────────────────────────────────── */
 
+/* ─── Save-confirm dialog helpers ───────────────────────────────────────────── */
+
+static void do_load(bool save_first)
+{
+    if (save_first)
+        ui_pedalboard_save();
+    ui_app_show_screen(UI_SCREEN_PEDALBOARD);
+    ui_pedalboard_load(g_pending_bundle);
+}
+
+static void save_and_load_cb(lv_event_t *e)
+{
+    lv_obj_t *overlay = lv_event_get_user_data(e);
+    lv_obj_del(overlay);
+    do_load(true);
+}
+
+static void discard_and_load_cb(lv_event_t *e)
+{
+    lv_obj_t *overlay = lv_event_get_user_data(e);
+    lv_obj_del(overlay);
+    do_load(false);
+}
+
+static void cancel_load_cb(lv_event_t *e)
+{
+    lv_obj_t *overlay = lv_event_get_user_data(e);
+    lv_obj_del(overlay);
+    /* Stay in bank browser — do nothing */
+}
+
+static void show_save_confirm(const char *pb_name)
+{
+    lv_obj_t *overlay = lv_obj_create(lv_layer_top());
+    lv_obj_set_size(overlay, LV_PCT(100), LV_PCT(100));
+    lv_obj_set_style_bg_color(overlay, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(overlay, LV_OPA_70, 0);
+    lv_obj_center(overlay);
+
+    lv_obj_t *box = lv_obj_create(overlay);
+    lv_obj_set_size(box, 560, 180);
+    lv_obj_center(box);
+    lv_obj_set_style_bg_color(box, UI_COLOR_SURFACE, 0);
+    lv_obj_set_style_border_color(box, UI_COLOR_PRIMARY, 0);
+    lv_obj_set_style_border_width(box, 2, 0);
+    lv_obj_set_style_radius(box, 10, 0);
+    lv_obj_set_flex_flow(box, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(box, LV_FLEX_ALIGN_SPACE_EVENLY,
+                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_all(box, 16, 0);
+    lv_obj_set_style_pad_row(box, 12, 0);
+
+    /* Message */
+    char msg[PB_NAME_MAX + 40];
+    snprintf(msg, sizeof(msg), "Save changes to '%s'?", pb_name);
+    lv_obj_t *lbl = lv_label_create(box);
+    lv_label_set_text(lbl, msg);
+    lv_obj_set_style_text_color(lbl, UI_COLOR_TEXT, 0);
+    lv_obj_set_style_text_font(lbl, &lv_font_montserrat_18, 0);
+    lv_obj_set_width(lbl, LV_PCT(100));
+
+    /* Button row */
+    lv_obj_t *row = lv_obj_create(box);
+    lv_obj_set_size(row, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_EVENLY,
+                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(row, 0, 0);
+    lv_obj_set_style_pad_all(row, 0, 0);
+
+    /* Save */
+    lv_obj_t *btn_save = lv_btn_create(row);
+    lv_obj_set_size(btn_save, 140, 44);
+    lv_obj_set_style_bg_color(btn_save, UI_COLOR_PRIMARY, 0);
+    lv_obj_t *lbl_s = lv_label_create(btn_save);
+    lv_label_set_text(lbl_s, LV_SYMBOL_SAVE " Save");
+    lv_obj_center(lbl_s);
+    lv_obj_add_event_cb(btn_save, save_and_load_cb, LV_EVENT_CLICKED, overlay);
+
+    /* Don't Save */
+    lv_obj_t *btn_discard = lv_btn_create(row);
+    lv_obj_set_size(btn_discard, 160, 44);
+    lv_obj_set_style_bg_color(btn_discard, UI_COLOR_BYPASS, 0);
+    lv_obj_t *lbl_d = lv_label_create(btn_discard);
+    lv_label_set_text(lbl_d, "Don't Save");
+    lv_obj_center(lbl_d);
+    lv_obj_add_event_cb(btn_discard, discard_and_load_cb, LV_EVENT_CLICKED, overlay);
+
+    /* Cancel */
+    lv_obj_t *btn_cancel = lv_btn_create(row);
+    lv_obj_set_size(btn_cancel, 120, 44);
+    lv_obj_set_style_bg_color(btn_cancel, UI_COLOR_ACCENT, 0);
+    lv_obj_t *lbl_c = lv_label_create(btn_cancel);
+    lv_label_set_text(lbl_c, "Cancel");
+    lv_obj_center(lbl_c);
+    lv_obj_add_event_cb(btn_cancel, cancel_load_cb, LV_EVENT_CLICKED, overlay);
+}
+
 static void pedal_select_cb(lv_event_t *e)
 {
     const char *bundle = lv_event_get_user_data(e);
     if (!bundle) return;
-    ui_pedalboard_load(bundle);
+
+    snprintf(g_pending_bundle, sizeof(g_pending_bundle), "%s", bundle);
+
+    /* Show save-confirm only if a pedalboard is loaded with unsaved changes */
+    if (ui_pedalboard_is_loaded() && ui_pedalboard_get()->modified) {
+        show_save_confirm(ui_pedalboard_get()->name);
+        return;
+    }
+
     ui_app_show_screen(UI_SCREEN_PEDALBOARD);
+    ui_pedalboard_load(g_pending_bundle);
 }
 
 static void refresh_pedalboard_list(void)

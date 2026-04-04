@@ -314,21 +314,27 @@ int host_add_plugin(int instance, const char *uri)
 {
     char cmd[HOST_CMD_MAX];
     snprintf(cmd, sizeof(cmd), "add %s %d", uri, instance);
-    return host_comm_send_sync(cmd, NULL, 0, 5000);
+    int r = host_comm_send_sync(cmd, NULL, 0, 5000);
+    fprintf(stderr, "[host] add %d %s → %d\n", instance, uri, r);
+    return r;
 }
 
 int host_remove_plugin(int instance)
 {
     char cmd[HOST_CMD_MAX];
     snprintf(cmd, sizeof(cmd), "remove %d", instance);
-    return host_comm_send_sync(cmd, NULL, 0, 5000);
+    int r = host_comm_send_sync(cmd, NULL, 0, 5000);
+    fprintf(stderr, "[host] remove %d → %d\n", instance, r);
+    return r;
 }
 
 int host_bypass(int instance, bool bypass)
 {
     char cmd[HOST_CMD_MAX];
     snprintf(cmd, sizeof(cmd), "bypass %d %d", instance, bypass ? 1 : 0);
-    return host_comm_send_sync(cmd, NULL, 0, 2000);
+    int r = host_comm_send_sync(cmd, NULL, 0, 2000);
+    fprintf(stderr, "[host] bypass %d %d → %d\n", instance, bypass ? 1 : 0, r);
+    return r;
 }
 
 int host_param_set(int instance, const char *symbol, float value)
@@ -352,7 +358,9 @@ int host_connect(const char *port_a, const char *port_b)
 {
     char cmd[HOST_CMD_MAX];
     snprintf(cmd, sizeof(cmd), "connect %s %s", port_a, port_b);
-    return host_comm_send_sync(cmd, NULL, 0, 3000);
+    int r = host_comm_send_sync(cmd, NULL, 0, 3000);
+    fprintf(stderr, "[host] connect %s %s → %d\n", port_a, port_b, r);
+    return r;
 }
 
 int host_disconnect(const char *port_a, const char *port_b)
@@ -371,7 +379,9 @@ int host_disconnect_all(const char *port)
 
 int host_remove_all(void)
 {
-    return host_comm_send_sync("remove -1", NULL, 0, 5000);
+    int r = host_comm_send_sync("remove -1", NULL, 0, 5000);
+    fprintf(stderr, "[host] remove -1 (all) → %d\n", r);
+    return r;
 }
 
 int host_state_load(const char *dir)

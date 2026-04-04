@@ -6,15 +6,31 @@
 #include <stdio.h>
 
 /* ─── Editor state ───────────────────────────────────────────────────────────── */
-static lv_obj_t        *g_modal      = NULL;
-static int              g_instance   = -1;
-static param_change_cb_t g_value_cb  = NULL;
-static void            *g_value_ud   = NULL;
+static lv_obj_t           *g_modal       = NULL;
+static int                 g_instance    = -1;
+static bool                g_enabled     = true;
+static bypass_toggle_cb_t  g_bypass_cb   = NULL;
+static void               *g_bypass_ud   = NULL;
+static lv_obj_t           *g_bypass_lbl  = NULL; /* label in bypass toggle btn */
+static param_change_cb_t   g_value_cb    = NULL;
+static void               *g_value_ud    = NULL;
 
 /* Array of (symbol, arc_obj) for live update */
 #define MAX_ARCS 64
 static struct { char symbol[PB_SYMBOL_MAX]; lv_obj_t *arc; lv_obj_t *val_lbl; } g_arcs[MAX_ARCS];
 static int g_arc_count = 0;
+
+/* ─── Bypass toggle callback ─────────────────────────────────────────────────── */
+
+static void bypass_btn_cb(lv_event_t *e)
+{
+    (void)e;
+    g_enabled = !g_enabled;
+    lv_label_set_text(g_bypass_lbl, g_enabled ? "Enabled" : "Disabled");
+    lv_obj_t *btn = lv_obj_get_parent(g_bypass_lbl);
+    lv_obj_set_style_bg_color(btn, g_enabled ? UI_COLOR_ACTIVE : UI_COLOR_BYPASS, 0);
+    if (g_bypass_cb) g_bypass_cb(g_bypass_ud);
+}
 
 /* ─── Arc change callback ────────────────────────────────────────────────────── */
 typedef struct {
@@ -58,14 +74,20 @@ static void close_cb(lv_event_t *e)
 
 void ui_param_editor_show(int instance_id, const char *plugin_label,
                           pb_port_t *ports, int port_count,
+                          bool enabled,
+                          bypass_toggle_cb_t bypass_cb, void *bypass_ud,
                           param_change_cb_t value_cb, void *userdata)
 {
     if (g_modal) ui_param_editor_close();
 
-    g_instance  = instance_id;
-    g_value_cb  = value_cb;
-    g_value_ud  = userdata;
-    g_arc_count = 0;
+    g_instance   = instance_id;
+    g_enabled    = enabled;
+    g_bypass_cb  = bypass_cb;
+    g_bypass_ud  = bypass_ud;
+    g_bypass_lbl = NULL;
+    g_value_cb   = value_cb;
+    g_value_ud   = userdata;
+    g_arc_count  = 0;
 
     /* Modal overlay */
     g_modal = lv_obj_create(lv_layer_top());
@@ -82,6 +104,9 @@ void ui_param_editor_show(int instance_id, const char *plugin_label,
     lv_obj_set_style_border_width(panel, 2, 0);
     lv_obj_set_style_radius(panel, 12, 0);
     lv_obj_set_style_pad_all(panel, 16, 0);
+    lv_obj_set_flex_flow(panel, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(panel, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+    lv_obj_set_style_pad_row(panel, 8, 0);
 
     /* Title bar */
     lv_obj_t *title_row = lv_obj_create(panel);
@@ -108,7 +133,7 @@ void ui_param_editor_show(int instance_id, const char *plugin_label,
 
     /* Params grid (scrollable) */
     lv_obj_t *scroll = lv_obj_create(panel);
-    lv_obj_set_size(scroll, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_size(scroll, LV_PCT(100), 0); /* height managed by flex_grow */
     lv_obj_set_flex_grow(scroll, 1);
     lv_obj_set_style_bg_opa(scroll, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(scroll, 0, 0);
@@ -117,6 +142,38 @@ void ui_param_editor_show(int instance_id, const char *plugin_label,
     lv_obj_set_flex_align(scroll, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
     lv_obj_set_style_pad_row(scroll, 16, 0); lv_obj_set_style_pad_column(scroll, 16, 0);
     lv_obj_add_flag(scroll, LV_OBJ_FLAG_SCROLLABLE);
+
+    /* Bypass toggle button — always first */
+    {
+        lv_obj_t *card = lv_obj_create(scroll);
+        lv_obj_set_size(card, 130, 160);
+        lv_obj_set_style_bg_color(card, UI_COLOR_BG, 0);
+        lv_obj_set_style_border_color(card, UI_COLOR_SURFACE, 0);
+        lv_obj_set_style_border_width(card, 1, 0);
+        lv_obj_set_style_radius(card, 8, 0);
+        lv_obj_set_style_pad_all(card, 8, 0);
+        lv_obj_set_flex_flow(card, LV_FLEX_FLOW_COLUMN);
+        lv_obj_set_flex_align(card, LV_FLEX_ALIGN_CENTER,
+                              LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+        lv_obj_set_style_pad_row(card, 8, 0);
+
+        lv_obj_t *name_lbl = lv_label_create(card);
+        lv_label_set_text(name_lbl, "bypass");
+        lv_label_set_long_mode(name_lbl, LV_LABEL_LONG_DOT);
+        lv_obj_set_width(name_lbl, LV_PCT(100));
+        lv_obj_set_style_text_color(name_lbl, UI_COLOR_TEXT_DIM, 0);
+        lv_obj_set_style_text_font(name_lbl, &lv_font_montserrat_12, 0);
+
+        lv_obj_t *btn = lv_btn_create(card);
+        lv_obj_set_size(btn, 90, 44);
+        lv_obj_set_style_bg_color(btn,
+            g_enabled ? UI_COLOR_ACTIVE : UI_COLOR_BYPASS, 0);
+        g_bypass_lbl = lv_label_create(btn);
+        lv_label_set_text(g_bypass_lbl, g_enabled ? "Enabled" : "Disabled");
+        lv_obj_center(g_bypass_lbl);
+        lv_obj_set_style_text_font(g_bypass_lbl, &lv_font_montserrat_14, 0);
+        lv_obj_add_event_cb(btn, bypass_btn_cb, LV_EVENT_CLICKED, NULL);
+    }
 
     /* Create a control widget for each control input port */
     for (int i = 0; i < port_count; i++) {

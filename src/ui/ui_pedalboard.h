@@ -16,3 +16,7 @@ void ui_pedalboard_load(const char *bundle_path);
 
 /* Called by host feedback to update a port value indicator. */
 void ui_pedalboard_update_param(int instance_id, const char *symbol, float value);
+
+/* Accessors */
+pedalboard_t *ui_pedalboard_get(void);
+bool          ui_pedalboard_is_loaded(void);

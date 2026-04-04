@@ -152,15 +152,15 @@ static int pb_load_ttl(pedalboard_t *pb, const char *ttl_path)
     SordNode *lv2_maximum   = lv2u_uri(NS_LV2   "maximum");
     SordNode *doap_name     = lv2u_uri(NS_DOAP  "name");
 
-    /* Pedalboard name */
+    /* Pedalboard name — save pb_subj for later use in connection iteration */
+    SordNode *pb_subj = NULL;
     {
-        /* The pedalboard subject has rdf:type pedal:Pedalboard */
         SordNode *pedal_pb = lv2u_uri(NS_PEDAL "Pedalboard");
         SordIter *it = lv2u_iter_type(m, pedal_pb);
         sord_node_free(lv2u_world(), pedal_pb);
         if (it && !sord_iter_end(it)) {
             SordQuad q; sord_iter_get(it, q);
-            SordNode *pb_subj = q[SORD_SUBJECT];
+            pb_subj = q[SORD_SUBJECT]; /* owned by model, valid until sord_free */
             lv2u_get_string(m, pb_subj, doap_name, pb->name, sizeof(pb->name));
         }
         if (it) sord_iter_free(it);
@@ -249,25 +249,32 @@ static int pb_load_ttl(pedalboard_t *pb, const char *ttl_path)
         if (it) sord_iter_free(it);
     }
 
-    /* Connections (ingen:Arc) */
-    {
-        SordIter *it = lv2u_iter_type(m, ingen_Arc);
+    /* Connections: iterate ingen:arc values from the pedalboard subject.
+     * mod-ui writes connections as blank nodes listed under ingen:arc on the
+     * pedalboard subject. We use SPO index {pb_subj, ingen:arc, ?} which is
+     * always available, then look up tail/head from each arc blank node. */
+    if (pb_subj) {
+        SordNode *ingen_arc_pred = lv2u_uri(NS_INGEN "arc");
+        SordQuad pat = { pb_subj, ingen_arc_pred, NULL, NULL };
+        SordIter *it = sord_find(m, pat);
         while (it && !sord_iter_end(it)) {
             SordQuad q; sord_iter_get(it, q);
-            SordNode *subj = q[SORD_SUBJECT];
+            SordNode *arc_node = q[SORD_OBJECT];
 
-            char from[PB_URI_MAX] = "", to[PB_URI_MAX] = "";
-            SordNode *tail = lv2u_get_object(m, subj, ingen_tail);
-            SordNode *head = lv2u_get_object(m, subj, ingen_head);
-            if (tail) snprintf(from, sizeof(from), "%s", sord_node_get_string(tail));
-            if (head) snprintf(to,   sizeof(to),   "%s", sord_node_get_string(head));
+            SordNode *tail_node = lv2u_get_object(m, arc_node, ingen_tail);
+            SordNode *head_node = lv2u_get_object(m, arc_node, ingen_head);
 
-            if (from[0] && to[0])
-                pb_add_connection(pb, from, to);
+            if (tail_node && head_node) {
+                const char *from = (const char *)sord_node_get_string(tail_node);
+                const char *to   = (const char *)sord_node_get_string(head_node);
+                if (from && to)
+                    pb_add_connection(pb, from, to);
+            }
 
             sord_iter_next(it);
         }
         if (it) sord_iter_free(it);
+        sord_node_free(lv2u_world(), ingen_arc_pred);
     }
 
     /* Free cached URIs */
@@ -315,7 +322,7 @@ int pb_load(pedalboard_t *pb, const char *bundle_dir)
     }
 
     /* Find the .ttl entry in manifest */
-    char main_ttl[PB_NAME_MAX] = "";
+    char main_ttl[PB_PATH_MAX] = "";
     {
         SordIter *it = sord_begin(manifest);
         while (it && !sord_iter_end(it)) {
@@ -330,6 +337,7 @@ int pb_load(pedalboard_t *pb, const char *bundle_dir)
         if (it) sord_iter_free(it);
     }
     sord_free(manifest);
+    fprintf(stderr, "[pedalboard] main_ttl uri = '%s'\n", main_ttl);
 
     /* Extract pedalboard name from main TTL filename */
     if (main_ttl[0]) {
@@ -347,14 +355,24 @@ int pb_load(pedalboard_t *pb, const char *bundle_dir)
         if (dot && strcmp(dot, ".pedalboard") == 0) *dot = '\0';
     }
 
-    /* Load main TTL */
+    /* Load main TTL.
+     * sord resolves relative URIs to absolute file:// URIs when parsing, so
+     * main_ttl may be "file:///path/to/Foo.ttl" rather than just "Foo.ttl".
+     * Convert file:// URI → filesystem path; fall back to bundle_dir/name.ttl. */
     char ttl_path[PB_PATH_MAX];
-    if (main_ttl[0])
-        snprintf(ttl_path, sizeof(ttl_path), "%s/%s", bundle_dir, main_ttl);
-    else
+    if (main_ttl[0]) {
+        if (strncmp(main_ttl, "file://", 7) == 0)
+            snprintf(ttl_path, sizeof(ttl_path), "%s", main_ttl + 7);
+        else
+            snprintf(ttl_path, sizeof(ttl_path), "%s/%s", bundle_dir, main_ttl);
+    } else {
         snprintf(ttl_path, sizeof(ttl_path), "%s/%s.ttl", bundle_dir, pb->name);
+    }
 
+    fprintf(stderr, "[pedalboard] loading ttl: %s\n", ttl_path);
     int r = pb_load_ttl(pb, ttl_path);
+    fprintf(stderr, "[pedalboard] pb_load_ttl returned %d, plugins=%d conns=%d\n",
+            r, pb->plugin_count, pb->connection_count);
     if (r < 0) return r;
 
     /* Load snapshots */

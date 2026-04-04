@@ -47,6 +47,8 @@ static void redraw_connections(void)
 
 /* ─── Block event handlers ───────────────────────────────────────────────────── */
 
+static void on_block_bypass(void *userdata);  /* forward declaration */
+
 static void on_block_tap(void *userdata)
 {
     int instance_id = (int)(intptr_t)userdata;
@@ -55,6 +57,8 @@ static void on_block_tap(void *userdata)
 
     ui_param_editor_show(instance_id, plug->label,
                          plug->ports, plug->port_count,
+                         plug->enabled,
+                         on_block_bypass, (void *)(intptr_t)instance_id,
                          NULL, NULL);
 }
 
@@ -112,6 +116,11 @@ void ui_pedalboard_refresh(void)
 
 void ui_pedalboard_init(lv_obj_t *parent)
 {
+    /* Reset canvas pointers — previous LVGL objects may have been freed
+     * by lv_obj_clean(content_area) during screen transitions. */
+    g_canvas_scroll = NULL;
+    g_canvas        = NULL;
+
     /* Scrollable container */
     g_canvas_scroll = lv_obj_create(parent);
     lv_obj_set_size(g_canvas_scroll, LV_PCT(100), LV_PCT(100));
@@ -142,38 +151,49 @@ void ui_pedalboard_init(lv_obj_t *parent)
 
 /* Convert a TTL port URI (ingen:tail / ingen:head) to a mod-host Jack port name.
  *
- * TTL stores full URIs like:
- *   file:///path/to/pb.ttl/plugin_sym/port_sym  →  effect_<id>:port_sym
- *   file:///path/to/pb.ttl/capture_1            →  system:capture_1
- *   file:///path/to/pb.ttl/playback_1           →  system:playback_1
- *   file:///path/to/pb.ttl/midi_capture_1       →  system:midi_capture_1
- *   file:///path/to/pb.ttl/midi_playback_1      →  system:midi_playback_1
+ * sord resolves relative URIs against the TTL base, producing absolute file://
+ * URIs relative to the bundle directory. Examples:
+ *   file:///path/bundle/plugin_sym/port_sym  →  effect_<id>:port_sym
+ *   file:///path/bundle/capture_1            →  system:capture_1
+ *   file:///path/bundle/playback_1           →  system:playback_1
+ *   file:///path/bundle/midi_capture_1       →  system:midi_capture_1
  *
  * Returns true if conversion succeeded. */
 static bool uri_to_jack_port(const char *uri, const pedalboard_t *pb,
                               char *out, size_t outsz)
 {
-    /* Strip scheme + host to get the path portion after the .ttl file */
-    const char *ttl_marker = strstr(uri, ".ttl");
-    if (!ttl_marker) return false;
-    /* Advance past ".ttl" and the following "/" */
-    const char *after_ttl = ttl_marker + 4;
-    if (*after_ttl == '/') after_ttl++;
+    /* Build the file:// prefix for the bundle dir to strip */
+    char bundle_prefix[PB_PATH_MAX + 7];
+    snprintf(bundle_prefix, sizeof(bundle_prefix), "file://%s/", pb->path);
+    size_t prefix_len = strlen(bundle_prefix);
 
-    /* Split into at most two components: [plugin_sym/]port_sym */
-    const char *slash = strchr(after_ttl, '/');
+    const char *rel;
+    if (strncmp(uri, bundle_prefix, prefix_len) == 0) {
+        rel = uri + prefix_len;
+    } else {
+        /* Fallback: strip file:// and find the last two path components */
+        const char *path = (strncmp(uri, "file://", 7) == 0) ? uri + 7 : uri;
+        /* Try to strip bundle path without file:// */
+        size_t blen = strlen(pb->path);
+        if (strncmp(path, pb->path, blen) == 0 && path[blen] == '/')
+            rel = path + blen + 1;
+        else
+            return false;
+    }
+
+    /* rel is now "plugin_sym/port_sym" or "hardware_port" */
+    const char *slash = strchr(rel, '/');
     if (!slash) {
-        /* Single component — hardware port */
-        const char *port_name = after_ttl;
-        snprintf(out, outsz, "system:%s", port_name);
+        /* Single component — hardware port: capture_N, playback_N, midi_* */
+        snprintf(out, outsz, "system:%s", rel);
         return true;
     }
 
     /* Two components: plugin_sym / port_sym */
     char plugin_sym[PB_SYMBOL_MAX];
-    size_t sym_len = (size_t)(slash - after_ttl);
+    size_t sym_len = (size_t)(slash - rel);
     if (sym_len >= sizeof(plugin_sym)) return false;
-    memcpy(plugin_sym, after_ttl, sym_len);
+    memcpy(plugin_sym, rel, sym_len);
     plugin_sym[sym_len] = '\0';
 
     const char *port_sym = slash + 1;
@@ -190,16 +210,15 @@ static bool uri_to_jack_port(const char *uri, const pedalboard_t *pb,
 
 void ui_pedalboard_load(const char *bundle_path)
 {
-    /* Save current if modified */
-    if (g_pb_loaded && g_pedalboard.modified) {
-        pb_save(&g_pedalboard);
-    }
-
     pb_init(&g_pedalboard);
+    fprintf(stderr, "[ui_pedalboard] loading bundle: %s\n", bundle_path);
     if (pb_load(&g_pedalboard, bundle_path) < 0) {
+        fprintf(stderr, "[ui_pedalboard] pb_load failed\n");
         ui_app_show_message("Error", "Failed to load pedalboard.", 0);
         return;
     }
+    fprintf(stderr, "[ui_pedalboard] loaded '%s': %d plugins, %d connections\n",
+            g_pedalboard.name, g_pedalboard.plugin_count, g_pedalboard.connection_count);
     g_pb_loaded = true;
 
     /* ── Rebuild mod-host state ── */

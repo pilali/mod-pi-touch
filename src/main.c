@@ -89,6 +89,7 @@ int main(int argc, char *argv[])
         /* Non-fatal: can run without touch for debugging */
     } else {
         lv_indev_set_display(indev, disp);
+        lv_indev_set_long_press_time(indev, 800); /* ms — long press opens param editor */
     }
 
     /* ── LV2 world ── */
