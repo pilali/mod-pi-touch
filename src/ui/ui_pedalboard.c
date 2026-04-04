@@ -433,6 +433,17 @@ void ui_pedalboard_refresh(void)
 
     redraw_connections();
 
+    /* ── Transparent spacer defines the scrollable extent ──
+     * LVGL derives the scroll range from child bounding boxes.
+     * A 1×1 invisible object at (CANVAS_W-1, CANVAS_H/2) forces
+     * the container to be scrollable over CANVAS_W × CANVAS_H. */
+    lv_obj_t *spacer = lv_obj_create(g_canvas_scroll);
+    lv_obj_set_size(spacer, 1, 1);
+    lv_obj_set_pos(spacer, CANVAS_W - 1, CANVAS_H / 2);
+    lv_obj_set_style_bg_opa(spacer, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(spacer, 0, 0);
+    lv_obj_clear_flag(spacer, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+
     /* ── Scroll to leftmost position (inputs visible) ── */
     lv_obj_update_layout(g_canvas_scroll);
     lv_obj_scroll_to(g_canvas_scroll, 0, 0, LV_ANIM_OFF);
@@ -458,8 +469,10 @@ void ui_pedalboard_init(lv_obj_t *parent)
     lv_obj_set_style_radius(g_canvas_scroll, 0, 0);
     lv_obj_add_flag(g_canvas_scroll, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_scroll_dir(g_canvas_scroll, LV_DIR_ALL);
-    lv_obj_set_content_width(g_canvas_scroll, CANVAS_W);
-    lv_obj_set_content_height(g_canvas_scroll, CANVAS_H);
+    /* NOTE: do NOT call set_content_width/height here — those resize the object
+     * itself, not the scroll range.  The scroll range is determined by child
+     * extents.  A transparent spacer added in ui_pedalboard_refresh() defines
+     * the scrollable area. */
 
     if (g_pb_loaded) {
         ui_pedalboard_refresh();
