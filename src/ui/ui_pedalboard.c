@@ -433,13 +433,21 @@ void ui_pedalboard_refresh(void)
 
     redraw_connections();
 
-    /* ── Transparent spacer defines the scrollable extent ──
-     * LVGL derives the scroll range from child bounding boxes.
-     * A 1×1 invisible object at (CANVAS_W-1, CANVAS_H/2) forces
-     * the container to be scrollable over CANVAS_W × CANVAS_H. */
+    /* ── Dynamic content dimensions ──────────────────────────────────────────
+     * content_w: right edge of output column + small margin.
+     * content_h: maximum plugin bottom edge (layout algorithm already centres
+     *            within UI_CANVAS_H, so this just accounts for tall stacks).
+     * The spacer child pins the LVGL scroll range to these bounds. */
+    int content_w = right_col_x + IO_COL_W + 20;
+    int content_h = UI_CANVAS_H;
+    for (int i = 0; i < g_pedalboard.plugin_count; i++) {
+        int bot = (int)layout_y[i] + LAYOUT_BLOCK_H + 20;
+        if (bot > content_h) content_h = bot;
+    }
+
     lv_obj_t *spacer = lv_obj_create(g_canvas_scroll);
     lv_obj_set_size(spacer, 1, 1);
-    lv_obj_set_pos(spacer, CANVAS_W - 1, CANVAS_H / 2);
+    lv_obj_set_pos(spacer, content_w - 1, content_h / 2);
     lv_obj_set_style_bg_opa(spacer, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(spacer, 0, 0);
     lv_obj_clear_flag(spacer, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
