@@ -3,6 +3,17 @@
 #include <stdbool.h>
 #include <stddef.h>
 
+/* ─── Audio / MIDI settings ──────────────────────────────────────────────── */
+#define MPT_MAX_MIDI_PORTS 16
+
+typedef struct {
+    char  dev[64];      /* ALSA raw-MIDI device, e.g. "hw:1,0,0" */
+    char  label[64];    /* human-readable name */
+    bool  is_input;
+    bool  is_output;
+    bool  enabled;      /* user-selected */
+} mpt_midi_port_t;
+
 /* ─── Default paths (override with env vars) ─────────────────────────────── */
 #define MPT_DEFAULT_DATA_DIR          "/home/pi/.mod-pi-touch"
 #define MPT_DEFAULT_PEDALBOARDS_DIR   "/home/pi/.pedalboards"
@@ -49,6 +60,17 @@ typedef struct {
     /* Runtime state */
     bool dark_mode;
     int  ui_scale_percent;  /* 100 = normal */
+
+    /* Audio / JACK */
+    char jack_audio_device[32];  /* ALSA device, e.g. "hw:1"  (empty = hw:0) */
+    int  jack_buffer_size;       /* 32 / 64 / 128 / 256       (0 = default 128) */
+    int  jack_bit_depth;         /* 16 or 24                  (0 = default 24) */
+    int  audio_capture_ch;       /* capture channels shown on I/O display (0 = auto) */
+    int  audio_playback_ch;      /* playback channels shown on I/O display (0 = auto) */
+
+    /* MIDI */
+    mpt_midi_port_t midi_ports[MPT_MAX_MIDI_PORTS];
+    int             midi_port_count;
 } mpt_settings_t;
 
 /* Load settings from env vars + config file. Safe to call multiple times. */
@@ -57,5 +79,9 @@ void settings_init(mpt_settings_t *s);
 /* Return global singleton (initialized at startup) */
 mpt_settings_t *settings_get(void);
 
-/* Persist user prefs (dark_mode, ui_scale) to prefs.json */
+/* Persist user prefs (dark_mode, ui_scale, audio, MIDI) to prefs.json */
 int settings_save_prefs(const mpt_settings_t *s);
+
+/* Restart jackd with the current audio settings.
+ * Returns 0 if the command was dispatched (does not guarantee JACK is up). */
+int settings_apply_jack(const mpt_settings_t *s);

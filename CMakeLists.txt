@@ -51,6 +51,7 @@ set_target_properties(lvgl PROPERTIES SOURCES "${_lvgl_srcs}")
 set(SOURCES
     src/main.c
     src/host_comm.c
+    src/hw_detect.c
     src/pedalboard.c
     src/snapshot.c
     src/plugin_manager.c

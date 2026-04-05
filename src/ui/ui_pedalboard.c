@@ -5,6 +5,7 @@
 #include "../pedalboard.h"
 #include "../host_comm.h"
 #include "../settings.h"
+#include "../hw_detect.h"
 
 #include <string.h>
 #include <stdio.h>
@@ -185,6 +186,52 @@ static int collect_sysports(const pedalboard_t *pb, bool want_inputs,
         count++;
     }
     return count;
+}
+
+/* Build the I/O descriptor list for one side of the pedalboard.
+ *
+ * Priority:
+ *  1. If audio settings have been configured (audio_capture_ch > 0): use
+ *     settings directly — show exactly the channels and enabled MIDI ports.
+ *  2. Otherwise fall back to inferring from the loaded TTL connections
+ *     (legacy behaviour, used before first configuration). */
+static int collect_io_descs(bool want_inputs, io_port_desc_t *descs, int max)
+{
+    mpt_settings_t *s = settings_get();
+
+    if (s->audio_capture_ch > 0) {
+        int count = 0;
+        int ach = want_inputs ? s->audio_capture_ch : s->audio_playback_ch;
+
+        /* Audio channels */
+        for (int i = 0; i < ach && count < max; i++) {
+            snprintf(descs[count].label, sizeof(descs[0].label),
+                     want_inputs ? "In %d" : "Out %d", i + 1);
+            descs[count].is_midi = false;
+            count++;
+        }
+
+        /* Enabled MIDI ports */
+        int midi_idx = 0;
+        for (int i = 0; i < s->midi_port_count && count < max; i++) {
+            mpt_midi_port_t *p = &s->midi_ports[i];
+            if (!p->enabled) continue;
+            bool relevant = want_inputs ? p->is_input : p->is_output;
+            if (!relevant) continue;
+            midi_idx++;
+            /* "MIDI" if only one, "M1"/"M2" if several */
+            if (midi_idx == 1 && s->midi_port_count <= 1)
+                snprintf(descs[count].label, sizeof(descs[0].label), "MIDI");
+            else
+                snprintf(descs[count].label, sizeof(descs[0].label), "M%d", midi_idx);
+            descs[count].is_midi = true;
+            count++;
+        }
+        return count;
+    }
+
+    /* Fallback: infer from TTL connections */
+    return collect_sysports(&g_pedalboard, want_inputs, descs, max);
 }
 
 /* Draw one I/O column (inputs on the left or outputs on the right).
@@ -395,8 +442,8 @@ void ui_pedalboard_refresh(void)
 
     /* ── Collect I/O ports ── */
     io_port_desc_t io_in[16], io_out[16];
-    int n_in  = collect_sysports(&g_pedalboard, true,  io_in,  16);
-    int n_out = collect_sysports(&g_pedalboard, false, io_out, 16);
+    int n_in  = collect_io_descs(true,  io_in,  16);
+    int n_out = collect_io_descs(false, io_out, 16);
 
     int left_offset = (n_in > 0) ? IO_COL_W : 16;
 

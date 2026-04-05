@@ -85,8 +85,15 @@ void settings_init(mpt_settings_t *s)
     env_str("MPT_TOUCH_DEVICE", s->touch_device, sizeof(s->touch_device), MPT_DEFAULT_TOUCH_DEVICE);
 
     /* Defaults */
-    s->dark_mode       = true;
+    s->dark_mode        = true;
     s->ui_scale_percent = 100;
+
+    /* Audio/JACK defaults */
+    snprintf(s->jack_audio_device, sizeof(s->jack_audio_device), "hw:0");
+    s->jack_buffer_size  = 128;
+    s->jack_bit_depth    = 24;
+    s->audio_capture_ch  = 0;   /* 0 = not yet configured, infer from TTL */
+    s->audio_playback_ch = 0;
 
     /* Ensure directories exist */
     ensure_dir(s->data_dir);
@@ -108,6 +115,45 @@ void settings_init(mpt_settings_t *s)
                 if (cJSON_IsBool(dm)) s->dark_mode = cJSON_IsTrue(dm);
                 cJSON *sc = cJSON_GetObjectItem(root, "ui_scale");
                 if (cJSON_IsNumber(sc)) s->ui_scale_percent = (int)sc->valuedouble;
+
+                /* Audio / JACK */
+                cJSON *jd = cJSON_GetObjectItem(root, "jack_device");
+                if (cJSON_IsString(jd))
+                    snprintf(s->jack_audio_device, sizeof(s->jack_audio_device),
+                             "%s", jd->valuestring);
+                cJSON *jb = cJSON_GetObjectItem(root, "jack_buffer");
+                if (cJSON_IsNumber(jb)) s->jack_buffer_size = (int)jb->valuedouble;
+                cJSON *jbit = cJSON_GetObjectItem(root, "jack_bits");
+                if (cJSON_IsNumber(jbit)) s->jack_bit_depth = (int)jbit->valuedouble;
+                cJSON *jich = cJSON_GetObjectItem(root, "audio_in_ch");
+                if (cJSON_IsNumber(jich)) s->audio_capture_ch = (int)jich->valuedouble;
+                cJSON *joch = cJSON_GetObjectItem(root, "audio_out_ch");
+                if (cJSON_IsNumber(joch)) s->audio_playback_ch = (int)joch->valuedouble;
+
+                /* MIDI ports */
+                cJSON *jmidi = cJSON_GetObjectItem(root, "midi_ports");
+                if (cJSON_IsArray(jmidi)) {
+                    int mc = cJSON_GetArraySize(jmidi);
+                    s->midi_port_count = 0;
+                    for (int i = 0; i < mc && i < MPT_MAX_MIDI_PORTS; i++) {
+                        cJSON *mp = cJSON_GetArrayItem(jmidi, i);
+                        if (!cJSON_IsObject(mp)) continue;
+                        mpt_midi_port_t *p = &s->midi_ports[s->midi_port_count++];
+                        cJSON *mdev = cJSON_GetObjectItem(mp, "dev");
+                        cJSON *mlbl = cJSON_GetObjectItem(mp, "label");
+                        cJSON *min  = cJSON_GetObjectItem(mp, "input");
+                        cJSON *mout = cJSON_GetObjectItem(mp, "output");
+                        cJSON *men  = cJSON_GetObjectItem(mp, "enabled");
+                        if (cJSON_IsString(mdev))
+                            snprintf(p->dev, sizeof(p->dev), "%s", mdev->valuestring);
+                        if (cJSON_IsString(mlbl))
+                            snprintf(p->label, sizeof(p->label), "%s", mlbl->valuestring);
+                        p->is_input  = cJSON_IsTrue(min);
+                        p->is_output = cJSON_IsTrue(mout);
+                        p->enabled   = cJSON_IsTrue(men);
+                    }
+                }
+
                 cJSON_Delete(root);
             }
             free(buf);
@@ -117,6 +163,22 @@ void settings_init(mpt_settings_t *s)
 
     g_settings   = *s;
     g_initialized = true;
+}
+
+int settings_apply_jack(const mpt_settings_t *s)
+{
+    /* Build a jackd command from current settings.
+     * -S forces 16-bit (shorts); without it jackd uses the device's native
+     * depth (typically 24 or 32 bit internally). */
+    const char *shortflag = (s->jack_bit_depth == 16) ? "-S " : "";
+    char cmd[512];
+    snprintf(cmd, sizeof(cmd),
+             "pkill -f jackd 2>/dev/null; sleep 1; "
+             "jackd -P 70 -d alsa -d %s -r 48000 -p %d -n 3 %s"
+             "> /tmp/jackd.log 2>&1 &",
+             s->jack_audio_device, s->jack_buffer_size, shortflag);
+    fprintf(stderr, "[settings] JACK restart: %s\n", cmd);
+    return system(cmd);
 }
 
 mpt_settings_t *settings_get(void)
@@ -129,8 +191,28 @@ mpt_settings_t *settings_get(void)
 int settings_save_prefs(const mpt_settings_t *s)
 {
     cJSON *root = cJSON_CreateObject();
-    cJSON_AddBoolToObject(root,   "dark_mode", s->dark_mode);
-    cJSON_AddNumberToObject(root, "ui_scale",  s->ui_scale_percent);
+    cJSON_AddBoolToObject(root,   "dark_mode",    s->dark_mode);
+    cJSON_AddNumberToObject(root, "ui_scale",     s->ui_scale_percent);
+
+    /* Audio / JACK */
+    cJSON_AddStringToObject(root, "jack_device",  s->jack_audio_device);
+    cJSON_AddNumberToObject(root, "jack_buffer",  s->jack_buffer_size);
+    cJSON_AddNumberToObject(root, "jack_bits",    s->jack_bit_depth);
+    cJSON_AddNumberToObject(root, "audio_in_ch",  s->audio_capture_ch);
+    cJSON_AddNumberToObject(root, "audio_out_ch", s->audio_playback_ch);
+
+    /* MIDI ports */
+    cJSON *jmidi_arr = cJSON_AddArrayToObject(root, "midi_ports");
+    for (int i = 0; i < s->midi_port_count; i++) {
+        cJSON *mp = cJSON_CreateObject();
+        cJSON_AddStringToObject(mp, "dev",     s->midi_ports[i].dev);
+        cJSON_AddStringToObject(mp, "label",   s->midi_ports[i].label);
+        cJSON_AddBoolToObject(mp,   "input",   s->midi_ports[i].is_input);
+        cJSON_AddBoolToObject(mp,   "output",  s->midi_ports[i].is_output);
+        cJSON_AddBoolToObject(mp,   "enabled", s->midi_ports[i].enabled);
+        cJSON_AddItemToArray(jmidi_arr, mp);
+    }
+
     char *str = cJSON_Print(root);
     cJSON_Delete(root);
     if (!str) return -1;
