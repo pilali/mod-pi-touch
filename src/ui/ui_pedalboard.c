@@ -190,48 +190,61 @@ static int collect_sysports(const pedalboard_t *pb, bool want_inputs,
 
 /* Build the I/O descriptor list for one side of the pedalboard.
  *
- * Priority:
- *  1. If audio settings have been configured (audio_capture_ch > 0): use
- *     settings directly — show exactly the channels and enabled MIDI ports.
- *  2. Otherwise fall back to inferring from the loaded TTL connections
- *     (legacy behaviour, used before first configuration). */
+ * Audio and MIDI are handled independently:
+ *  - Audio: use audio_capture/playback_ch from settings if configured (>0),
+ *    otherwise infer from TTL connections (legacy fallback).
+ *  - MIDI: always use enabled ports from settings if any are known;
+ *    otherwise infer from TTL connections.
+ * This means the user can enable MIDI in settings without first configuring
+ * the audio channel count, and vice-versa. */
 static int collect_io_descs(bool want_inputs, io_port_desc_t *descs, int max)
 {
     mpt_settings_t *s = settings_get();
 
-    if (s->audio_capture_ch > 0) {
-        int count = 0;
-        int ach = want_inputs ? s->audio_capture_ch : s->audio_playback_ch;
+    bool has_audio_cfg = (s->audio_capture_ch > 0);
+    bool has_midi_cfg  = (s->midi_port_count  > 0);
 
-        /* Audio channels */
+    /* Pure TTL fallback when nothing has been configured yet */
+    if (!has_audio_cfg && !has_midi_cfg)
+        return collect_sysports(&g_pedalboard, want_inputs, descs, max);
+
+    int count = 0;
+
+    /* ── Audio ── */
+    if (has_audio_cfg) {
+        int ach = want_inputs ? s->audio_capture_ch : s->audio_playback_ch;
         for (int i = 0; i < ach && count < max; i++) {
             snprintf(descs[count].label, sizeof(descs[0].label),
                      want_inputs ? "In %d" : "Out %d", i + 1);
             descs[count].is_midi = false;
             count++;
         }
-
-        /* Enabled MIDI ports */
-        int midi_idx = 0;
-        for (int i = 0; i < s->midi_port_count && count < max; i++) {
-            mpt_midi_port_t *p = &s->midi_ports[i];
-            if (!p->enabled) continue;
-            bool relevant = want_inputs ? p->is_input : p->is_output;
-            if (!relevant) continue;
-            midi_idx++;
-            /* "MIDI" if only one, "M1"/"M2" if several */
-            if (midi_idx == 1 && s->midi_port_count <= 1)
-                snprintf(descs[count].label, sizeof(descs[0].label), "MIDI");
-            else
-                snprintf(descs[count].label, sizeof(descs[0].label), "M%d", midi_idx);
-            descs[count].is_midi = true;
-            count++;
+    } else {
+        /* Audio only from TTL (MIDI will come from settings below) */
+        io_port_desc_t tmp[16];
+        int n = collect_sysports(&g_pedalboard, want_inputs, tmp, 16);
+        for (int i = 0; i < n && count < max; i++) {
+            if (!tmp[i].is_midi) descs[count++] = tmp[i];
         }
-        return count;
     }
 
-    /* Fallback: infer from TTL connections */
-    return collect_sysports(&g_pedalboard, want_inputs, descs, max);
+    /* ── MIDI ── */
+    int midi_idx = 0;
+    for (int i = 0; i < s->midi_port_count && count < max; i++) {
+        mpt_midi_port_t *p = &s->midi_ports[i];
+        if (!p->enabled) continue;
+        bool relevant = want_inputs ? p->is_input : p->is_output;
+        if (!relevant) continue;
+        midi_idx++;
+        if (midi_idx == 1)
+            snprintf(descs[count].label, sizeof(descs[0].label), "MIDI");
+        else
+            snprintf(descs[count].label, sizeof(descs[0].label), "M%d", midi_idx);
+        descs[count].is_midi = true;
+        count++;
+    }
+
+    return count;
 }
 
 /* Draw one I/O column (inputs on the left or outputs on the right).

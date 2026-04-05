@@ -12,11 +12,12 @@
 static lv_obj_t *g_dd_device   = NULL;
 static lv_obj_t *g_dd_buffer   = NULL;
 static lv_obj_t *g_dd_bits     = NULL;
+static lv_obj_t *g_dd_in_ch    = NULL;
+static lv_obj_t *g_dd_out_ch   = NULL;
 
 static hw_audio_device_t g_audio_devs[HW_MAX_AUDIO_DEVICES];
 static int                g_n_audio    = 0;
 
-/* One context per MIDI port checkbox */
 typedef struct { int port_idx; } midi_ctx_t;
 static midi_ctx_t g_midi_ctx[MPT_MAX_MIDI_PORTS];
 
@@ -38,7 +39,6 @@ static void cpu_refresh_cb(lv_event_t *e)
     lv_label_set_text(lbl, buf);
 }
 
-/* Styled row (surface card) with LV_FLEX_FLOW_ROW */
 static lv_obj_t *make_row(lv_obj_t *parent)
 {
     lv_obj_t *row = lv_obj_create(parent);
@@ -77,8 +77,6 @@ static void add_section_header(lv_obj_t *parent, const char *text)
     lv_obj_set_width(lbl, LV_PCT(100));
 }
 
-/* Dropdown row: "label" on the left, dropdown on the right.
- * Returns the dropdown widget. */
 static lv_obj_t *add_dropdown_row(lv_obj_t *parent, const char *label,
                                    const char *options, int sel)
 {
@@ -92,14 +90,14 @@ static lv_obj_t *add_dropdown_row(lv_obj_t *parent, const char *label,
     lv_obj_t *dd = lv_dropdown_create(row);
     lv_dropdown_set_options(dd, options);
     lv_dropdown_set_selected(dd, (uint16_t)sel);
-    lv_obj_set_width(dd, 320);
+    lv_obj_set_width(dd, 300);
     lv_obj_set_style_bg_color(dd, UI_COLOR_SURFACE, 0);
     lv_obj_set_style_border_color(dd, UI_COLOR_TEXT_DIM, 0);
     lv_obj_set_style_text_color(dd, UI_COLOR_TEXT, 0);
     return dd;
 }
 
-/* ─── Audio section callbacks ────────────────────────────────────────────────── */
+/* ─── Audio section ──────────────────────────────────────────────────────────── */
 
 static void apply_audio_cb(lv_event_t *e)
 {
@@ -114,7 +112,7 @@ static void apply_audio_cb(lv_event_t *e)
         snprintf(s->jack_audio_device, sizeof(s->jack_audio_device),
                  "%s", g_audio_devs[dev_sel].alsa_id);
 
-    /* Buffer size: index 0→32, 1→64, 2→128, 3→256 */
+    /* Buffer size */
     static const int buf_sizes[] = {32, 64, 128, 256};
     uint16_t buf_sel = lv_dropdown_get_selected(g_dd_buffer);
     s->jack_buffer_size = buf_sizes[buf_sel < 4 ? buf_sel : 2];
@@ -122,15 +120,82 @@ static void apply_audio_cb(lv_event_t *e)
     /* Bit depth */
     s->jack_bit_depth = (lv_dropdown_get_selected(g_dd_bits) == 0) ? 16 : 24;
 
+    /* Channel counts: index maps to 1, 2, 4, 6, 8 */
+    static const int ch_vals[] = {1, 2, 4, 6, 8};
+    uint16_t ich = lv_dropdown_get_selected(g_dd_in_ch);
+    uint16_t och = lv_dropdown_get_selected(g_dd_out_ch);
+    s->audio_capture_ch  = ch_vals[ich < 5 ? ich : 1];
+    s->audio_playback_ch = ch_vals[och < 5 ? och : 1];
+
     settings_save_prefs(s);
     settings_apply_jack(s);
 
+    /* Refresh pedalboard display with new channel counts */
+    if (ui_pedalboard_is_loaded())
+        ui_pedalboard_refresh();
+
     ui_app_show_message("Audio",
-        "JACK est en cours de redémarrage.\n"
-        "Rechargez le pedalboard si nécessaire.", 0);
+        "JACK restarting.\nReload pedalboard if needed.", 0);
 }
 
-/* ─── MIDI section callbacks ──────────────────────────────────────────────────── */
+static void build_audio_section(lv_obj_t *parent)
+{
+    mpt_settings_t *s = settings_get();
+
+    g_n_audio = hw_detect_audio(g_audio_devs, HW_MAX_AUDIO_DEVICES);
+
+    /* Device options string */
+    char dev_opts[HW_MAX_AUDIO_DEVICES * 80];
+    dev_opts[0] = '\0';
+    int cur_dev_sel = 0;
+    for (int i = 0; i < g_n_audio; i++) {
+        if (i > 0) strncat(dev_opts, "\n", sizeof(dev_opts) - strlen(dev_opts) - 1);
+        char entry[80];
+        snprintf(entry, sizeof(entry), "%s - %s",
+                 g_audio_devs[i].alsa_id, g_audio_devs[i].label);
+        strncat(dev_opts, entry, sizeof(dev_opts) - strlen(dev_opts) - 1);
+        if (strcmp(g_audio_devs[i].alsa_id, s->jack_audio_device) == 0)
+            cur_dev_sel = i;
+    }
+    if (g_n_audio == 0)
+        snprintf(dev_opts, sizeof(dev_opts), "%s", s->jack_audio_device);
+
+    /* Buffer size */
+    static const int buf_sizes[] = {32, 64, 128, 256};
+    int buf_sel = 2;
+    for (int i = 0; i < 4; i++)
+        if (buf_sizes[i] == s->jack_buffer_size) { buf_sel = i; break; }
+
+    /* Bit depth */
+    int bits_sel = (s->jack_bit_depth == 16) ? 0 : 1;
+
+    /* Channel count: map value to index in {1,2,4,6,8} */
+    static const int ch_vals[] = {1, 2, 4, 6, 8};
+    int in_ch_sel = 1, out_ch_sel = 1; /* default: 2 channels */
+    for (int i = 0; i < 5; i++) {
+        if (ch_vals[i] == s->audio_capture_ch)  in_ch_sel  = i;
+        if (ch_vals[i] == s->audio_playback_ch) out_ch_sel = i;
+    }
+
+    /* Dropdowns */
+    g_dd_device  = add_dropdown_row(parent, "Interface",   dev_opts,           cur_dev_sel);
+    g_dd_buffer  = add_dropdown_row(parent, "Buffer",      "32\n64\n128\n256", buf_sel);
+    g_dd_bits    = add_dropdown_row(parent, "Bit depth",   "16 bit\n24 bit",   bits_sel);
+    g_dd_in_ch   = add_dropdown_row(parent, "In channels", "1\n2\n4\n6\n8",    in_ch_sel);
+    g_dd_out_ch  = add_dropdown_row(parent, "Out channels","1\n2\n4\n6\n8",    out_ch_sel);
+    add_info_row(parent, "Sample rate", "48000 Hz (fixed)");
+
+    /* Apply button */
+    lv_obj_t *btn = lv_btn_create(parent);
+    lv_obj_set_size(btn, 220, 40);
+    lv_obj_set_style_bg_color(btn, UI_COLOR_PRIMARY, 0);
+    lv_obj_add_event_cb(btn, apply_audio_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *lbl = lv_label_create(btn);
+    lv_label_set_text(lbl, "Apply (restart JACK)");
+    lv_obj_center(lbl);
+}
+
+/* ─── MIDI section ───────────────────────────────────────────────────────────── */
 
 static void midi_toggle_cb(lv_event_t *e)
 {
@@ -147,94 +212,28 @@ static void midi_toggle_cb(lv_event_t *e)
         ui_pedalboard_refresh();
 }
 
-/* ─── Audio section ──────────────────────────────────────────────────────────── */
-
-static void build_audio_section(lv_obj_t *parent)
-{
-    mpt_settings_t *s = settings_get();
-
-    /* Detect available audio devices */
-    g_n_audio = hw_detect_audio(g_audio_devs, HW_MAX_AUDIO_DEVICES);
-
-    /* Build options string for the device dropdown */
-    char dev_opts[HW_MAX_AUDIO_DEVICES * 72];
-    dev_opts[0] = '\0';
-    int  cur_dev_sel = 0;
-    for (int i = 0; i < g_n_audio; i++) {
-        if (i > 0) strncat(dev_opts, "\n", sizeof(dev_opts) - strlen(dev_opts) - 1);
-        char entry[72];
-        snprintf(entry, sizeof(entry), "%s — %s",
-                 g_audio_devs[i].alsa_id, g_audio_devs[i].label);
-        strncat(dev_opts, entry, sizeof(dev_opts) - strlen(dev_opts) - 1);
-        if (strcmp(g_audio_devs[i].alsa_id, s->jack_audio_device) == 0)
-            cur_dev_sel = i;
-    }
-    if (g_n_audio == 0)
-        snprintf(dev_opts, sizeof(dev_opts), "%s", s->jack_audio_device);
-
-    /* Buffer size dropdown */
-    static const int buf_sizes[] = {32, 64, 128, 256};
-    int buf_sel = 2; /* default: 128 */
-    for (int i = 0; i < 4; i++)
-        if (buf_sizes[i] == s->jack_buffer_size) { buf_sel = i; break; }
-
-    /* Bit depth dropdown */
-    int bits_sel = (s->jack_bit_depth == 16) ? 0 : 1;
-
-    /* Dropdowns */
-    g_dd_device = add_dropdown_row(parent, "Interface",  dev_opts,         cur_dev_sel);
-    g_dd_buffer = add_dropdown_row(parent, "Buffer",     "32\n64\n128\n256", buf_sel);
-    g_dd_bits   = add_dropdown_row(parent, "Profondeur", "16 bit\n24 bit",   bits_sel);
-
-    /* Fixed sample rate info */
-    add_info_row(parent, "Échantillonnage", "48 000 Hz (fixe)");
-
-    /* Channel count rows */
-    {
-        char buf[8];
-        snprintf(buf, sizeof(buf), "%d", s->audio_capture_ch ? s->audio_capture_ch : 2);
-        add_info_row(parent, "Canaux entrée", buf);
-        snprintf(buf, sizeof(buf), "%d", s->audio_playback_ch ? s->audio_playback_ch : 2);
-        add_info_row(parent, "Canaux sortie", buf);
-    }
-
-    /* Apply button */
-    lv_obj_t *btn = lv_btn_create(parent);
-    lv_obj_set_size(btn, 200, 40);
-    lv_obj_set_style_bg_color(btn, UI_COLOR_PRIMARY, 0);
-    lv_obj_add_event_cb(btn, apply_audio_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_t *lbl = lv_label_create(btn);
-    lv_label_set_text(lbl, "Appliquer (redémarrer JACK)");
-    lv_obj_set_style_text_font(lbl, &lv_font_montserrat_12, 0);
-    lv_obj_center(lbl);
-}
-
-/* ─── MIDI section ───────────────────────────────────────────────────────────── */
-
 static void build_midi_section(lv_obj_t *parent)
 {
     mpt_settings_t *s = settings_get();
 
-    /* Scan hardware */
     hw_midi_port_t hw[HW_MAX_MIDI_PORTS];
     int n_hw = hw_detect_midi(hw, HW_MAX_MIDI_PORTS);
 
     if (n_hw == 0) {
         lv_obj_t *lbl = lv_label_create(parent);
-        lv_label_set_text(lbl, "Aucun périphérique MIDI détecté.");
+        lv_label_set_text(lbl, "No MIDI devices detected.");
         lv_obj_set_style_text_color(lbl, UI_COLOR_TEXT_DIM, 0);
         return;
     }
 
-    /* Merge detected ports into settings (preserving saved enabled state) */
+    /* Merge detected ports into settings */
     for (int i = 0; i < n_hw; i++) {
         int found = -1;
-        for (int j = 0; j < s->midi_port_count; j++) {
+        for (int j = 0; j < s->midi_port_count; j++)
             if (strcmp(s->midi_ports[j].dev, hw[i].dev) == 0) { found = j; break; }
-        }
         if (found < 0 && s->midi_port_count < MPT_MAX_MIDI_PORTS) {
             found = s->midi_port_count++;
-            snprintf(s->midi_ports[found].dev,   sizeof(s->midi_ports[0].dev),
+            snprintf(s->midi_ports[found].dev, sizeof(s->midi_ports[0].dev),
                      "%s", hw[i].dev);
             s->midi_ports[found].enabled = false;
         }
@@ -246,9 +245,7 @@ static void build_midi_section(lv_obj_t *parent)
         }
     }
 
-    /* Create a checkbox row for each detected port */
     for (int i = 0; i < n_hw; i++) {
-        /* Find settings index */
         int found = -1;
         for (int j = 0; j < s->midi_port_count; j++)
             if (strcmp(s->midi_ports[j].dev, hw[i].dev) == 0) { found = j; break; }
@@ -262,18 +259,17 @@ static void build_midi_section(lv_obj_t *parent)
 
         lv_obj_t *cb = lv_checkbox_create(row);
 
-        /* Direction badge */
-        char dir_badge[8] = "";
+        char dir[8] = "";
         if (s->midi_ports[found].is_input && s->midi_ports[found].is_output)
-            snprintf(dir_badge, sizeof(dir_badge), " [I/O]");
+            snprintf(dir, sizeof(dir), " [I/O]");
         else if (s->midi_ports[found].is_input)
-            snprintf(dir_badge, sizeof(dir_badge), " [In]");
+            snprintf(dir, sizeof(dir), " [In]");
         else if (s->midi_ports[found].is_output)
-            snprintf(dir_badge, sizeof(dir_badge), " [Out]");
+            snprintf(dir, sizeof(dir), " [Out]");
 
         char cb_text[128];
         snprintf(cb_text, sizeof(cb_text), "%s%s",
-                 s->midi_ports[found].label, dir_badge);
+                 s->midi_ports[found].label, dir);
         lv_checkbox_set_text(cb, cb_text);
 
         if (s->midi_ports[found].enabled)
@@ -290,8 +286,8 @@ void ui_settings_show(lv_obj_t *parent)
 {
     mpt_settings_t *s = settings_get();
 
-    /* Reset dropdown pointers (screen is rebuilt on each show) */
     g_dd_device = g_dd_buffer = g_dd_bits = NULL;
+    g_dd_in_ch  = g_dd_out_ch = NULL;
 
     lv_obj_add_flag(parent, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_scroll_dir(parent, LV_DIR_VER);
@@ -322,12 +318,12 @@ void ui_settings_show(lv_obj_t *parent)
     lv_obj_add_event_cb(btn_back, back_cb, LV_EVENT_CLICKED, NULL);
 
     lv_obj_t *hdr_lbl = lv_label_create(hdr);
-    lv_label_set_text(hdr_lbl, "Réglages");
+    lv_label_set_text(hdr_lbl, "Settings");
     lv_obj_set_style_text_color(hdr_lbl, UI_COLOR_TEXT, 0);
     lv_obj_set_style_text_font(hdr_lbl, &lv_font_montserrat_18, 0);
 
-    /* ── Système ── */
-    add_section_header(parent, "Système");
+    /* ── System ── */
+    add_section_header(parent, "System");
     add_info_row(parent, "mod-host address", s->host_addr);
     {
         char port_str[16];
@@ -338,13 +334,12 @@ void ui_settings_show(lv_obj_t *parent)
     add_info_row(parent, "Framebuffer",  s->fb_device);
     add_info_row(parent, "Touch",        s->touch_device);
     add_info_row(parent, "mod-host",
-        host_comm_is_connected() ? "Connecté" : "Déconnecté");
+        host_comm_is_connected() ? "Connected" : "Disconnected");
 
-    /* CPU row */
     {
         lv_obj_t *cpu_row = make_row(parent);
         lv_obj_t *cpu_key = lv_label_create(cpu_row);
-        lv_label_set_text(cpu_key, "Charge CPU");
+        lv_label_set_text(cpu_key, "CPU load");
         lv_obj_set_style_text_color(cpu_key, UI_COLOR_TEXT_DIM, 0);
         lv_obj_t *cpu_val = lv_label_create(cpu_row);
         lv_label_set_text(cpu_val, "-- %");
