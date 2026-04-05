@@ -201,18 +201,22 @@ static int collect_io_descs(bool want_inputs, io_port_desc_t *descs, int max)
 {
     mpt_settings_t *s = settings_get();
 
-    bool has_audio_cfg = (s->audio_capture_ch > 0);
-    bool has_midi_cfg  = (s->midi_port_count  > 0);
+    /* ── Audio: query JACK directly ── */
+    hw_jack_ports_t jp;
+    bool jack_ok = (hw_detect_jack_ports(&jp) == 0 &&
+                    (jp.audio_capture > 0 || jp.audio_playback > 0));
 
-    /* Pure TTL fallback when nothing has been configured yet */
-    if (!has_audio_cfg && !has_midi_cfg)
+    bool has_midi_cfg = (s->midi_port_count > 0);
+
+    /* Pure TTL fallback when JACK is unreachable and no MIDI configured */
+    if (!jack_ok && !has_midi_cfg)
         return collect_sysports(&g_pedalboard, want_inputs, descs, max);
 
     int count = 0;
 
     /* ── Audio ── */
-    if (has_audio_cfg) {
-        int ach = want_inputs ? s->audio_capture_ch : s->audio_playback_ch;
+    if (jack_ok) {
+        int ach = want_inputs ? jp.audio_capture : jp.audio_playback;
         for (int i = 0; i < ach && count < max; i++) {
             snprintf(descs[count].label, sizeof(descs[0].label),
                      want_inputs ? "In %d" : "Out %d", i + 1);
@@ -220,15 +224,14 @@ static int collect_io_descs(bool want_inputs, io_port_desc_t *descs, int max)
             count++;
         }
     } else {
-        /* Audio only from TTL (MIDI will come from settings below) */
+        /* JACK unreachable — audio from TTL, MIDI from settings below */
         io_port_desc_t tmp[16];
         int n = collect_sysports(&g_pedalboard, want_inputs, tmp, 16);
-        for (int i = 0; i < n && count < max; i++) {
+        for (int i = 0; i < n && count < max; i++)
             if (!tmp[i].is_midi) descs[count++] = tmp[i];
-        }
     }
 
-    /* ── MIDI ── */
+    /* ── MIDI from settings ── */
     int midi_idx = 0;
     for (int i = 0; i < s->midi_port_count && count < max; i++) {
         mpt_midi_port_t *p = &s->midi_ports[i];

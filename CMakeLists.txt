@@ -21,6 +21,7 @@ find_package(PkgConfig REQUIRED)
 pkg_check_modules(LILV   REQUIRED lilv-0)
 pkg_check_modules(SERD   REQUIRED serd-0)
 pkg_check_modules(SORD   REQUIRED sord-0)
+pkg_check_modules(JACK   REQUIRED jack)
 
 # cJSON (bundled)
 set(CJSON_SRC ${CMAKE_SOURCE_DIR}/third_party/cjson/cJSON.c)
@@ -90,6 +91,7 @@ target_include_directories(mod-pi-touch PRIVATE
     ${LILV_INCLUDE_DIRS}
     ${SERD_INCLUDE_DIRS}
     ${SORD_INCLUDE_DIRS}
+    ${JACK_INCLUDE_DIRS}
 )
 
 target_link_libraries(mod-pi-touch PRIVATE
@@ -97,6 +99,7 @@ target_link_libraries(mod-pi-touch PRIVATE
     ${LILV_LIBRARIES}
     ${SERD_LIBRARIES}
     ${SORD_LIBRARIES}
+    ${JACK_LIBRARIES}
     pthread
     m
 )

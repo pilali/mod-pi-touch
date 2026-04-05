@@ -25,3 +25,15 @@ int hw_detect_audio(hw_audio_device_t *out, int max);
 /* Enumerate ALSA raw-MIDI ports via `amidi -l`.
  * Returns count written to out[] (≤ max). */
 int hw_detect_midi(hw_midi_port_t *out, int max);
+
+/* ── JACK port query ─────────────────────────────────────────────────────── */
+
+typedef struct {
+    int audio_capture;   /* number of system:capture_N audio ports  */
+    int audio_playback;  /* number of system:playback_N audio ports */
+} hw_jack_ports_t;
+
+/* Connect to the running JACK server as a temporary client and count
+ * system audio ports.  Does NOT start jackd if it is not running.
+ * Returns 0 on success, -1 if JACK is unreachable. */
+int hw_detect_jack_ports(hw_jack_ports_t *out);

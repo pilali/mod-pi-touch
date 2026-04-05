@@ -12,8 +12,6 @@
 static lv_obj_t *g_dd_device   = NULL;
 static lv_obj_t *g_dd_buffer   = NULL;
 static lv_obj_t *g_dd_bits     = NULL;
-static lv_obj_t *g_dd_in_ch    = NULL;
-static lv_obj_t *g_dd_out_ch   = NULL;
 
 static hw_audio_device_t g_audio_devs[HW_MAX_AUDIO_DEVICES];
 static int                g_n_audio    = 0;
@@ -120,17 +118,9 @@ static void apply_audio_cb(lv_event_t *e)
     /* Bit depth */
     s->jack_bit_depth = (lv_dropdown_get_selected(g_dd_bits) == 0) ? 16 : 24;
 
-    /* Channel counts: index maps to 1, 2, 4, 6, 8 */
-    static const int ch_vals[] = {1, 2, 4, 6, 8};
-    uint16_t ich = lv_dropdown_get_selected(g_dd_in_ch);
-    uint16_t och = lv_dropdown_get_selected(g_dd_out_ch);
-    s->audio_capture_ch  = ch_vals[ich < 5 ? ich : 1];
-    s->audio_playback_ch = ch_vals[och < 5 ? och : 1];
-
     settings_save_prefs(s);
     settings_apply_jack(s);
 
-    /* Refresh pedalboard display with new channel counts */
     if (ui_pedalboard_is_loaded())
         ui_pedalboard_refresh();
 
@@ -169,21 +159,24 @@ static void build_audio_section(lv_obj_t *parent)
     /* Bit depth */
     int bits_sel = (s->jack_bit_depth == 16) ? 0 : 1;
 
-    /* Channel count: map value to index in {1,2,4,6,8} */
-    static const int ch_vals[] = {1, 2, 4, 6, 8};
-    int in_ch_sel = 1, out_ch_sel = 1; /* default: 2 channels */
-    for (int i = 0; i < 5; i++) {
-        if (ch_vals[i] == s->audio_capture_ch)  in_ch_sel  = i;
-        if (ch_vals[i] == s->audio_playback_ch) out_ch_sel = i;
+    /* Detected JACK ports (read-only display) */
+    hw_jack_ports_t jp = {0};
+    char in_str[16], out_str[16];
+    if (hw_detect_jack_ports(&jp) == 0 && jp.audio_capture > 0) {
+        snprintf(in_str,  sizeof(in_str),  "%d", jp.audio_capture);
+        snprintf(out_str, sizeof(out_str), "%d", jp.audio_playback);
+    } else {
+        snprintf(in_str,  sizeof(in_str),  "N/A");
+        snprintf(out_str, sizeof(out_str), "N/A");
     }
+    add_info_row(parent, "Detected inputs",  in_str);
+    add_info_row(parent, "Detected outputs", out_str);
+    add_info_row(parent, "Sample rate",      "48000 Hz (fixed)");
 
     /* Dropdowns */
-    g_dd_device  = add_dropdown_row(parent, "Interface",   dev_opts,           cur_dev_sel);
-    g_dd_buffer  = add_dropdown_row(parent, "Buffer",      "32\n64\n128\n256", buf_sel);
-    g_dd_bits    = add_dropdown_row(parent, "Bit depth",   "16 bit\n24 bit",   bits_sel);
-    g_dd_in_ch   = add_dropdown_row(parent, "In channels", "1\n2\n4\n6\n8",    in_ch_sel);
-    g_dd_out_ch  = add_dropdown_row(parent, "Out channels","1\n2\n4\n6\n8",    out_ch_sel);
-    add_info_row(parent, "Sample rate", "48000 Hz (fixed)");
+    g_dd_device = add_dropdown_row(parent, "Interface", dev_opts,           cur_dev_sel);
+    g_dd_buffer = add_dropdown_row(parent, "Buffer",    "32\n64\n128\n256", buf_sel);
+    g_dd_bits   = add_dropdown_row(parent, "Bit depth", "16 bit\n24 bit",   bits_sel);
 
     /* Apply button */
     lv_obj_t *btn = lv_btn_create(parent);
@@ -287,7 +280,6 @@ void ui_settings_show(lv_obj_t *parent)
     mpt_settings_t *s = settings_get();
 
     g_dd_device = g_dd_buffer = g_dd_bits = NULL;
-    g_dd_in_ch  = g_dd_out_ch = NULL;
 
     lv_obj_add_flag(parent, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_scroll_dir(parent, LV_DIR_VER);

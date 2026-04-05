@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <jack/jack.h>
 
 /* ─── Audio (ALSA PCM cards) ─────────────────────────────────────────────────
  *
@@ -91,4 +92,41 @@ int hw_detect_midi(hw_midi_port_t *out, int max)
 
     pclose(f);
     return count;
+}
+
+/* ─── JACK port enumeration ──────────────────────────────────────────────────
+ *
+ * Opens a temporary JACK client (JackNoStartServer so we don't accidentally
+ * launch jackd), counts system:capture_N and system:playback_N audio ports,
+ * then immediately closes the client.
+ */
+int hw_detect_jack_ports(hw_jack_ports_t *out)
+{
+    memset(out, 0, sizeof(*out));
+
+    jack_status_t status;
+    jack_client_t *client = jack_client_open("mpt_detect",
+                                              JackNoStartServer, &status);
+    if (!client) return -1;
+
+    const char **ports;
+
+    /* Audio capture: system outputs audio into JACK → JackPortIsOutput */
+    ports = jack_get_ports(client, "^system:capture_",
+                           JACK_DEFAULT_AUDIO_TYPE, JackPortIsOutput);
+    if (ports) {
+        while (ports[out->audio_capture]) out->audio_capture++;
+        jack_free(ports);
+    }
+
+    /* Audio playback: JACK pushes audio into hardware → JackPortIsInput */
+    ports = jack_get_ports(client, "^system:playback_",
+                           JACK_DEFAULT_AUDIO_TYPE, JackPortIsInput);
+    if (ports) {
+        while (ports[out->audio_playback]) out->audio_playback++;
+        jack_free(ports);
+    }
+
+    jack_client_close(client);
+    return 0;
 }
