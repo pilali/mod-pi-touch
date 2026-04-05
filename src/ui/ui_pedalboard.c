@@ -7,6 +7,8 @@
 #include "../settings.h"
 #include "../hw_detect.h"
 
+#include "../plugin_manager.h"
+
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -31,19 +33,621 @@ typedef struct {
 } drag_t;
 static drag_t g_drag = {0};
 
-/* ─── Connection drawing ─────────────────────────────────────────────────────── */
+/* ─── Connection management ──────────────────────────────────────────────────── */
+
+#define CONN_GRPS_MAX  128
+#define CONN_PORT_MAX   32
+#define CONN_SQ_SIZE    14   /* midpoint square side in px */
+#define CONN_PANEL_H   300   /* connection panel height in px */
+#define LINE_PTS_MAX   256   /* static pool for lv_line point arrays */
+
+typedef enum {
+    CONN_MODE_IDLE = 0,
+    CONN_MODE_PANEL_OPEN,
+    CONN_MODE_CONNECTING,
+} conn_mode_t;
+
+typedef struct { int src_idx; int dst_idx; } conn_group_t;
+
+typedef struct {
+    char symbol[128];
+    char label[64];
+    char jack_port[256];
+    bool is_midi;
+} conn_port_info_t;
+
+/* Persistent state */
+static conn_group_t   g_conn_groups[CONN_GRPS_MAX];
+static int            g_conn_group_count = 0;
+static conn_mode_t    g_conn_mode = CONN_MODE_IDLE;
+static lv_obj_t      *g_conn_panel  = NULL;
+static int            g_conn_src_idx  = -99;
+static int            g_conn_dst_idx  = -99;
+static int            g_conn_sel_port = -1;
+static conn_port_info_t g_src_ports[CONN_PORT_MAX];
+static int              g_src_port_count = 0;
+static lv_obj_t        *g_port_btns[CONN_PORT_MAX];
+
+/* Layout cache — written in ui_pedalboard_refresh, read by callbacks */
+static lv_coord_t     g_layout_x[PB_MAX_PLUGINS];
+static lv_coord_t     g_layout_y[PB_MAX_PLUGINS];
+static int            g_left_offset_c = 16;
+static int            g_right_col_x_c = 0;
+static int            g_n_in_c = 0;
+static int            g_n_out_c = 0;
+static io_port_desc_t g_io_in_c[16];
+static io_port_desc_t g_io_out_c[16];
+static lv_obj_t      *g_parent_obj = NULL;
+
+/* Choose-input popup state */
+static conn_port_info_t s_choose_ports[CONN_PORT_MAX];
+static int              s_choose_count = 0;
+static int              s_choose_dst_idx = -99;
+
+/* lv_line needs persistent point arrays */
+static lv_point_precise_t s_pts[LINE_PTS_MAX][2];
+static int                s_pts_used = 0;
+
+/* ── Coordinate helpers ─────────────────────────────────────────────────────── */
+
+static void elem_right_center(int idx, lv_coord_t *cx, lv_coord_t *cy)
+{
+    if (idx == -1) { /* system input column */
+        *cx = (lv_coord_t)(IO_LINE_X + IO_LINE_W);
+        *cy = (lv_coord_t)(UI_CANVAS_H / 2);
+    } else if (idx >= 0 && idx < g_pedalboard.plugin_count) {
+        *cx = g_layout_x[idx] + LAYOUT_BLOCK_W;
+        *cy = g_layout_y[idx] + LAYOUT_BLOCK_H / 2;
+    } else { *cx = 0; *cy = 0; }
+}
+
+static void elem_left_center(int idx, lv_coord_t *cx, lv_coord_t *cy)
+{
+    if (idx == -2) { /* system output column */
+        *cx = (lv_coord_t)(g_right_col_x_c + IO_LINE_X);
+        *cy = (lv_coord_t)(UI_CANVAS_H / 2);
+    } else if (idx >= 0 && idx < g_pedalboard.plugin_count) {
+        *cx = g_layout_x[idx];
+        *cy = g_layout_y[idx] + LAYOUT_BLOCK_H / 2;
+    } else { *cx = 0; *cy = 0; }
+}
+
+/* ── Port collection ────────────────────────────────────────────────────────── */
+
+static int collect_src_ports(int src_idx, conn_port_info_t *out, int max)
+{
+    int count = 0;
+    if (src_idx == -1) { /* system audio/MIDI inputs */
+        int ai = 0, mi = 0;
+        for (int i = 0; i < g_n_in_c && count < max; i++) {
+            conn_port_info_t *p = &out[count];
+            if (g_io_in_c[i].is_midi) {
+                mi++;
+                snprintf(p->symbol,    sizeof(p->symbol),    "midi_capture_%d", mi);
+                snprintf(p->label,     sizeof(p->label),     "%s", g_io_in_c[i].label);
+                snprintf(p->jack_port, sizeof(p->jack_port), "system:midi_capture_%d", mi);
+                p->is_midi = true;
+            } else {
+                ai++;
+                snprintf(p->symbol,    sizeof(p->symbol),    "capture_%d", ai);
+                snprintf(p->label,     sizeof(p->label),     "%s", g_io_in_c[i].label);
+                snprintf(p->jack_port, sizeof(p->jack_port), "system:capture_%d", ai);
+                p->is_midi = false;
+            }
+            count++;
+        }
+    } else if (src_idx >= 0 && src_idx < g_pedalboard.plugin_count) {
+        pb_plugin_t *plug = &g_pedalboard.plugins[src_idx];
+        const pm_plugin_info_t *info = pm_plugin_by_uri(plug->uri);
+        if (info) {
+            for (int j = 0; j < info->port_count && count < max; j++) {
+                pm_port_type_t t = info->ports[j].type;
+                if (t != PM_PORT_AUDIO_OUT && t != PM_PORT_MIDI_OUT) continue;
+                conn_port_info_t *p = &out[count];
+                snprintf(p->symbol,    sizeof(p->symbol),    "%s", info->ports[j].symbol);
+                snprintf(p->label,     sizeof(p->label),     "%s", info->ports[j].name);
+                snprintf(p->jack_port, sizeof(p->jack_port), "effect_%d:%s",
+                         plug->instance_id, info->ports[j].symbol);
+                p->is_midi = (t == PM_PORT_MIDI_OUT);
+                count++;
+            }
+        }
+    }
+    return count;
+}
+
+static int collect_dst_ports(int dst_idx, conn_port_info_t *out, int max)
+{
+    int count = 0;
+    if (dst_idx == -2) { /* system audio/MIDI outputs */
+        int ai = 0, mi = 0;
+        for (int i = 0; i < g_n_out_c && count < max; i++) {
+            conn_port_info_t *p = &out[count];
+            if (g_io_out_c[i].is_midi) {
+                mi++;
+                snprintf(p->symbol,    sizeof(p->symbol),    "midi_playback_%d", mi);
+                snprintf(p->label,     sizeof(p->label),     "%s", g_io_out_c[i].label);
+                snprintf(p->jack_port, sizeof(p->jack_port), "system:midi_playback_%d", mi);
+                p->is_midi = true;
+            } else {
+                ai++;
+                snprintf(p->symbol,    sizeof(p->symbol),    "playback_%d", ai);
+                snprintf(p->label,     sizeof(p->label),     "%s", g_io_out_c[i].label);
+                snprintf(p->jack_port, sizeof(p->jack_port), "system:playback_%d", ai);
+                p->is_midi = false;
+            }
+            count++;
+        }
+    } else if (dst_idx >= 0 && dst_idx < g_pedalboard.plugin_count) {
+        pb_plugin_t *plug = &g_pedalboard.plugins[dst_idx];
+        const pm_plugin_info_t *info = pm_plugin_by_uri(plug->uri);
+        if (info) {
+            for (int j = 0; j < info->port_count && count < max; j++) {
+                pm_port_type_t t = info->ports[j].type;
+                if (t != PM_PORT_AUDIO_IN && t != PM_PORT_MIDI_IN) continue;
+                conn_port_info_t *p = &out[count];
+                snprintf(p->symbol,    sizeof(p->symbol),    "%s", info->ports[j].symbol);
+                snprintf(p->label,     sizeof(p->label),     "%s", info->ports[j].name);
+                snprintf(p->jack_port, sizeof(p->jack_port), "effect_%d:%s",
+                         plug->instance_id, info->ports[j].symbol);
+                p->is_midi = (t == PM_PORT_MIDI_IN);
+                count++;
+            }
+        }
+    }
+    return count;
+}
+
+/* Build bundle-relative file:// URI for pb_add_connection */
+static void make_bundle_uri(int elem_idx, const char *sym, char *out, size_t outsz)
+{
+    if (elem_idx == -1 || elem_idx == -2) {
+        snprintf(out, outsz, "file://%s/%s", g_pedalboard.path, sym);
+    } else if (elem_idx >= 0 && elem_idx < g_pedalboard.plugin_count) {
+        snprintf(out, outsz, "file://%s/%s/%s",
+                 g_pedalboard.path, g_pedalboard.plugins[elem_idx].symbol, sym);
+    }
+}
+
+static const char *elem_name(int idx)
+{
+    if (idx == -1) return "System In";
+    if (idx == -2) return "System Out";
+    if (idx >= 0 && idx < g_pedalboard.plugin_count)
+        return g_pedalboard.plugins[idx].label;
+    return "?";
+}
+
+/* ── Panel close ─────────────────────────────────────────────────────────────── */
+
+static void conn_panel_close(void)
+{
+    if (g_conn_panel) { lv_obj_del(g_conn_panel); g_conn_panel = NULL; }
+    g_conn_mode      = CONN_MODE_IDLE;
+    g_conn_src_idx   = -99;
+    g_conn_dst_idx   = -99;
+    g_conn_sel_port  = -1;
+    g_src_port_count = 0;
+}
+
+/* ── Choose-input popup ──────────────────────────────────────────────────────── */
+
+static void choose_port_btn_cb(lv_event_t *e)
+{
+    int pi = (int)(intptr_t)lv_event_get_user_data(e);
+    if (pi < 0 || pi >= s_choose_count || g_conn_sel_port < 0) return;
+
+    const char *src_jack = g_src_ports[g_conn_sel_port].jack_port;
+    const char *dst_jack = s_choose_ports[pi].jack_port;
+    host_connect(src_jack, dst_jack);
+
+    char from_uri[PB_URI_MAX], to_uri[PB_URI_MAX];
+    make_bundle_uri(g_conn_src_idx, g_src_ports[g_conn_sel_port].symbol,
+                    from_uri, sizeof(from_uri));
+    make_bundle_uri(s_choose_dst_idx, s_choose_ports[pi].symbol,
+                    to_uri, sizeof(to_uri));
+    pb_add_connection(&g_pedalboard, from_uri, to_uri);
+    g_pedalboard.modified = true;
+    ui_app_update_title(g_pedalboard.name, true);
+
+    conn_panel_close();
+    ui_pedalboard_refresh();
+}
+
+static void show_input_chooser(int dst_idx, conn_port_info_t *ports, int n)
+{
+    s_choose_dst_idx = dst_idx;
+    s_choose_count   = n;
+    for (int i = 0; i < n; i++) s_choose_ports[i] = ports[i];
+
+    int popup_h = 50 + n * 56;
+    if (popup_h > 400) popup_h = 400;
+
+    lv_obj_t *popup = lv_obj_create(lv_layer_top());
+    lv_obj_set_size(popup, 420, popup_h);
+    lv_obj_align(popup, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_set_style_bg_color(popup, UI_COLOR_SURFACE, 0);
+    lv_obj_set_style_bg_opa(popup, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_color(popup, UI_COLOR_PRIMARY, 0);
+    lv_obj_set_style_border_width(popup, 2, 0);
+    lv_obj_set_style_radius(popup, 8, 0);
+    lv_obj_set_style_pad_all(popup, 12, 0);
+    lv_obj_clear_flag(popup, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *title = lv_label_create(popup);
+    lv_label_set_text(title, "Choose input:");
+    lv_obj_set_style_text_color(title, UI_COLOR_TEXT, 0);
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
+    lv_obj_align(title, LV_ALIGN_TOP_LEFT, 0, 0);
+
+    for (int i = 0; i < n; i++) {
+        lv_obj_t *btn = lv_btn_create(popup);
+        lv_obj_set_size(btn, 390, 48);
+        lv_obj_set_pos(btn, 0, 36 + i * 54);
+        lv_obj_set_style_bg_color(btn, UI_COLOR_BG, 0);
+        lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_color(btn, UI_COLOR_TEXT_DIM, 0);
+        lv_obj_set_style_border_width(btn, 1, 0);
+        lv_obj_set_style_radius(btn, 4, 0);
+        lv_obj_set_style_shadow_width(btn, 0, 0);
+
+        lv_obj_t *lbl = lv_label_create(btn);
+        lv_label_set_text(lbl, ports[i].label);
+        lv_obj_set_style_text_color(lbl, UI_COLOR_TEXT, 0);
+        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_14, 0);
+        lv_obj_center(lbl);
+
+        lv_obj_add_event_cb(btn, choose_port_btn_cb, LV_EVENT_SHORT_CLICKED,
+                            (void *)(intptr_t)i);
+    }
+}
+
+/* ── Execute connection to a clicked plugin ──────────────────────────────────── */
+
+static void conn_target_selected(int dst_plugin_idx)
+{
+    if (g_conn_sel_port < 0 || g_conn_sel_port >= g_src_port_count) {
+        conn_panel_close();
+        return;
+    }
+
+    conn_port_info_t dst_ports[CONN_PORT_MAX];
+    int n_dst = collect_dst_ports(dst_plugin_idx, dst_ports, CONN_PORT_MAX);
+
+    if (n_dst == 0) {
+        ui_app_show_message("No inputs", "Selected plugin has no audio/MIDI inputs.", 3000);
+        conn_panel_close();
+        return;
+    }
+
+    if (n_dst == 1) {
+        /* Single input — auto-connect */
+        host_connect(g_src_ports[g_conn_sel_port].jack_port, dst_ports[0].jack_port);
+        char from_uri[PB_URI_MAX], to_uri[PB_URI_MAX];
+        make_bundle_uri(g_conn_src_idx, g_src_ports[g_conn_sel_port].symbol,
+                        from_uri, sizeof(from_uri));
+        make_bundle_uri(dst_plugin_idx, dst_ports[0].symbol,
+                        to_uri, sizeof(to_uri));
+        pb_add_connection(&g_pedalboard, from_uri, to_uri);
+        g_pedalboard.modified = true;
+        ui_app_update_title(g_pedalboard.name, true);
+        conn_panel_close();
+        ui_pedalboard_refresh();
+        return;
+    }
+
+    /* Multiple inputs — show chooser */
+    show_input_chooser(dst_plugin_idx, dst_ports, n_dst);
+}
+
+/* ── Panel callbacks ──────────────────────────────────────────────────────────── */
+
+static void conn_port_btn_cb(lv_event_t *e)
+{
+    int pi = (int)(intptr_t)lv_event_get_user_data(e);
+    g_conn_sel_port = pi;
+    for (int i = 0; i < g_src_port_count; i++) {
+        if (!g_port_btns[i]) continue;
+        lv_color_t bg = (i == pi) ? UI_COLOR_PRIMARY : UI_COLOR_SURFACE;
+        lv_obj_set_style_bg_color(g_port_btns[i], bg, 0);
+    }
+}
+
+static void conn_btn_connect_cb(lv_event_t *e)
+{
+    (void)e;
+    if (g_conn_sel_port < 0) {
+        ui_app_show_message("Select output", "Tap a source output first.", 2000);
+        return;
+    }
+    g_conn_mode = CONN_MODE_CONNECTING;
+    /* Visually dim the panel to signal "tap a plugin" */
+    if (g_conn_panel)
+        lv_obj_set_style_bg_opa(g_conn_panel, LV_OPA_70, 0);
+}
+
+static void conn_btn_disconnect_cb(lv_event_t *e)
+{
+    (void)e;
+    if (g_conn_sel_port < 0 || g_conn_sel_port >= g_src_port_count) {
+        ui_app_show_message("Select output", "Tap a source output first.", 2000);
+        return;
+    }
+
+    const char *src_jack = g_src_ports[g_conn_sel_port].jack_port;
+
+    /* Collect destination ports to filter which connections to remove */
+    conn_port_info_t dst_ports[CONN_PORT_MAX];
+    int n_dst = collect_dst_ports(g_conn_dst_idx, dst_ports, CONN_PORT_MAX);
+
+    for (int i = 0; i < g_pedalboard.connection_count; ) {
+        pb_connection_t *conn = &g_pedalboard.connections[i];
+        char from_jack[256], to_jack[256];
+        bool fok = uri_to_jack_port(conn->from, &g_pedalboard, from_jack, sizeof(from_jack));
+        bool tok = uri_to_jack_port(conn->to,   &g_pedalboard, to_jack,   sizeof(to_jack));
+        if (fok && tok && strcmp(from_jack, src_jack) == 0) {
+            bool is_dst = false;
+            for (int j = 0; j < n_dst; j++) {
+                if (strcmp(to_jack, dst_ports[j].jack_port) == 0) { is_dst = true; break; }
+            }
+            if (is_dst) {
+                host_disconnect(from_jack, to_jack);
+                pb_remove_connection(&g_pedalboard, conn->from, conn->to);
+                g_pedalboard.modified = true;
+                continue; /* connection removed, don't advance i */
+            }
+        }
+        i++;
+    }
+
+    if (g_pedalboard.modified)
+        ui_app_update_title(g_pedalboard.name, true);
+
+    conn_panel_close();
+    ui_pedalboard_refresh();
+}
+
+static void conn_panel_close_btn_cb(lv_event_t *e) { (void)e; conn_panel_close(); }
+
+/* ── Connection panel open ───────────────────────────────────────────────────── */
+
+static void conn_panel_open(int src_idx, int dst_idx)
+{
+    conn_panel_close();
+
+    g_conn_src_idx   = src_idx;
+    g_conn_dst_idx   = dst_idx;
+    g_conn_mode      = CONN_MODE_PANEL_OPEN;
+    g_src_port_count = collect_src_ports(src_idx, g_src_ports, CONN_PORT_MAX);
+    memset(g_port_btns, 0, sizeof(g_port_btns));
+
+    lv_obj_t *top = lv_layer_top();
+    int scr_h = lv_obj_get_height(top);
+    int scr_w = lv_obj_get_width(top);
+    int panel_y = scr_h - CONN_PANEL_H;
+
+    g_conn_panel = lv_obj_create(top);
+    lv_obj_set_size(g_conn_panel, scr_w, CONN_PANEL_H);
+    lv_obj_set_pos(g_conn_panel, 0, panel_y);
+    lv_obj_set_style_bg_color(g_conn_panel, UI_COLOR_SURFACE, 0);
+    lv_obj_set_style_bg_opa(g_conn_panel, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(g_conn_panel, 2, 0);
+    lv_obj_set_style_border_side(g_conn_panel, LV_BORDER_SIDE_TOP, 0);
+    lv_obj_set_style_border_color(g_conn_panel, UI_COLOR_PRIMARY, 0);
+    lv_obj_set_style_pad_all(g_conn_panel, 0, 0);
+    lv_obj_set_style_radius(g_conn_panel, 0, 0);
+    lv_obj_set_style_shadow_width(g_conn_panel, 0, 0);
+    lv_obj_clear_flag(g_conn_panel, LV_OBJ_FLAG_SCROLLABLE);
+
+    /* ── Header bar ── */
+    char hdr[128];
+    snprintf(hdr, sizeof(hdr), "%s  >  %s", elem_name(src_idx), elem_name(dst_idx));
+
+    lv_obj_t *hdr_bar = lv_obj_create(g_conn_panel);
+    lv_obj_set_size(hdr_bar, scr_w, 44);
+    lv_obj_set_pos(hdr_bar, 0, 0);
+    lv_obj_set_style_bg_color(hdr_bar, UI_COLOR_BG, 0);
+    lv_obj_set_style_bg_opa(hdr_bar, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(hdr_bar, 0, 0);
+    lv_obj_set_style_pad_all(hdr_bar, 0, 0);
+    lv_obj_set_style_radius(hdr_bar, 0, 0);
+    lv_obj_clear_flag(hdr_bar, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+
+    lv_obj_t *hdr_lbl = lv_label_create(hdr_bar);
+    lv_label_set_text(hdr_lbl, hdr);
+    lv_obj_set_style_text_color(hdr_lbl, UI_COLOR_TEXT, 0);
+    lv_obj_set_style_text_font(hdr_lbl, &lv_font_montserrat_16, 0);
+    lv_obj_align(hdr_lbl, LV_ALIGN_LEFT_MID, 12, 0);
+
+    lv_obj_t *x_btn = lv_btn_create(hdr_bar);
+    lv_obj_set_size(x_btn, 44, 38);
+    lv_obj_align(x_btn, LV_ALIGN_RIGHT_MID, -4, 0);
+    lv_obj_set_style_bg_color(x_btn, UI_COLOR_BG, 0);
+    lv_obj_set_style_bg_opa(x_btn, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(x_btn, 0, 0);
+    lv_obj_set_style_shadow_width(x_btn, 0, 0);
+    lv_obj_t *x_lbl = lv_label_create(x_btn);
+    lv_label_set_text(x_lbl, "X");
+    lv_obj_set_style_text_color(x_lbl, UI_COLOR_TEXT_DIM, 0);
+    lv_obj_set_style_text_font(x_lbl, &lv_font_montserrat_16, 0);
+    lv_obj_center(x_lbl);
+    lv_obj_add_event_cb(x_btn, conn_panel_close_btn_cb, LV_EVENT_SHORT_CLICKED, NULL);
+
+    /* ── Left pane: source port buttons ── */
+    int half_w = scr_w / 2;
+    int content_y = 48;
+    int content_h = CONN_PANEL_H - content_y;
+
+    lv_obj_t *left = lv_obj_create(g_conn_panel);
+    lv_obj_set_size(left, half_w - 8, content_h - 8);
+    lv_obj_set_pos(left, 4, content_y + 4);
+    lv_obj_set_style_bg_color(left, UI_COLOR_BG, 0);
+    lv_obj_set_style_bg_opa(left, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(left, 0, 0);
+    lv_obj_set_style_pad_all(left, 8, 0);
+    lv_obj_set_style_radius(left, 4, 0);
+    lv_obj_clear_flag(left, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *src_title = lv_label_create(left);
+    lv_label_set_text(src_title, "Source output:");
+    lv_obj_set_style_text_color(src_title, UI_COLOR_TEXT_DIM, 0);
+    lv_obj_set_style_text_font(src_title, &lv_font_montserrat_12, 0);
+    lv_obj_set_pos(src_title, 0, 0);
+
+    int btn_w = (half_w - 36) / 2;
+    if (btn_w > 170) btn_w = 170;
+    int btn_h = 48, btn_gap = 6;
+    int bx = 0, by = 20;
+
+    for (int i = 0; i < g_src_port_count && i < CONN_PORT_MAX; i++) {
+        lv_obj_t *btn = lv_btn_create(left);
+        lv_obj_set_size(btn, btn_w, btn_h);
+        lv_obj_set_pos(btn, bx, by);
+        lv_obj_set_style_bg_color(btn, UI_COLOR_SURFACE, 0);
+        lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_color(btn, UI_COLOR_TEXT_DIM, 0);
+        lv_obj_set_style_border_width(btn, 1, 0);
+        lv_obj_set_style_radius(btn, 4, 0);
+        lv_obj_set_style_shadow_width(btn, 0, 0);
+
+        lv_obj_t *lbl = lv_label_create(btn);
+        lv_label_set_text(lbl, g_src_ports[i].label);
+        lv_obj_set_style_text_color(lbl, UI_COLOR_TEXT, 0);
+        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_14, 0);
+        lv_obj_center(lbl);
+
+        lv_obj_add_event_cb(btn, conn_port_btn_cb, LV_EVENT_SHORT_CLICKED,
+                            (void *)(intptr_t)i);
+        g_port_btns[i] = btn;
+
+        if (i % 2 == 0) { bx = btn_w + btn_gap; }
+        else             { bx = 0; by += btn_h + btn_gap; }
+    }
+
+    /* ── Right pane: action buttons ── */
+    lv_obj_t *right = lv_obj_create(g_conn_panel);
+    lv_obj_set_size(right, half_w - 8, content_h - 8);
+    lv_obj_set_pos(right, half_w + 4, content_y + 4);
+    lv_obj_set_style_bg_color(right, UI_COLOR_BG, 0);
+    lv_obj_set_style_bg_opa(right, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(right, 0, 0);
+    lv_obj_set_style_pad_all(right, 8, 0);
+    lv_obj_set_style_radius(right, 4, 0);
+    lv_obj_clear_flag(right, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *conn_btn = lv_btn_create(right);
+    lv_obj_set_size(conn_btn, half_w - 40, 64);
+    lv_obj_align(conn_btn, LV_ALIGN_TOP_MID, 0, 16);
+    lv_obj_set_style_bg_color(conn_btn, UI_COLOR_PRIMARY, 0);
+    lv_obj_set_style_bg_opa(conn_btn, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(conn_btn, 0, 0);
+    lv_obj_set_style_radius(conn_btn, 6, 0);
+    lv_obj_set_style_shadow_width(conn_btn, 0, 0);
+    lv_obj_t *conn_lbl = lv_label_create(conn_btn);
+    lv_label_set_text(conn_lbl, "Connect");
+    lv_obj_set_style_text_color(conn_lbl, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_text_font(conn_lbl, &lv_font_montserrat_16, 0);
+    lv_obj_center(conn_lbl);
+    lv_obj_add_event_cb(conn_btn, conn_btn_connect_cb, LV_EVENT_SHORT_CLICKED, NULL);
+
+    lv_obj_t *disc_btn = lv_btn_create(right);
+    lv_obj_set_size(disc_btn, half_w - 40, 64);
+    lv_obj_align(disc_btn, LV_ALIGN_TOP_MID, 0, 96);
+    lv_obj_set_style_bg_color(disc_btn, UI_COLOR_BYPASS, 0);
+    lv_obj_set_style_bg_opa(disc_btn, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(disc_btn, 0, 0);
+    lv_obj_set_style_radius(disc_btn, 6, 0);
+    lv_obj_set_style_shadow_width(disc_btn, 0, 0);
+    lv_obj_t *disc_lbl = lv_label_create(disc_btn);
+    lv_label_set_text(disc_lbl, "Disconnect");
+    lv_obj_set_style_text_color(disc_lbl, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_text_font(disc_lbl, &lv_font_montserrat_16, 0);
+    lv_obj_center(disc_lbl);
+    lv_obj_add_event_cb(disc_btn, conn_btn_disconnect_cb, LV_EVENT_SHORT_CLICKED, NULL);
+}
+
+/* ── Square long-press ─────────────────────────────────────────────────────── */
+
+static void on_conn_square_event(lv_event_t *e)
+{
+    if (lv_event_get_code(e) != LV_EVENT_LONG_PRESSED) return;
+    int gi = (int)(intptr_t)lv_event_get_user_data(e);
+    if (gi < 0 || gi >= g_conn_group_count) return;
+    conn_panel_open(g_conn_groups[gi].src_idx, g_conn_groups[gi].dst_idx);
+}
+
+/* ── Draw connection lines + midpoint squares ────────────────────────────────── */
 
 static void redraw_connections(void)
 {
-    if (!g_canvas) return;
-    /* Clear canvas */
-    lv_canvas_fill_bg(g_canvas, lv_color_hex(0x1A1A1A), LV_OPA_TRANSP);
+    if (!g_canvas_scroll) return;
+    s_pts_used = 0;
 
-    /* Draw a line for each connection */
-    /* In LVGL 9, we use lv_line on the scroll container for each arc */
-    /* For simplicity, connections are drawn as lv_line objects; they are
-     * recreated on every refresh. */
-    /* TODO: implement Bézier curves via canvas draw */
+    /* Gather unique (src, dst) pairs from pedalboard connections */
+    g_conn_group_count = 0;
+    for (int c = 0; c < g_pedalboard.connection_count; c++) {
+        const char *fu = g_pedalboard.connections[c].from;
+        const char *tu = g_pedalboard.connections[c].to;
+
+        const char *fsys = uri_to_sysport(fu, &g_pedalboard);
+        const char *tsys = uri_to_sysport(tu, &g_pedalboard);
+
+        int si = fsys ? -1 : uri_to_plugin_idx(fu, &g_pedalboard);
+        int di = tsys ? -2 : uri_to_plugin_idx(tu, &g_pedalboard);
+
+        if (!fsys && si < 0) continue; /* unresolvable from */
+        if (!tsys && di < 0) continue; /* unresolvable to   */
+
+        bool dup = false;
+        for (int k = 0; k < g_conn_group_count; k++) {
+            if (g_conn_groups[k].src_idx == si && g_conn_groups[k].dst_idx == di)
+                { dup = true; break; }
+        }
+        if (!dup && g_conn_group_count < CONN_GRPS_MAX) {
+            g_conn_groups[g_conn_group_count].src_idx = si;
+            g_conn_groups[g_conn_group_count].dst_idx = di;
+            g_conn_group_count++;
+        }
+    }
+
+    /* Draw one line + one square per group */
+    for (int gi = 0; gi < g_conn_group_count; gi++) {
+        lv_coord_t x1, y1, x2, y2;
+        elem_right_center(g_conn_groups[gi].src_idx, &x1, &y1);
+        elem_left_center (g_conn_groups[gi].dst_idx, &x2, &y2);
+
+        if (s_pts_used >= LINE_PTS_MAX) break;
+
+        /* Line (children added first = drawn behind blocks) */
+        s_pts[s_pts_used][0] = (lv_point_precise_t){(float)x1, (float)y1};
+        s_pts[s_pts_used][1] = (lv_point_precise_t){(float)x2, (float)y2};
+
+        lv_obj_t *line = lv_line_create(g_canvas_scroll);
+        lv_line_set_points(line, s_pts[s_pts_used], 2);
+        lv_obj_set_style_line_color(line, lv_color_hex(0x505050), 0);
+        lv_obj_set_style_line_width(line, 2, 0);
+        lv_obj_set_style_line_rounded(line, true, 0);
+        lv_obj_clear_flag(line, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+        s_pts_used++;
+
+        /* Midpoint square */
+        lv_coord_t mx = (x1 + x2) / 2;
+        lv_coord_t my = (y1 + y2) / 2;
+
+        lv_obj_t *sq = lv_obj_create(g_canvas_scroll);
+        lv_obj_set_size(sq, CONN_SQ_SIZE, CONN_SQ_SIZE);
+        lv_obj_set_pos(sq, mx - CONN_SQ_SIZE / 2, my - CONN_SQ_SIZE / 2);
+        lv_obj_set_style_bg_color(sq, lv_color_hex(0x707070), 0);
+        lv_obj_set_style_bg_opa(sq, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_color(sq, UI_COLOR_TEXT_DIM, 0);
+        lv_obj_set_style_border_width(sq, 1, 0);
+        lv_obj_set_style_radius(sq, 2, 0);
+        lv_obj_set_style_shadow_width(sq, 0, 0);
+        lv_obj_add_flag(sq, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_clear_flag(sq, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_add_event_cb(sq, on_conn_square_event, LV_EVENT_LONG_PRESSED,
+                            (void *)(intptr_t)gi);
+    }
 }
 
 /* ─── Block event handlers ───────────────────────────────────────────────────── */
@@ -53,6 +657,18 @@ static void on_block_bypass(void *userdata);  /* forward declaration */
 static void on_block_tap(void *userdata)
 {
     int instance_id = (int)(intptr_t)userdata;
+
+    /* In connecting mode: treat tap as target selection */
+    if (g_conn_mode == CONN_MODE_CONNECTING) {
+        int dst_idx = -99;
+        for (int i = 0; i < g_pedalboard.plugin_count; i++) {
+            if (g_pedalboard.plugins[i].instance_id == instance_id)
+                { dst_idx = i; break; }
+        }
+        if (dst_idx >= 0) conn_target_selected(dst_idx);
+        return;
+    }
+
     pb_plugin_t *plug = pb_find_plugin(&g_pedalboard, instance_id);
     if (!plug) return;
 
@@ -456,55 +1072,56 @@ void ui_pedalboard_refresh(void)
     lv_obj_clean(g_canvas_scroll);
     g_canvas = NULL; /* canvas removed — scroll events must reach g_canvas_scroll */
 
-    /* ── Collect I/O ports ── */
-    io_port_desc_t io_in[16], io_out[16];
-    int n_in  = collect_io_descs(true,  io_in,  16);
-    int n_out = collect_io_descs(false, io_out, 16);
+    /* Close any open connection panel before rebuilding the canvas */
+    conn_panel_close();
 
-    int left_offset = (n_in > 0) ? IO_COL_W : 16;
+    /* ── Collect I/O ports and cache globally ── */
+    g_n_in_c  = collect_io_descs(true,  g_io_in_c,  16);
+    g_n_out_c = collect_io_descs(false, g_io_out_c, 16);
 
-    /* ── Compute plugin layout, then shift right to leave room for inputs ── */
-    lv_coord_t layout_x[PB_MAX_PLUGINS] = {0};
-    lv_coord_t layout_y[PB_MAX_PLUGINS] = {0};
-    compute_layout(&g_pedalboard, layout_x, layout_y, UI_CANVAS_H);
+    g_left_offset_c = (g_n_in_c > 0) ? IO_COL_W : 16;
+
+    /* ── Compute plugin layout into global arrays ── */
+    memset(g_layout_x, 0, sizeof(g_layout_x));
+    memset(g_layout_y, 0, sizeof(g_layout_y));
+    compute_layout(&g_pedalboard, g_layout_x, g_layout_y, UI_CANVAS_H);
 
     lv_coord_t max_right = 0;
     for (int i = 0; i < g_pedalboard.plugin_count; i++) {
-        layout_x[i] += (lv_coord_t)left_offset;
-        lv_coord_t right = layout_x[i] + LAYOUT_BLOCK_W;
+        g_layout_x[i] += (lv_coord_t)g_left_offset_c;
+        lv_coord_t right = g_layout_x[i] + LAYOUT_BLOCK_W;
         if (right > max_right) max_right = right;
     }
 
-    /* ── Draw left I/O column (inputs) ── */
-    draw_io_column(g_canvas_scroll, io_in, n_in, 0, UI_CANVAS_H, false);
+    g_right_col_x_c = (g_pedalboard.plugin_count > 0)
+        ? (int)(max_right + LAYOUT_H_GAP / 2)
+        : g_left_offset_c;
 
-    /* ── Create plugin blocks ── */
+    /* ── Draw connection lines + squares (behind everything) ── */
+    redraw_connections();
+
+    /* ── Draw left I/O column (inputs) ── */
+    draw_io_column(g_canvas_scroll, g_io_in_c, g_n_in_c, 0, UI_CANVAS_H, false);
+
+    /* ── Create plugin blocks (on top of connection lines) ── */
     for (int i = 0; i < g_pedalboard.plugin_count; i++) {
         pb_plugin_t *plug = &g_pedalboard.plugins[i];
         lv_obj_t *block = ui_plugin_block_create(
             g_canvas_scroll, plug,
             on_block_tap, on_block_bypass, on_block_remove,
             (void *)(intptr_t)plug->instance_id);
-        lv_obj_set_pos(block, layout_x[i], layout_y[i]);
+        lv_obj_set_pos(block, g_layout_x[i], g_layout_y[i]);
     }
 
     /* ── Draw right I/O column (outputs) ── */
-    int right_col_x = (g_pedalboard.plugin_count > 0)
-        ? (int)(max_right + LAYOUT_H_GAP / 2)
-        : left_offset;
-    draw_io_column(g_canvas_scroll, io_out, n_out, right_col_x, UI_CANVAS_H, true);
+    draw_io_column(g_canvas_scroll, g_io_out_c, g_n_out_c,
+                   g_right_col_x_c, UI_CANVAS_H, true);
 
-    redraw_connections();
-
-    /* ── Dynamic content dimensions ──────────────────────────────────────────
-     * content_w: right edge of output column + small margin.
-     * content_h: maximum plugin bottom edge (layout algorithm already centres
-     *            within UI_CANVAS_H, so this just accounts for tall stacks).
-     * The spacer child pins the LVGL scroll range to these bounds. */
-    int content_w = right_col_x + IO_COL_W + 20;
+    /* ── Dynamic content dimensions ── */
+    int content_w = g_right_col_x_c + IO_COL_W + 20;
     int content_h = UI_CANVAS_H;
     for (int i = 0; i < g_pedalboard.plugin_count; i++) {
-        int bot = (int)layout_y[i] + LAYOUT_BLOCK_H + 20;
+        int bot = (int)g_layout_y[i] + LAYOUT_BLOCK_H + 20;
         if (bot > content_h) content_h = bot;
     }
 
@@ -524,10 +1141,13 @@ void ui_pedalboard_refresh(void)
 
 void ui_pedalboard_init(lv_obj_t *parent)
 {
+    g_parent_obj = parent;
+
     /* Reset canvas pointers — previous LVGL objects may have been freed
      * by lv_obj_clean(content_area) during screen transitions. */
     g_canvas_scroll = NULL;
     g_canvas        = NULL;
+    g_conn_panel    = NULL; /* freed with content area */
 
     /* Scrollable container */
     g_canvas_scroll = lv_obj_create(parent);
