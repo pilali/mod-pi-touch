@@ -279,8 +279,15 @@ static void choose_port_btn_cb(lv_event_t *e)
     g_pedalboard.modified = true;
     ui_app_update_title(g_pedalboard.name, true);
 
+    char toast_msg[128];
+    snprintf(toast_msg, sizeof(toast_msg), "%s  ->  %s",
+             elem_name(g_conn_src_idx),
+             (s_choose_dst_idx >= 0 && s_choose_dst_idx < g_pedalboard.plugin_count)
+                 ? g_pedalboard.plugins[s_choose_dst_idx].label
+                 : elem_name(s_choose_dst_idx));
     conn_panel_close();
     ui_pedalboard_refresh();
+    show_toast(toast_msg);
 }
 
 static void show_input_chooser(int dst_idx, conn_port_info_t *ports, int n)
@@ -331,6 +338,45 @@ static void show_input_chooser(int dst_idx, conn_port_info_t *ports, int n)
     }
 }
 
+/* ── Toast notification ──────────────────────────────────────────────────────── */
+
+static lv_obj_t   *g_toast       = NULL;
+static lv_timer_t *g_toast_timer = NULL;
+
+static void toast_timer_cb(lv_timer_t *t)
+{
+    lv_timer_del(t);
+    g_toast_timer = NULL;
+    if (g_toast) { lv_obj_del(g_toast); g_toast = NULL; }
+}
+
+static void show_toast(const char *msg)
+{
+    /* Dismiss any previous toast */
+    if (g_toast_timer) { lv_timer_del(g_toast_timer); g_toast_timer = NULL; }
+    if (g_toast)       { lv_obj_del(g_toast);          g_toast = NULL; }
+
+    g_toast = lv_obj_create(lv_layer_top());
+    lv_obj_set_size(g_toast, 700, 46);
+    lv_obj_align(g_toast, LV_ALIGN_TOP_MID, 0, UI_TOP_BAR_H + 8);
+    lv_obj_set_style_bg_color(g_toast, UI_COLOR_PRIMARY, 0);
+    lv_obj_set_style_bg_opa(g_toast, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(g_toast, 6, 0);
+    lv_obj_set_style_border_width(g_toast, 0, 0);
+    lv_obj_set_style_shadow_width(g_toast, 0, 0);
+    lv_obj_set_style_pad_all(g_toast, 0, 0);
+    lv_obj_clear_flag(g_toast, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+
+    lv_obj_t *lbl = lv_label_create(g_toast);
+    lv_label_set_text(lbl, msg);
+    lv_obj_set_style_text_color(lbl, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_text_font(lbl, &lv_font_montserrat_14, 0);
+    lv_obj_center(lbl);
+
+    g_toast_timer = lv_timer_create(toast_timer_cb, 3000, NULL);
+    lv_timer_set_repeat_count(g_toast_timer, 1);
+}
+
 /* ── Execute connection to a clicked plugin ──────────────────────────────────── */
 
 static void conn_target_selected(int dst_plugin_idx)
@@ -360,8 +406,14 @@ static void conn_target_selected(int dst_plugin_idx)
         pb_add_connection(&g_pedalboard, from_uri, to_uri);
         g_pedalboard.modified = true;
         ui_app_update_title(g_pedalboard.name, true);
+
+        char toast_msg[128];
+        snprintf(toast_msg, sizeof(toast_msg), "%s  ->  %s",
+                 elem_name(g_conn_src_idx),
+                 g_pedalboard.plugins[dst_plugin_idx].label);
         conn_panel_close();
         ui_pedalboard_refresh();
+        show_toast(toast_msg);
         return;
     }
 
@@ -404,32 +456,38 @@ static void conn_btn_disconnect_cb(lv_event_t *e)
     }
 
     const char *src_jack = g_src_ports[g_conn_sel_port].jack_port;
-
-    /* Collect destination ports to filter which connections to remove */
-    conn_port_info_t dst_ports[CONN_PORT_MAX];
-    int n_dst = collect_dst_ports(g_conn_dst_idx, dst_ports, CONN_PORT_MAX);
+    int removed = 0;
 
     for (int i = 0; i < g_pedalboard.connection_count; ) {
         pb_connection_t *conn = &g_pedalboard.connections[i];
         char from_jack[256], to_jack[256];
         bool fok = uri_to_jack_port(conn->from, &g_pedalboard, from_jack, sizeof(from_jack));
         bool tok = uri_to_jack_port(conn->to,   &g_pedalboard, to_jack,   sizeof(to_jack));
-        if (fok && tok && strcmp(from_jack, src_jack) == 0) {
-            bool is_dst = false;
-            for (int j = 0; j < n_dst; j++) {
-                if (strcmp(to_jack, dst_ports[j].jack_port) == 0) { is_dst = true; break; }
-            }
-            if (is_dst) {
-                host_disconnect(from_jack, to_jack);
-                pb_remove_connection(&g_pedalboard, conn->from, conn->to);
-                g_pedalboard.modified = true;
-                continue; /* connection removed, don't advance i */
-            }
+
+        if (!fok || !tok || strcmp(from_jack, src_jack) != 0) { i++; continue; }
+
+        /* Check that 'to' belongs to the g_conn_dst_idx element.
+         * We resolve the URI directly instead of using collect_dst_ports
+         * (which requires LV2 metadata and may return 0 for unknown plugins). */
+        bool is_dst = false;
+        if (g_conn_dst_idx == -2) {
+            const char *sp = uri_to_sysport(conn->to, &g_pedalboard);
+            is_dst = (sp && strstr(sp, "playback") != NULL);
+        } else if (g_conn_dst_idx >= 0) {
+            is_dst = (uri_to_plugin_idx(conn->to, &g_pedalboard) == g_conn_dst_idx);
+        }
+
+        if (is_dst) {
+            host_disconnect(from_jack, to_jack);
+            pb_remove_connection(&g_pedalboard, conn->from, conn->to);
+            g_pedalboard.modified = true;
+            removed++;
+            continue; /* element removed — don't advance i */
         }
         i++;
     }
 
-    if (g_pedalboard.modified)
+    if (removed > 0)
         ui_app_update_title(g_pedalboard.name, true);
 
     conn_panel_close();
