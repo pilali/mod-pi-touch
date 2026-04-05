@@ -46,6 +46,16 @@ typedef struct {
     bool is_midi;
 } io_port_desc_t;
 
+/* Layout constants — also used by connection drawing code */
+#define LAYOUT_BLOCK_W  160
+#define LAYOUT_BLOCK_H   80
+#define LAYOUT_H_GAP     80
+#define LAYOUT_V_GAP     24
+#define LAYOUT_STEP_X   (LAYOUT_BLOCK_W + LAYOUT_H_GAP)
+#define LAYOUT_STEP_Y   (LAYOUT_BLOCK_H + LAYOUT_V_GAP)
+#define LAYOUT_MAX_COLS  32
+#define LAYOUT_MAX_ADJ   16
+
 /* Forward declarations — these functions are defined later in the file */
 static bool        uri_to_jack_port(const char *uri, const pedalboard_t *pb,
                                     char *out, size_t outsz);
@@ -729,15 +739,6 @@ static void on_block_remove(void *userdata)
  *   - Each parent is vertically centered between its successors
  *   - Each column is independently centered in the visible canvas height
  */
-
-#define LAYOUT_BLOCK_W  160
-#define LAYOUT_BLOCK_H   80
-#define LAYOUT_H_GAP     80   /* horizontal gap between columns */
-#define LAYOUT_V_GAP     24   /* vertical gap between rows in same column */
-#define LAYOUT_STEP_X   (LAYOUT_BLOCK_W + LAYOUT_H_GAP)
-#define LAYOUT_STEP_Y   (LAYOUT_BLOCK_H + LAYOUT_V_GAP)
-#define LAYOUT_MAX_COLS  32
-#define LAYOUT_MAX_ADJ   16   /* max successors/predecessors per plugin */
 
 /* Extract system port name from URI. Returns pointer into static buffer or NULL. */
 static const char *uri_to_sysport(const char *uri, const pedalboard_t *pb)
