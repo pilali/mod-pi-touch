@@ -33,6 +33,23 @@ typedef struct {
 } drag_t;
 static drag_t g_drag = {0};
 
+/* ─── I/O port indicators ────────────────────────────────────────────────────── */
+
+#define IO_DOT       18   /* circle/square diameter */
+#define IO_ROW_H     (IO_DOT + 14) /* vertical step between port indicators */
+#define IO_COL_W     72   /* width reserved on each side for I/O column */
+#define IO_LINE_X    26   /* x of the vertical bar within the I/O column */
+#define IO_LINE_W     2   /* thickness of the vertical bar */
+
+typedef struct {
+    char label[16]; /* "In 1", "In 2", "MIDI", "Out 1"… */
+    bool is_midi;
+} io_port_desc_t;
+
+/* Forward declaration — defined later in the file */
+static bool uri_to_jack_port(const char *uri, const pedalboard_t *pb,
+                              char *out, size_t outsz);
+
 /* ─── Connection management ──────────────────────────────────────────────────── */
 
 #define CONN_GRPS_MAX  128
@@ -719,19 +736,6 @@ static void on_block_remove(void *userdata)
 #define LAYOUT_STEP_Y   (LAYOUT_BLOCK_H + LAYOUT_V_GAP)
 #define LAYOUT_MAX_COLS  32
 #define LAYOUT_MAX_ADJ   16   /* max successors/predecessors per plugin */
-
-/* ─── I/O port indicators ────────────────────────────────────────────────────── */
-
-#define IO_DOT       18   /* circle/square diameter */
-#define IO_ROW_H     (IO_DOT + 14) /* vertical step between port indicators */
-#define IO_COL_W     72   /* width reserved on each side for I/O column */
-#define IO_LINE_X    26   /* x of the vertical bar within the I/O column */
-#define IO_LINE_W     2   /* thickness of the vertical bar */
-
-typedef struct {
-    char label[16]; /* "In 1", "In 2", "MIDI", "Out 1"… */
-    bool is_midi;
-} io_port_desc_t;
 
 /* Extract system port name from URI. Returns pointer into static buffer or NULL. */
 static const char *uri_to_sysport(const char *uri, const pedalboard_t *pb)
