@@ -46,9 +46,11 @@ typedef struct {
     bool is_midi;
 } io_port_desc_t;
 
-/* Forward declaration — defined later in the file */
-static bool uri_to_jack_port(const char *uri, const pedalboard_t *pb,
-                              char *out, size_t outsz);
+/* Forward declarations — these functions are defined later in the file */
+static bool        uri_to_jack_port(const char *uri, const pedalboard_t *pb,
+                                    char *out, size_t outsz);
+static const char *uri_to_sysport(const char *uri, const pedalboard_t *pb);
+static int         uri_to_plugin_idx(const char *uri, const pedalboard_t *pb);
 
 /* ─── Connection management ──────────────────────────────────────────────────── */
 
