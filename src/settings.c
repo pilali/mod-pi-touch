@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 #include <sys/stat.h>
 #include <errno.h>
 #include <pwd.h>
@@ -75,6 +76,11 @@ void settings_init(mpt_settings_t *s)
     snprintf(s->plugin_cache_file, sizeof(s->plugin_cache_file),
              "%s/%s", s->data_dir, MPT_DEFAULT_PLUGIN_CACHE);
 
+    /* User files (MOD user-files root) — override with MOD_USER_FILES_DIR */
+    char def_user_files[512];
+    snprintf(def_user_files, sizeof(def_user_files), "%s/data/user-files", home);
+    env_str("MOD_USER_FILES_DIR", s->user_files_dir, sizeof(s->user_files_dir), def_user_files);
+
     /* mod-host */
     env_str("MPT_HOST_ADDR", s->host_addr, sizeof(s->host_addr), MPT_DEFAULT_HOST_ADDR);
     s->host_cmd_port = env_int("MPT_HOST_CMD_PORT", MPT_DEFAULT_HOST_CMD_PORT);
@@ -87,6 +93,7 @@ void settings_init(mpt_settings_t *s)
     /* Defaults */
     s->dark_mode        = true;
     s->ui_scale_percent = 100;
+    snprintf(s->language, sizeof(s->language), "en");
 
     /* Audio/JACK defaults */
     snprintf(s->jack_audio_device, sizeof(s->jack_audio_device), "hw:0");
@@ -115,6 +122,9 @@ void settings_init(mpt_settings_t *s)
                 if (cJSON_IsBool(dm)) s->dark_mode = cJSON_IsTrue(dm);
                 cJSON *sc = cJSON_GetObjectItem(root, "ui_scale");
                 if (cJSON_IsNumber(sc)) s->ui_scale_percent = (int)sc->valuedouble;
+                cJSON *lang = cJSON_GetObjectItem(root, "language");
+                if (cJSON_IsString(lang))
+                    snprintf(s->language, sizeof(s->language), "%s", lang->valuestring);
 
                 /* Audio / JACK */
                 cJSON *jd = cJSON_GetObjectItem(root, "jack_device");
@@ -165,8 +175,23 @@ void settings_init(mpt_settings_t *s)
     g_initialized = true;
 }
 
+/* Only allow hw:X[,Y[,Z]] to prevent shell injection via jack_audio_device. */
+static bool is_safe_alsa_device(const char *dev)
+{
+    if (!dev || strncmp(dev, "hw:", 3) != 0) return false;
+    for (const char *p = dev + 3; *p; p++)
+        if (!isdigit((unsigned char)*p) && *p != ',') return false;
+    return dev[3] != '\0';  /* reject bare "hw:" */
+}
+
 int settings_apply_jack(const mpt_settings_t *s)
 {
+    if (!is_safe_alsa_device(s->jack_audio_device)) {
+        fprintf(stderr, "[settings] Invalid JACK device: '%s'\n",
+                s->jack_audio_device);
+        return -1;
+    }
+
     /* Build a jackd command from current settings.
      * -S forces 16-bit (shorts); without it jackd uses the device's native
      * depth (typically 24 or 32 bit internally). */
@@ -193,6 +218,7 @@ int settings_save_prefs(const mpt_settings_t *s)
     cJSON *root = cJSON_CreateObject();
     cJSON_AddBoolToObject(root,   "dark_mode",    s->dark_mode);
     cJSON_AddNumberToObject(root, "ui_scale",     s->ui_scale_percent);
+    cJSON_AddStringToObject(root, "language",     s->language);
 
     /* Audio / JACK */
     cJSON_AddStringToObject(root, "jack_device",  s->jack_audio_device);

@@ -62,3 +62,7 @@ int host_midi_map(int instance, const char *symbol, int channel, int cc,
 int host_midi_unmap(int instance, const char *symbol);
 int host_transport(bool rolling, float bpb, float bpm);
 int host_cpu_load(float *out);
+
+/* Send a patch:writable parameter (file path) to a plugin instance.
+ * Sends: patch_set <instance> <param_uri> <path> */
+int host_patch_set(int instance, const char *param_uri, const char *path);

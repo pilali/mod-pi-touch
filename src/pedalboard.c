@@ -1,12 +1,14 @@
 #include "pedalboard.h"
 #include "lv2_utils.h"
 #include "snapshot.h"
+#include "plugin_manager.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <dirent.h>
+#include <unistd.h>
 #include <errno.h>
 
 #include <sord/sord.h>
@@ -66,6 +68,9 @@ pb_plugin_t *pb_add_plugin(pedalboard_t *pb, int instance_id,
     p->enabled = true;
     p->bypass_midi_channel = -1;
     p->bypass_midi_cc      = -1;
+    /* Default canvas position for mod-ui compatibility — spaced horizontally */
+    p->canvas_x = 100.0f + (pb->plugin_count - 1) * 220.0f;
+    p->canvas_y = 100.0f;
     pb->modified = true;
     return p;
 }
@@ -243,6 +248,28 @@ static int pb_load_ttl(pedalboard_t *pb, const char *ttl_path)
                 sord_iter_next(pit);
             }
             if (pit) sord_iter_free(pit);
+
+            /* Patch parameters: look up plugin info, then read stored paths */
+            {
+                const pm_plugin_info_t *pm_info = pm_plugin_by_uri(plug->uri);
+                if (pm_info) {
+                    for (int pi = 0; pi < pm_info->patch_param_count
+                                     && plug->patch_param_count < PB_MAX_PATCH_PARAMS; pi++) {
+                        const pm_patch_param_t *pp = &pm_info->patch_params[pi];
+                        SordNode *param_pred = lv2u_uri(pp->uri);
+                        SordNode *val_node   = lv2u_get_object(m, subj, param_pred);
+                        sord_node_free(lv2u_world(), param_pred);
+                        if (!val_node) continue;
+
+                        const char *path_str = (const char *)sord_node_get_string(val_node);
+                        if (!path_str || !path_str[0]) continue;
+
+                        pb_patch_t *pbp = &plug->patch_params[plug->patch_param_count++];
+                        snprintf(pbp->uri,  sizeof(pbp->uri),  "%s", pp->uri);
+                        snprintf(pbp->path, sizeof(pbp->path), "%s", path_str);
+                    }
+                }
+            }
 
             sord_iter_next(it);
         }
@@ -472,20 +499,32 @@ static int pb_save_ttl(pedalboard_t *pb, const char *ttl_path)
             sord_node_free(lv2u_world(), pn);
         }
 
+        /* Patch parameters (file paths): store as block <param_uri> "path" */
+        for (int j = 0; j < plug->patch_param_count; j++) {
+            pb_patch_t *pp = &plug->patch_params[j];
+            if (!pp->path[0]) continue;
+            SordNode *param_node = lv2u_uri(pp->uri);
+            ADD(block, param_node, lv2u_string(pp->path));
+            sord_node_free(lv2u_world(), param_node);
+        }
+
         sord_node_free(lv2u_world(), block);
     }
 
-    /* Connections (ingen:Arc) */
+    /* Connections (ingen:Arc) — each arc must be listed via ingen:arc on pb_subj */
+    SordNode *ingen_arc_pred = lv2u_uri(NS_INGEN "arc");
     for (int i = 0; i < pb->connection_count; i++) {
         pb_connection_t *conn = &pb->connections[i];
         char arc_id[64];
         snprintf(arc_id, sizeof(arc_id), "arc_%d", i);
         SordNode *arc = lv2u_blank(arc_id);
+        ADD(pb_subj, ingen_arc_pred, arc);
         ADD(arc, rdf_type,    ingen_Arc);
         ADD(arc, ingen_tail,  lv2u_uri(conn->from));
         ADD(arc, ingen_head,  lv2u_uri(conn->to));
         sord_node_free(lv2u_world(), arc);
     }
+    sord_node_free(lv2u_world(), ingen_arc_pred);
 
 #undef ADD
 
@@ -530,20 +569,16 @@ int pb_save(pedalboard_t *pb)
 {
     ensure_dir(pb->path);
 
-    /* manifest.ttl */
     if (pb_save_manifest(pb) < 0) return -1;
 
-    /* <name>.ttl */
     char ttl_path[PB_PATH_MAX];
     snprintf(ttl_path, sizeof(ttl_path), "%s/%s.ttl", pb->path, pb->name);
     if (pb_save_ttl(pb, ttl_path) < 0) return -1;
 
-    /* snapshots.json */
     char snap_path[PB_PATH_MAX];
     snprintf(snap_path, sizeof(snap_path), "%s/snapshots.json", pb->path);
     if (snapshot_save(snap_path, pb->snapshots, pb->snapshot_count,
-                      pb->current_snapshot) < 0)
-        return -1;
+                      pb->current_snapshot) < 0) return -1;
 
     pb->modified = false;
     return 0;
@@ -551,8 +586,51 @@ int pb_save(pedalboard_t *pb)
 
 int pb_save_as(pedalboard_t *pb, const char *new_dir)
 {
+    /* Build old and new file:// prefixes so we can rewrite connection URIs */
+    char old_pfx[PB_PATH_MAX + 8];
+    snprintf(old_pfx, sizeof(old_pfx), "file://%s/", pb->path);
+    size_t old_len = strlen(old_pfx);
+
     snprintf(pb->path, sizeof(pb->path), "%s", new_dir);
+
+    char new_pfx[PB_PATH_MAX + 8];
+    snprintf(new_pfx, sizeof(new_pfx), "file://%s/", pb->path);
+
+    /* Rewrite any connection endpoint that starts with the old prefix */
+    for (int i = 0; i < pb->connection_count; i++) {
+        pb_connection_t *c = &pb->connections[i];
+        if (strncmp(c->from, old_pfx, old_len) == 0) {
+            char tmp[PB_URI_MAX];
+            snprintf(tmp, sizeof(tmp), "%s%s", new_pfx, c->from + old_len);
+            snprintf(c->from, sizeof(c->from), "%s", tmp);
+        }
+        if (strncmp(c->to, old_pfx, old_len) == 0) {
+            char tmp[PB_URI_MAX];
+            snprintf(tmp, sizeof(tmp), "%s%s", new_pfx, c->to + old_len);
+            snprintf(c->to, sizeof(c->to), "%s", tmp);
+        }
+    }
     return pb_save(pb);
+}
+
+/* ─── Delete bundle ──────────────────────────────────────────────────────────── */
+
+int pb_bundle_delete(const char *bundle_path)
+{
+    DIR *d = opendir(bundle_path);
+    if (!d) return -1;
+
+    struct dirent *ent;
+    char fpath[PB_PATH_MAX];
+    while ((ent = readdir(d))) {
+        if (ent->d_name[0] == '.') continue;
+        snprintf(fpath, sizeof(fpath), "%s/%s", bundle_path, ent->d_name);
+        /* Only remove regular files — ignore sub-directories if any */
+        if (ent->d_type == DT_DIR) continue;
+        unlink(fpath);
+    }
+    closedir(d);
+    return rmdir(bundle_path) == 0 ? 0 : -1;
 }
 
 /* ─── List bundles ───────────────────────────────────────────────────────────── */
@@ -581,33 +659,63 @@ int pb_list(const char *base_dir, char **paths, int max_paths)
 
 /* ─── Snapshot wrappers ──────────────────────────────────────────────────────── */
 
+/* Capture current live state into snap (helper shared by save/overwrite) */
+static void snapshot_capture(pb_snapshot_t *snap, const pedalboard_t *pb)
+{
+    snap->plugin_count = 0;
+    for (int i = 0; i < pb->plugin_count; i++) {
+        const pb_plugin_t *plug = &pb->plugins[i];
+        snap_plugin_t *sp = &snap->plugins[snap->plugin_count++];
+        memset(sp, 0, sizeof(*sp));
+        snprintf(sp->symbol, sizeof(sp->symbol), "%s", plug->symbol);
+        sp->bypassed = !plug->enabled;
+        snprintf(sp->preset_uri, sizeof(sp->preset_uri), "%s", plug->preset_uri);
+
+        /* Regular control ports */
+        for (int j = 0; j < plug->port_count; j++) {
+            if (!plug->ports[j].snapshotable) continue;
+            if (sp->param_count >= PB_MAX_PORTS) break;
+            snap_param_t *param = &sp->params[sp->param_count++];
+            snprintf(param->symbol, sizeof(param->symbol), "%s", plug->ports[j].symbol);
+            param->value = plug->ports[j].value;
+        }
+
+        /* Patch params (file paths) */
+        for (int j = 0; j < plug->patch_param_count
+                         && sp->patch_param_count < SNAP_MAX_PATCH_PARAMS; j++) {
+            if (!plug->patch_params[j].path[0]) continue;
+            snap_patch_t *pp = &sp->patch_params[sp->patch_param_count++];
+            snprintf(pp->uri,  sizeof(pp->uri),  "%s", plug->patch_params[j].uri);
+            snprintf(pp->path, sizeof(pp->path), "%s", plug->patch_params[j].path);
+        }
+    }
+}
+
 int pb_snapshot_save_current(pedalboard_t *pb, const char *name)
 {
     if (pb->snapshot_count >= PB_MAX_SNAPSHOTS) return -1;
     pb_snapshot_t *snap = &pb->snapshots[pb->snapshot_count];
     memset(snap, 0, sizeof(*snap));
     snprintf(snap->name, sizeof(snap->name), "%s", name);
-
-    for (int i = 0; i < pb->plugin_count; i++) {
-        pb_plugin_t *plug = &pb->plugins[i];
-        snap_plugin_t *sp = &snap->plugins[snap->plugin_count++];
-        snprintf(sp->symbol, sizeof(sp->symbol), "%s", plug->symbol);
-        sp->bypassed = !plug->enabled;
-        snprintf(sp->preset_uri, sizeof(sp->preset_uri), "%s", plug->preset_uri);
-        for (int j = 0; j < plug->port_count; j++) {
-            if (!plug->ports[j].snapshotable) continue;
-            sp->params[sp->param_count].value = plug->ports[j].value;
-            snprintf(sp->params[sp->param_count].symbol,
-                     sizeof(sp->params[sp->param_count].symbol),
-                     "%s", plug->ports[j].symbol);
-            sp->param_count++;
-        }
-    }
-
+    snapshot_capture(snap, pb);
     pb->current_snapshot = pb->snapshot_count;
     pb->snapshot_count++;
     pb->modified = true;
     return pb->current_snapshot;
+}
+
+int pb_snapshot_overwrite(pedalboard_t *pb, int index)
+{
+    if (index < 0 || index >= pb->snapshot_count) return -1;
+    pb_snapshot_t *snap = &pb->snapshots[index];
+    char saved_name[PB_NAME_MAX];
+    snprintf(saved_name, sizeof(saved_name), "%s", snap->name);
+    memset(snap, 0, sizeof(*snap));
+    snprintf(snap->name, sizeof(snap->name), "%s", saved_name);
+    snapshot_capture(snap, pb);
+    pb->current_snapshot = index;
+    pb->modified = true;
+    return 0;
 }
 
 int pb_snapshot_load(pedalboard_t *pb, int index)
@@ -623,11 +731,37 @@ int pb_snapshot_load(pedalboard_t *pb, int index)
         plug->enabled = !sp->bypassed;
         if (sp->preset_uri[0])
             snprintf(plug->preset_uri, sizeof(plug->preset_uri), "%s", sp->preset_uri);
+
+        /* Regular control ports */
         for (int j = 0; j < sp->param_count; j++) {
             for (int k = 0; k < plug->port_count; k++) {
                 if (strcmp(plug->ports[k].symbol, sp->params[j].symbol) == 0) {
                     plug->ports[k].value = sp->params[j].value;
                     break;
+                }
+            }
+        }
+
+        /* Patch params (file paths) */
+        for (int j = 0; j < sp->patch_param_count; j++) {
+            for (int k = 0; k < plug->patch_param_count; k++) {
+                if (strcmp(plug->patch_params[k].uri, sp->patch_params[j].uri) == 0) {
+                    snprintf(plug->patch_params[k].path,
+                             sizeof(plug->patch_params[k].path),
+                             "%s", sp->patch_params[j].path);
+                    break;
+                }
+            }
+            /* If not found, add it */
+            if (plug->patch_param_count < PB_MAX_PATCH_PARAMS) {
+                bool found = false;
+                for (int k = 0; k < plug->patch_param_count; k++)
+                    if (strcmp(plug->patch_params[k].uri, sp->patch_params[j].uri) == 0)
+                        { found = true; break; }
+                if (!found) {
+                    pb_patch_t *pp = &plug->patch_params[plug->patch_param_count++];
+                    snprintf(pp->uri,  sizeof(pp->uri),  "%s", sp->patch_params[j].uri);
+                    snprintf(pp->path, sizeof(pp->path), "%s", sp->patch_params[j].path);
                 }
             }
         }

@@ -1,12 +1,16 @@
 #include "ui_plugin_block.h"
+#include "ui_pedalboard.h"
 #include "ui_app.h"
+#include "../i18n.h"
+#include "../plugin_manager.h"
 
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
 
 #define BLOCK_W 160
-#define BLOCK_H  80
+#define BLOCK_H 160
 
 typedef struct {
     block_cb_t on_tap;
@@ -25,17 +29,21 @@ typedef struct {
 static void menu_bypass_cb(lv_event_t *e)
 {
     menu_ctx_t *mc = lv_event_get_user_data(e);
-    lv_obj_del(mc->menu);
-    if (mc->bc->on_bypass) mc->bc->on_bypass(mc->bc->userdata);
+    lv_obj_add_flag(mc->menu, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_delete_async(mc->menu);
+    block_ctx_t *bc = mc->bc;
     free(mc);
+    if (bc->on_bypass) bc->on_bypass(bc->userdata);
 }
 
 static void menu_remove_cb(lv_event_t *e)
 {
     menu_ctx_t *mc = lv_event_get_user_data(e);
-    lv_obj_del(mc->menu);
-    if (mc->bc->on_remove) mc->bc->on_remove(mc->bc->userdata);
+    lv_obj_add_flag(mc->menu, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_delete_async(mc->menu);
+    block_ctx_t *bc = mc->bc;
     free(mc);
+    if (bc->on_remove) bc->on_remove(bc->userdata);
 }
 
 static void block_tap_cb(lv_event_t *e)
@@ -50,8 +58,10 @@ static void overlay_tap_close_cb(lv_event_t *e)
     /* Close if the tap landed directly on the overlay (outside the menu box) */
     lv_obj_t *overlay = lv_event_get_current_target(e);
     lv_obj_t *target  = lv_event_get_target(e);
-    if (target == overlay)
-        lv_obj_del(overlay);
+    if (target == overlay) {
+        lv_obj_add_flag(overlay, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_delete_async(overlay);
+    }
 }
 
 static void block_long_press_cb(lv_event_t *e)
@@ -63,6 +73,10 @@ static void block_long_press_cb(lv_event_t *e)
         ctx->long_pressed = false;
         return;
     }
+
+    /* In connecting mode a short tap selects the target plugin */
+    if (ui_pedalboard_intercept_plugin_click((int)(intptr_t)ctx->userdata))
+        return;
 
     /* Full-screen overlay — tap outside the box to dismiss */
     lv_obj_t *overlay = lv_obj_create(lv_layer_top());
@@ -98,7 +112,7 @@ static void block_long_press_cb(lv_event_t *e)
     lv_obj_set_size(btn_bypass, LV_PCT(100), 38);
     lv_obj_set_style_bg_color(btn_bypass, UI_COLOR_BYPASS, 0);
     lv_obj_t *lbl_bypass = lv_label_create(btn_bypass);
-    lv_label_set_text(lbl_bypass, ctx->bypassed ? "Enable" : "Bypass");
+    lv_label_set_text(lbl_bypass, ctx->bypassed ? TR(TR_PLUG_ENABLE) : TR(TR_PLUG_BYPASS));
     lv_obj_center(lbl_bypass);
     lv_obj_add_event_cb(btn_bypass, menu_bypass_cb, LV_EVENT_CLICKED, mc);
 
@@ -106,9 +120,29 @@ static void block_long_press_cb(lv_event_t *e)
     lv_obj_set_size(btn_remove, LV_PCT(100), 38);
     lv_obj_set_style_bg_color(btn_remove, lv_color_hex(0xCC2222), 0);
     lv_obj_t *lbl_remove = lv_label_create(btn_remove);
-    lv_label_set_text(lbl_remove, "Remove");
+    lv_label_set_text(lbl_remove, TR(TR_PLUG_REMOVE));
     lv_obj_center(lbl_remove);
     lv_obj_add_event_cb(btn_remove, menu_remove_cb, LV_EVENT_CLICKED, mc);
+}
+
+/* Read PNG width/height from the IHDR chunk (26-byte read, no full decode). */
+static bool png_get_size(const char *path, int *w, int *h)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f) return false;
+    uint8_t buf[26];
+    bool ok = fread(buf, 1, sizeof(buf), f) == sizeof(buf);
+    fclose(f);
+    if (!ok) return false;
+    /* PNG: 8-byte sig, then IHDR: 4 len + 4 type + 4 width + 4 height */
+    *w = (int)((buf[16] << 24) | (buf[17] << 16) | (buf[18] << 8) | buf[19]);
+    *h = (int)((buf[20] << 24) | (buf[21] << 16) | (buf[22] << 8) | buf[23]);
+    return *w > 0 && *h > 0;
+}
+
+static void img_src_free_cb(lv_event_t *e)
+{
+    free(lv_event_get_user_data(e));
 }
 
 lv_obj_t *ui_plugin_block_create(lv_obj_t *parent, pb_plugin_t *plug,
@@ -126,7 +160,7 @@ lv_obj_t *ui_plugin_block_create(lv_obj_t *parent, pb_plugin_t *plug,
 
     lv_obj_t *block = lv_obj_create(parent);
     lv_obj_set_size(block, BLOCK_W, BLOCK_H);
-    lv_obj_set_style_bg_color(block, plug->enabled ? UI_COLOR_SURFACE : UI_COLOR_BYPASS, 0);
+    lv_obj_set_style_bg_color(block, lv_color_black(), 0);
     lv_obj_set_style_bg_opa(block, LV_OPA_COVER, 0);
     lv_obj_set_style_border_color(block, plug->enabled ? UI_COLOR_PRIMARY : UI_COLOR_TEXT_DIM, 0);
     lv_obj_set_style_border_width(block, 2, 0);
@@ -143,6 +177,34 @@ lv_obj_t *ui_plugin_block_create(lv_obj_t *parent, pb_plugin_t *plug,
     lv_obj_set_style_text_font(lbl, &lv_font_montserrat_14, 0);
     lv_obj_align(lbl, LV_ALIGN_TOP_LEFT, 0, 0);
 
+    /* Thumbnail — centered in the area below the label */
+    const pm_plugin_info_t *pi = pm_plugin_by_uri(plug->uri);
+    if (pi && pi->thumbnail_path[0]) {
+        int img_w = 0, img_h = 0;
+        if (png_get_size(pi->thumbnail_path, &img_w, &img_h)) {
+            int avail_w = BLOCK_W - 12;
+            int avail_h = BLOCK_H - 12 - 18; /* below label */
+            float sw = (float)avail_w / img_w;
+            float sh = (float)avail_h / img_h;
+            float scale = sw < sh ? sw : sh;
+            if (scale > 3.0f) scale = 3.0f;
+            int lv_scale = (int)(scale * 256 + 0.5f);
+
+            /* "A:<absolute_path>" — LVGL POSIX FS driver with letter 'A' */
+            char *src = malloc(strlen(pi->thumbnail_path) + 3);
+            if (src) {
+                src[0] = 'A'; src[1] = ':'; src[2] = '\0';
+                strcat(src, pi->thumbnail_path);
+
+                lv_obj_t *img = lv_image_create(block);
+                lv_image_set_src(img, src);
+                lv_image_set_scale(img, (uint32_t)lv_scale);
+                lv_obj_align(img, LV_ALIGN_BOTTOM_MID, 0, 0);
+                lv_obj_add_event_cb(block, img_src_free_cb, LV_EVENT_DELETE, src);
+            }
+        }
+    }
+
     lv_obj_t *dot = lv_label_create(block);
     lv_label_set_text(dot, plug->enabled ? LV_SYMBOL_OK : LV_SYMBOL_CLOSE);
     lv_obj_set_style_text_color(dot, plug->enabled ? UI_COLOR_ACTIVE : UI_COLOR_BYPASS, 0);
@@ -158,7 +220,6 @@ lv_obj_t *ui_plugin_block_create(lv_obj_t *parent, pb_plugin_t *plug,
 
 void ui_plugin_block_set_bypassed(lv_obj_t *block, bool bypassed)
 {
-    lv_obj_set_style_bg_color(block, bypassed ? UI_COLOR_BYPASS : UI_COLOR_SURFACE, 0);
     lv_obj_set_style_border_color(block,
         bypassed ? UI_COLOR_TEXT_DIM : UI_COLOR_PRIMARY, 0);
 }

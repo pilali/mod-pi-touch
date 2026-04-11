@@ -24,6 +24,7 @@ typedef struct {
 #define MPT_DEFAULT_LAST_STATE_FILE   "last.json"
 #define MPT_DEFAULT_PREFS_FILE        "prefs.json"
 #define MPT_DEFAULT_PLUGIN_CACHE      "plugin_cache.json"
+#define MPT_DEFAULT_USER_FILES_DIR    "/home/pistomp/data/user-files"
 
 /* ─── mod-host connection ────────────────────────────────────────────────── */
 #define MPT_DEFAULT_HOST_ADDR         "127.0.0.1"
@@ -47,6 +48,7 @@ typedef struct {
     char last_state_file[512];    /* full path */
     char prefs_file[512];         /* full path */
     char plugin_cache_file[512];  /* full path */
+    char user_files_dir[512];     /* MOD user-files root (Aida DSP Models, NAM Models, ...) */
 
     /* mod-host */
     char host_addr[128];
@@ -60,6 +62,7 @@ typedef struct {
     /* Runtime state */
     bool dark_mode;
     int  ui_scale_percent;  /* 100 = normal */
+    char language[8];       /* "en" or "fr" */
 
     /* Audio / JACK */
     char jack_audio_device[32];  /* ALSA device, e.g. "hw:1"  (empty = hw:0) */

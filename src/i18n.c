@@ -1,0 +1,252 @@
+#include "i18n.h"
+#include <string.h>
+
+/* ─── English strings ────────────────────────────────────────────────────────── */
+static const char * const g_en[TR_COUNT] = {
+    /* TR_OK */                    "OK",
+    /* TR_CANCEL */                "Cancel",
+    /* TR_ERROR */                 "Error",
+    /* TR_BACK */                  "Back",
+    /* TR_SAVED */                 "Saved",
+    /* TR_DELETED */               "Deleted",
+    /* TR_ENABLED */               "Enabled",
+    /* TR_DISABLED */              "Disabled",
+
+    /* TR_BANKS */                 "Banks",
+    /* TR_NO_PEDALBOARD */         "No pedalboard",
+
+    /* TR_MENU_SAVE_PB */          "Save pedalboard",
+    /* TR_MENU_SAVE_PB_AS */       "Save pedalboard as...",
+    /* TR_MENU_SAVE_SNAP */        "Save snapshot",
+    /* TR_MENU_DELETE_SNAP */      "Delete snapshot",
+    /* TR_MENU_DELETE_PB */        "Delete pedalboard",
+
+    /* TR_CONFIRM_SAVE_PB */       "Overwrite the pedalboard on disk?",
+    /* TR_CONFIRM_SAVE_SNAP */     "Overwrite snapshot \"%s\" with current state?",
+    /* TR_CONFIRM_DELETE_SNAP */   "Delete snapshot \"%s\"? This cannot be undone.",
+    /* TR_CONFIRM_DELETE_PB */     "Delete \"%s\"? All files will be removed. This cannot be undone.",
+    /* TR_MSG_NO_SNAP */           "No snapshot",
+    /* TR_MSG_SELECT_SNAP_FIRST */ "Select a snapshot first.",
+    /* TR_MSG_PB_SAVED */          "Pedalboard saved.",
+    /* TR_MSG_PB_SAVE_ERROR */     "Could not save pedalboard.",
+    /* TR_MSG_PB_LOAD_ERROR */     "Failed to load pedalboard.",
+    /* TR_MSG_PB_SAVE_FAIL */      "Failed to save pedalboard.",
+    /* TR_MSG_SNAP_SAVED */        "Snapshot saved.",
+    /* TR_MSG_SNAP_SAVE_FAIL */    "Failed to save snapshot.",
+    /* TR_MSG_SNAP_DELETED */      "Snapshot deleted.",
+    /* TR_MSG_PB_DELETED */        "Pedalboard deleted.",
+    /* TR_MSG_NO_PB_LOADED_TITLE */"No pedalboard",
+    /* TR_MSG_NO_PB_LOADED */      "No pedalboard loaded.",
+
+    /* TR_BANK_TITLE */            "Pedalboards",
+    /* TR_BANK_ALL */              "All",
+    /* TR_BANK_NO_PB_FOUND */      "No pedalboards found.",
+    /* TR_BANK_NO_PB_IN_BANK */    "No pedalboards in this bank.",
+
+    /* TR_PLUGIN_BROWSER_TITLE */  "Add Plugin",
+    /* TR_PLUGIN_SEARCH_HINT */    "Search plugins...",
+    /* TR_PLUGIN_NOT_FOUND */      "No plugins found.",
+    /* TR_PLUGIN_ERROR */          "Plugin error",
+    /* TR_PLUGIN_LOADING */        "Loading plugin...",
+
+    /* TR_SNAP_LABEL */            "Snapshot:",
+    /* TR_SNAP_NEW_TITLE */        "New snapshot",
+    /* TR_SNAP_NEW_HINT */         "e.g. Clean, Lead...",
+    /* TR_SNAP_RENAME */           " Rename",
+    /* TR_SNAP_DELETE_BTN */       " Delete",
+    /* TR_SNAP_DELETE_TITLE */     "Delete snapshot",
+
+    /* TR_PLUG_BYPASS */           "Bypass",
+    /* TR_PLUG_ENABLE */           "Enable",
+    /* TR_PLUG_REMOVE */           "Remove",
+
+    /* TR_PARAM_BYPASS_LABEL */    "bypass",
+    /* TR_PARAM_ENABLED */         "Enabled",
+    /* TR_PARAM_DISABLED */        "Disabled",
+    /* TR_PARAM_MODEL_FILE */      "Model file",
+    /* TR_PARAM_NONE */            "(none)",
+    /* TR_PARAM_BROWSE */          " Browse",
+    /* TR_PARAM_SELECT_MODEL */    "Select model file",
+
+    /* TR_FILE_SELECT_TITLE */     "Select file",
+    /* TR_FILE_EMPTY */            "(empty)",
+
+    /* TR_PB_EMPTY_MSG */          "No pedalboard loaded.\nTap 'Banks' to open one.",
+    /* TR_PB_CHOOSE_INPUT */       "Choose input:",
+    /* TR_PB_SELECT_OUTPUT */      "Select output",
+    /* TR_PB_TAP_SOURCE */         "Tap a source output first.",
+    /* TR_PB_SOURCE_OUTPUT */      "Source output:",
+    /* TR_PB_CONNECT */            "Connect",
+    /* TR_PB_DISCONNECT */         "Disconnect",
+
+    /* TR_SETTINGS_TITLE */        "Settings",
+    /* TR_SETTINGS_SYSTEM */       "System",
+    /* TR_SETTINGS_AUDIO */        "Audio",
+    /* TR_SETTINGS_MIDI */         "MIDI",
+    /* TR_SETTINGS_JACK_RESTARTING */ "JACK restarting.\nReload pedalboard if needed.",
+    /* TR_SETTINGS_DETECTED_IN */  "Detected inputs",
+    /* TR_SETTINGS_DETECTED_OUT */ "Detected outputs",
+    /* TR_SETTINGS_SAMPLE_RATE */  "Sample rate",
+    /* TR_SETTINGS_SAMPLE_RATE_VAL */ "48000 Hz (fixed)",
+    /* TR_SETTINGS_INTERFACE */    "Interface",
+    /* TR_SETTINGS_BUFFER */       "Buffer",
+    /* TR_SETTINGS_BUFFER_SIZES */ "32\n64\n128\n256",
+    /* TR_SETTINGS_BIT_DEPTH */    "Bit depth",
+    /* TR_SETTINGS_BIT_DEPTH_OPTS */ "16 bit\n24 bit",
+    /* TR_SETTINGS_APPLY_JACK */   "Apply (restart JACK)",
+    /* TR_SETTINGS_NO_MIDI */      "No MIDI devices detected.",
+    /* TR_SETTINGS_HOST_ADDR */    "mod-host address",
+    /* TR_SETTINGS_HOST_PORT */    "mod-host port",
+    /* TR_SETTINGS_PB_DIR */       "Pedalboards",
+    /* TR_SETTINGS_FB */           "Framebuffer",
+    /* TR_SETTINGS_TOUCH */        "Touch",
+    /* TR_SETTINGS_MOD_HOST */     "mod-host",
+    /* TR_SETTINGS_CONNECTED */    "Connected",
+    /* TR_SETTINGS_DISCONNECTED */ "Disconnected",
+    /* TR_SETTINGS_CPU */          "CPU load",
+    /* TR_SETTINGS_CPU_DEFAULT */  "-- %",
+    /* TR_SETTINGS_LANGUAGE */     "Language",
+    /* TR_SETTINGS_LANGUAGE_OPTS */"English\nFran\xc3\xa7" "ais",
+};
+
+/* ─── French strings ─────────────────────────────────────────────────────────── */
+static const char * const g_fr[TR_COUNT] = {
+    /* TR_OK */                    "OK",
+    /* TR_CANCEL */                "Annuler",
+    /* TR_ERROR */                 "Erreur",
+    /* TR_BACK */                  "Retour",
+    /* TR_SAVED */                 "Enregistr\xc3\xa9",
+    /* TR_DELETED */               "Supprim\xc3\xa9",
+    /* TR_ENABLED */               "Activ\xc3\xa9",
+    /* TR_DISABLED */              "D\xc3\xa9sactiv\xc3\xa9",
+
+    /* TR_BANKS */                 "Banques",
+    /* TR_NO_PEDALBOARD */         "Pas de pedalboard",
+
+    /* TR_MENU_SAVE_PB */          "Enregistrer le pedalboard",
+    /* TR_MENU_SAVE_PB_AS */       "Enregistrer sous...",
+    /* TR_MENU_SAVE_SNAP */        "Enregistrer le snapshot",
+    /* TR_MENU_DELETE_SNAP */      "Supprimer le snapshot",
+    /* TR_MENU_DELETE_PB */        "Supprimer le pedalboard",
+
+    /* TR_CONFIRM_SAVE_PB */       "\xc3\x89" "craser le pedalboard sur le disque ?",
+    /* TR_CONFIRM_SAVE_SNAP */     "\xc3\x89" "craser le snapshot \"%s\" avec l'\xc3\xa9tat actuel ?",
+    /* TR_CONFIRM_DELETE_SNAP */   "Supprimer le snapshot \"%s\" ? Cette action est irr\xc3\xa9versible.",
+    /* TR_CONFIRM_DELETE_PB */     "Supprimer \"%s\" ? Tous les fichiers seront supprim\xc3\xa9s. Cette action est irr\xc3\xa9versible.",
+    /* TR_MSG_NO_SNAP */           "Aucun snapshot",
+    /* TR_MSG_SELECT_SNAP_FIRST */ "S\xc3\xa9lectionnez d'abord un snapshot.",
+    /* TR_MSG_PB_SAVED */          "Pedalboard enregistr\xc3\xa9.",
+    /* TR_MSG_PB_SAVE_ERROR */     "Impossible d'enregistrer le pedalboard.",
+    /* TR_MSG_PB_LOAD_ERROR */     "Impossible de charger le pedalboard.",
+    /* TR_MSG_PB_SAVE_FAIL */      "Erreur lors de l'enregistrement.",
+    /* TR_MSG_SNAP_SAVED */        "Snapshot enregistr\xc3\xa9.",
+    /* TR_MSG_SNAP_SAVE_FAIL */    "Impossible d'enregistrer le snapshot.",
+    /* TR_MSG_SNAP_DELETED */      "Snapshot supprim\xc3\xa9.",
+    /* TR_MSG_PB_DELETED */        "Pedalboard supprim\xc3\xa9.",
+    /* TR_MSG_NO_PB_LOADED_TITLE */"Pas de pedalboard",
+    /* TR_MSG_NO_PB_LOADED */      "Aucun pedalboard charg\xc3\xa9.",
+
+    /* TR_BANK_TITLE */            "Pedalboards",
+    /* TR_BANK_ALL */              "Tous",
+    /* TR_BANK_NO_PB_FOUND */      "Aucun pedalboard trouv\xc3\xa9.",
+    /* TR_BANK_NO_PB_IN_BANK */    "Aucun pedalboard dans cette banque.",
+
+    /* TR_PLUGIN_BROWSER_TITLE */  "Ajouter un plugin",
+    /* TR_PLUGIN_SEARCH_HINT */    "Rechercher des plugins...",
+    /* TR_PLUGIN_NOT_FOUND */      "Aucun plugin trouv\xc3\xa9.",
+    /* TR_PLUGIN_ERROR */          "Erreur de plugin",
+    /* TR_PLUGIN_LOADING */        "Chargement du plugin...",
+
+    /* TR_SNAP_LABEL */            "Snapshot :",
+    /* TR_SNAP_NEW_TITLE */        "Nouveau snapshot",
+    /* TR_SNAP_NEW_HINT */         "ex. Clean, Lead...",
+    /* TR_SNAP_RENAME */           " Renommer",
+    /* TR_SNAP_DELETE_BTN */       " Supprimer",
+    /* TR_SNAP_DELETE_TITLE */     "Supprimer le snapshot",
+
+    /* TR_PLUG_BYPASS */           "Bypass",
+    /* TR_PLUG_ENABLE */           "Activer",
+    /* TR_PLUG_REMOVE */           "Supprimer",
+
+    /* TR_PARAM_BYPASS_LABEL */    "bypass",
+    /* TR_PARAM_ENABLED */         "Activ\xc3\xa9",
+    /* TR_PARAM_DISABLED */        "D\xc3\xa9sactiv\xc3\xa9",
+    /* TR_PARAM_MODEL_FILE */      "Fichier mod\xc3\xa8le",
+    /* TR_PARAM_NONE */            "(aucun)",
+    /* TR_PARAM_BROWSE */          " Parcourir",
+    /* TR_PARAM_SELECT_MODEL */    "S\xc3\xa9lectionner un fichier mod\xc3\xa8le",
+
+    /* TR_FILE_SELECT_TITLE */     "S\xc3\xa9lectionner un fichier",
+    /* TR_FILE_EMPTY */            "(vide)",
+
+    /* TR_PB_EMPTY_MSG */          "Pas de pedalboard charg\xc3\xa9.\nAppuyez sur 'Banques' pour en ouvrir un.",
+    /* TR_PB_CHOOSE_INPUT */       "Choisir une entr\xc3\xa9" "e :",
+    /* TR_PB_SELECT_OUTPUT */      "S\xc3\xa9lectionner une sortie",
+    /* TR_PB_TAP_SOURCE */         "Touchez d'abord une sortie source.",
+    /* TR_PB_SOURCE_OUTPUT */      "Sortie source :",
+    /* TR_PB_CONNECT */            "Connecter",
+    /* TR_PB_DISCONNECT */         "D\xc3\xa9" "connecter",
+
+    /* TR_SETTINGS_TITLE */        "R\xc3\xa9glages",
+    /* TR_SETTINGS_SYSTEM */       "Syst\xc3\xa8me",
+    /* TR_SETTINGS_AUDIO */        "Audio",
+    /* TR_SETTINGS_MIDI */         "MIDI",
+    /* TR_SETTINGS_JACK_RESTARTING */ "JACK red\xc3\xa9marre.\nRechargez le pedalboard si n\xc3\xa9" "cessaire.",
+    /* TR_SETTINGS_DETECTED_IN */  "Entr\xc3\xa9" "es d\xc3\xa9" "tect\xc3\xa9" "es",
+    /* TR_SETTINGS_DETECTED_OUT */ "Sorties d\xc3\xa9" "tect\xc3\xa9" "es",
+    /* TR_SETTINGS_SAMPLE_RATE */  "Fr\xc3\xa9quence d'\xc3\xa9" "chantillonnage",
+    /* TR_SETTINGS_SAMPLE_RATE_VAL */ "48000 Hz (fixe)",
+    /* TR_SETTINGS_INTERFACE */    "Interface",
+    /* TR_SETTINGS_BUFFER */       "Buffer",
+    /* TR_SETTINGS_BUFFER_SIZES */ "32\n64\n128\n256",
+    /* TR_SETTINGS_BIT_DEPTH */    "Profondeur",
+    /* TR_SETTINGS_BIT_DEPTH_OPTS */ "16 bit\n24 bit",
+    /* TR_SETTINGS_APPLY_JACK */   "Appliquer (red\xc3\xa9marrer JACK)",
+    /* TR_SETTINGS_NO_MIDI */      "Aucun p\xc3\xa9riph\xc3\xa9rique MIDI d\xc3\xa9tect\xc3\xa9.",
+    /* TR_SETTINGS_HOST_ADDR */    "Adresse mod-host",
+    /* TR_SETTINGS_HOST_PORT */    "Port mod-host",
+    /* TR_SETTINGS_PB_DIR */       "Pedalboards",
+    /* TR_SETTINGS_FB */           "Framebuffer",
+    /* TR_SETTINGS_TOUCH */        "Tactile",
+    /* TR_SETTINGS_MOD_HOST */     "mod-host",
+    /* TR_SETTINGS_CONNECTED */    "Connect\xc3\xa9",
+    /* TR_SETTINGS_DISCONNECTED */ "D\xc3\xa9" "connect\xc3\xa9",
+    /* TR_SETTINGS_CPU */          "Charge CPU",
+    /* TR_SETTINGS_CPU_DEFAULT */  "-- %",
+    /* TR_SETTINGS_LANGUAGE */     "Langue",
+    /* TR_SETTINGS_LANGUAGE_OPTS */"English\nFran\xc3\xa7" "ais",
+};
+
+/* ─── Runtime state ──────────────────────────────────────────────────────────── */
+static const char * const * g_table = g_en;
+static mpt_lang_t           g_lang  = LANG_EN;
+
+/* ─── Public API ─────────────────────────────────────────────────────────────── */
+void i18n_set_lang(mpt_lang_t lang)
+{
+    if (lang < 0 || lang >= LANG_COUNT) lang = LANG_EN;
+    g_lang  = lang;
+    g_table = (lang == LANG_FR) ? g_fr : g_en;
+}
+
+mpt_lang_t i18n_get_lang(void)
+{
+    return g_lang;
+}
+
+const char *i18n_str(tr_key_t key)
+{
+    if (key < 0 || key >= TR_COUNT) return "";
+    return g_table[key] ? g_table[key] : g_en[key];
+}
+
+mpt_lang_t i18n_lang_from_code(const char *code)
+{
+    if (code && strcmp(code, "fr") == 0) return LANG_FR;
+    return LANG_EN;
+}
+
+const char *i18n_lang_code(mpt_lang_t lang)
+{
+    return (lang == LANG_FR) ? "fr" : "en";
+}

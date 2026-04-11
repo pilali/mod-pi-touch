@@ -39,6 +39,10 @@ void ui_app_show_screen(ui_screen_t screen);
 /* Update top bar: pedalboard name, modified indicator */
 void ui_app_update_title(const char *name, bool modified);
 
+/* Toast notification — short banner at top of screen, auto-dismisses after ~3 s */
+void ui_app_show_toast(const char *msg);
+void ui_app_show_toast_error(const char *msg);
+
 /* Show a modal message (auto-dismiss after ms=0 means user must tap OK) */
 void ui_app_show_message(const char *title, const char *body, int autodismiss_ms);
 
@@ -54,6 +58,9 @@ void ui_app_show_confirm(const char *title, const char *message,
 
 /* Returns the main content area parent object */
 lv_obj_t *ui_app_content_area(void);
+
+/* Refresh persistent UI text after a language change, then rebuild current screen. */
+void ui_app_apply_language(void);
 
 /* Global theme colors */
 extern lv_color_t UI_COLOR_BG;

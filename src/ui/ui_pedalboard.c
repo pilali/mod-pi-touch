@@ -2,20 +2,30 @@
 #include "ui_app.h"
 #include "ui_param_editor.h"
 #include "ui_plugin_block.h"
+#include "ui_snapshot_bar.h"
 #include "../pedalboard.h"
+#include "../snapshot.h"
 #include "../host_comm.h"
 #include "../settings.h"
 #include "../hw_detect.h"
+#include "../i18n.h"
 
 #include "../plugin_manager.h"
+#include "cJSON.h"
 
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <pthread.h>
+
+#define show_toast(msg) ui_app_show_toast(msg)
 
 /* ─── Global pedalboard state ────────────────────────────────────────────────── */
-static pedalboard_t g_pedalboard;
-static bool         g_pb_loaded = false;
+static pedalboard_t     g_pedalboard;
+static bool             g_pb_loaded = false;
+/* Protects g_pedalboard from concurrent access by the feedback thread
+ * (which calls ui_pedalboard_update_param) and the main LVGL thread. */
+static pthread_mutex_t  g_pb_mutex  = PTHREAD_MUTEX_INITIALIZER;
 
 /* ─── Canvas state ───────────────────────────────────────────────────────────── */
 static lv_obj_t *g_canvas_scroll = NULL; /* scrollable container */
@@ -36,7 +46,7 @@ static drag_t g_drag = {0};
 /* ─── I/O port indicators ────────────────────────────────────────────────────── */
 
 #define IO_DOT       18   /* circle/square diameter */
-#define IO_ROW_H     (IO_DOT + 14) /* vertical step between port indicators */
+#define IO_ROW_H     (IO_DOT + 32) /* vertical step between port indicators */
 #define IO_COL_W     72   /* width reserved on each side for I/O column */
 #define IO_LINE_X    26   /* x of the vertical bar within the I/O column */
 #define IO_LINE_W     2   /* thickness of the vertical bar */
@@ -48,9 +58,9 @@ typedef struct {
 
 /* Layout constants — also used by connection drawing code */
 #define LAYOUT_BLOCK_W  160
-#define LAYOUT_BLOCK_H   80
+#define LAYOUT_BLOCK_H  160
 #define LAYOUT_H_GAP     80
-#define LAYOUT_V_GAP     24
+#define LAYOUT_V_GAP     40
 #define LAYOUT_STEP_X   (LAYOUT_BLOCK_W + LAYOUT_H_GAP)
 #define LAYOUT_STEP_Y   (LAYOUT_BLOCK_H + LAYOUT_V_GAP)
 #define LAYOUT_MAX_COLS  32
@@ -61,15 +71,13 @@ static bool        uri_to_jack_port(const char *uri, const pedalboard_t *pb,
                                     char *out, size_t outsz);
 static const char *uri_to_sysport(const char *uri, const pedalboard_t *pb);
 static int         uri_to_plugin_idx(const char *uri, const pedalboard_t *pb);
-static void        show_toast(const char *msg);
-
 /* ─── Connection management ──────────────────────────────────────────────────── */
 
 #define CONN_GRPS_MAX  128
 #define CONN_PORT_MAX   32
-#define CONN_SQ_SIZE    14   /* midpoint square side in px */
+#define CONN_SQ_SIZE    22   /* connection square side in px — large enough for touch */
 #define CONN_PANEL_H   300   /* connection panel height in px */
-#define LINE_PTS_MAX   256   /* static pool for lv_line point arrays */
+#define LINE_PTS_MAX   512   /* flat point pool: up to 4 pts per orthogonal line */
 
 typedef enum {
     CONN_MODE_IDLE = 0,
@@ -91,6 +99,7 @@ static conn_group_t   g_conn_groups[CONN_GRPS_MAX];
 static int            g_conn_group_count = 0;
 static conn_mode_t    g_conn_mode = CONN_MODE_IDLE;
 static lv_obj_t      *g_conn_panel  = NULL;
+static lv_obj_t      *g_choose_popup = NULL;
 static int            g_conn_src_idx  = -99;
 static int            g_conn_dst_idx  = -99;
 static int            g_conn_sel_port = -1;
@@ -114,8 +123,8 @@ static conn_port_info_t s_choose_ports[CONN_PORT_MAX];
 static int              s_choose_count = 0;
 static int              s_choose_dst_idx = -99;
 
-/* lv_line needs persistent point arrays */
-static lv_point_precise_t s_pts[LINE_PTS_MAX][2];
+/* lv_line needs persistent point arrays — flat pool, up to 4 pts per line */
+static lv_point_precise_t s_pts[LINE_PTS_MAX];
 static int                s_pts_used = 0;
 
 /* ── Coordinate helpers ─────────────────────────────────────────────────────── */
@@ -186,26 +195,26 @@ static int collect_src_ports(int src_idx, conn_port_info_t *out, int max)
     return count;
 }
 
-static int collect_dst_ports(int dst_idx, conn_port_info_t *out, int max)
+static int collect_dst_ports(int dst_idx, conn_port_info_t *out, int max, bool want_midi)
 {
     int count = 0;
     if (dst_idx == -2) { /* system audio/MIDI outputs */
         int ai = 0, mi = 0;
         for (int i = 0; i < g_n_out_c && count < max; i++) {
+            bool is_m = g_io_out_c[i].is_midi;
+            if (is_m) mi++; else ai++;
+            if (is_m != want_midi) continue;
             conn_port_info_t *p = &out[count];
-            if (g_io_out_c[i].is_midi) {
-                mi++;
+            if (is_m) {
                 snprintf(p->symbol,    sizeof(p->symbol),    "midi_playback_%d", mi);
                 snprintf(p->label,     sizeof(p->label),     "%s", g_io_out_c[i].label);
                 snprintf(p->jack_port, sizeof(p->jack_port), "system:midi_playback_%d", mi);
-                p->is_midi = true;
             } else {
-                ai++;
                 snprintf(p->symbol,    sizeof(p->symbol),    "playback_%d", ai);
                 snprintf(p->label,     sizeof(p->label),     "%s", g_io_out_c[i].label);
                 snprintf(p->jack_port, sizeof(p->jack_port), "system:playback_%d", ai);
-                p->is_midi = false;
             }
+            p->is_midi = is_m;
             count++;
         }
     } else if (dst_idx >= 0 && dst_idx < g_pedalboard.plugin_count) {
@@ -215,12 +224,14 @@ static int collect_dst_ports(int dst_idx, conn_port_info_t *out, int max)
             for (int j = 0; j < info->port_count && count < max; j++) {
                 pm_port_type_t t = info->ports[j].type;
                 if (t != PM_PORT_AUDIO_IN && t != PM_PORT_MIDI_IN) continue;
+                bool is_m = (t == PM_PORT_MIDI_IN);
+                if (is_m != want_midi) continue;
                 conn_port_info_t *p = &out[count];
                 snprintf(p->symbol,    sizeof(p->symbol),    "%s", info->ports[j].symbol);
                 snprintf(p->label,     sizeof(p->label),     "%s", info->ports[j].name);
                 snprintf(p->jack_port, sizeof(p->jack_port), "effect_%d:%s",
                          plug->instance_id, info->ports[j].symbol);
-                p->is_midi = (t == PM_PORT_MIDI_IN);
+                p->is_midi = is_m;
                 count++;
             }
         }
@@ -248,11 +259,30 @@ static const char *elem_name(int idx)
     return "?";
 }
 
-/* ── Panel close ─────────────────────────────────────────────────────────────── */
+/* ── Panel close / hide ──────────────────────────────────────────────────────── */
 
+/* Hide panel UI only — keeps conn state (src_idx, sel_port) for CONN_MODE_CONNECTING */
+static void conn_panel_hide(void)
+{
+    if (g_conn_panel) {
+        /* Hide immediately so the panel vanishes this frame, then delete
+         * asynchronously so LVGL finishes processing the current event
+         * before the object is freed (avoids stale input-device pointer). */
+        lv_obj_add_flag(g_conn_panel, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_delete_async(g_conn_panel);
+        g_conn_panel = NULL;
+    }
+}
+
+/* Full close: hide panel + reset all state */
 static void conn_panel_close(void)
 {
-    if (g_conn_panel) { lv_obj_del(g_conn_panel); g_conn_panel = NULL; }
+    if (g_choose_popup) {
+        lv_obj_add_flag(g_choose_popup, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_delete_async(g_choose_popup);
+        g_choose_popup = NULL;
+    }
+    conn_panel_hide();
     g_conn_mode      = CONN_MODE_IDLE;
     g_conn_src_idx   = -99;
     g_conn_dst_idx   = -99;
@@ -286,6 +316,12 @@ static void choose_port_btn_cb(lv_event_t *e)
              (s_choose_dst_idx >= 0 && s_choose_dst_idx < g_pedalboard.plugin_count)
                  ? g_pedalboard.plugins[s_choose_dst_idx].label
                  : elem_name(s_choose_dst_idx));
+    /* Close the chooser popup before full close (avoids double-free in conn_panel_close) */
+    if (g_choose_popup) {
+        lv_obj_add_flag(g_choose_popup, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_delete_async(g_choose_popup);
+        g_choose_popup = NULL;
+    }
     conn_panel_close();
     ui_pedalboard_refresh();
     show_toast(toast_msg);
@@ -300,7 +336,8 @@ static void show_input_chooser(int dst_idx, conn_port_info_t *ports, int n)
     int popup_h = 50 + n * 56;
     if (popup_h > 400) popup_h = 400;
 
-    lv_obj_t *popup = lv_obj_create(lv_layer_top());
+    g_choose_popup = lv_obj_create(lv_layer_top());
+    lv_obj_t *popup = g_choose_popup;
     lv_obj_set_size(popup, 420, popup_h);
     lv_obj_align(popup, LV_ALIGN_CENTER, 0, 0);
     lv_obj_set_style_bg_color(popup, UI_COLOR_SURFACE, 0);
@@ -312,7 +349,7 @@ static void show_input_chooser(int dst_idx, conn_port_info_t *ports, int n)
     lv_obj_clear_flag(popup, LV_OBJ_FLAG_SCROLLABLE);
 
     lv_obj_t *title = lv_label_create(popup);
-    lv_label_set_text(title, "Choose input:");
+    lv_label_set_text(title, TR(TR_PB_CHOOSE_INPUT));
     lv_obj_set_style_text_color(title, UI_COLOR_TEXT, 0);
     lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
     lv_obj_align(title, LV_ALIGN_TOP_LEFT, 0, 0);
@@ -339,44 +376,6 @@ static void show_input_chooser(int dst_idx, conn_port_info_t *ports, int n)
     }
 }
 
-/* ── Toast notification ──────────────────────────────────────────────────────── */
-
-static lv_obj_t   *g_toast       = NULL;
-static lv_timer_t *g_toast_timer = NULL;
-
-static void toast_timer_cb(lv_timer_t *t)
-{
-    lv_timer_del(t);
-    g_toast_timer = NULL;
-    if (g_toast) { lv_obj_del(g_toast); g_toast = NULL; }
-}
-
-static void show_toast(const char *msg)
-{
-    /* Dismiss any previous toast */
-    if (g_toast_timer) { lv_timer_del(g_toast_timer); g_toast_timer = NULL; }
-    if (g_toast)       { lv_obj_del(g_toast);          g_toast = NULL; }
-
-    g_toast = lv_obj_create(lv_layer_top());
-    lv_obj_set_size(g_toast, 700, 46);
-    lv_obj_align(g_toast, LV_ALIGN_TOP_MID, 0, UI_TOP_BAR_H + 8);
-    lv_obj_set_style_bg_color(g_toast, UI_COLOR_PRIMARY, 0);
-    lv_obj_set_style_bg_opa(g_toast, LV_OPA_COVER, 0);
-    lv_obj_set_style_radius(g_toast, 6, 0);
-    lv_obj_set_style_border_width(g_toast, 0, 0);
-    lv_obj_set_style_shadow_width(g_toast, 0, 0);
-    lv_obj_set_style_pad_all(g_toast, 0, 0);
-    lv_obj_clear_flag(g_toast, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
-
-    lv_obj_t *lbl = lv_label_create(g_toast);
-    lv_label_set_text(lbl, msg);
-    lv_obj_set_style_text_color(lbl, lv_color_hex(0xFFFFFF), 0);
-    lv_obj_set_style_text_font(lbl, &lv_font_montserrat_14, 0);
-    lv_obj_center(lbl);
-
-    g_toast_timer = lv_timer_create(toast_timer_cb, 3000, NULL);
-    lv_timer_set_repeat_count(g_toast_timer, 1);
-}
 
 /* ── Execute connection to a clicked plugin ──────────────────────────────────── */
 
@@ -387,11 +386,12 @@ static void conn_target_selected(int dst_plugin_idx)
         return;
     }
 
+    bool src_is_midi = g_src_ports[g_conn_sel_port].is_midi;
     conn_port_info_t dst_ports[CONN_PORT_MAX];
-    int n_dst = collect_dst_ports(dst_plugin_idx, dst_ports, CONN_PORT_MAX);
+    int n_dst = collect_dst_ports(dst_plugin_idx, dst_ports, CONN_PORT_MAX, src_is_midi);
 
     if (n_dst == 0) {
-        ui_app_show_message("No inputs", "Selected plugin has no audio/MIDI inputs.", 3000);
+        ui_app_show_toast_error(src_is_midi ? "No MIDI input on target." : "No audio input on target.");
         conn_panel_close();
         return;
     }
@@ -410,8 +410,7 @@ static void conn_target_selected(int dst_plugin_idx)
 
         char toast_msg[128];
         snprintf(toast_msg, sizeof(toast_msg), "%s  ->  %s",
-                 elem_name(g_conn_src_idx),
-                 g_pedalboard.plugins[dst_plugin_idx].label);
+                 elem_name(g_conn_src_idx), elem_name(dst_plugin_idx));
         conn_panel_close();
         ui_pedalboard_refresh();
         show_toast(toast_msg);
@@ -439,51 +438,38 @@ static void conn_btn_connect_cb(lv_event_t *e)
 {
     (void)e;
     if (g_conn_sel_port < 0) {
-        ui_app_show_message("Select output", "Tap a source output first.", 2000);
+        ui_app_show_toast(TR(TR_PB_TAP_SOURCE));
         return;
     }
     g_conn_mode = CONN_MODE_CONNECTING;
-    /* Visually dim the panel to signal "tap a plugin" */
-    if (g_conn_panel)
-        lv_obj_set_style_bg_opa(g_conn_panel, LV_OPA_70, 0);
+    conn_panel_hide(); /* close panel so canvas is fully accessible */
+    show_toast("Tap a plugin to connect...");
 }
 
 static void conn_btn_disconnect_cb(lv_event_t *e)
 {
     (void)e;
     if (g_conn_sel_port < 0 || g_conn_sel_port >= g_src_port_count) {
-        ui_app_show_message("Select output", "Tap a source output first.", 2000);
+        ui_app_show_toast(TR(TR_PB_TAP_SOURCE));
         return;
     }
 
     const char *src_jack = g_src_ports[g_conn_sel_port].jack_port;
     int removed = 0;
 
+    /* Remove ALL connections originating from the selected source port */
     for (int i = 0; i < g_pedalboard.connection_count; ) {
         pb_connection_t *conn = &g_pedalboard.connections[i];
         char from_jack[256], to_jack[256];
         bool fok = uri_to_jack_port(conn->from, &g_pedalboard, from_jack, sizeof(from_jack));
         bool tok = uri_to_jack_port(conn->to,   &g_pedalboard, to_jack,   sizeof(to_jack));
 
-        if (!fok || !tok || strcmp(from_jack, src_jack) != 0) { i++; continue; }
-
-        /* Check that 'to' belongs to the g_conn_dst_idx element.
-         * We resolve the URI directly instead of using collect_dst_ports
-         * (which requires LV2 metadata and may return 0 for unknown plugins). */
-        bool is_dst = false;
-        if (g_conn_dst_idx == -2) {
-            const char *sp = uri_to_sysport(conn->to, &g_pedalboard);
-            is_dst = (sp && strstr(sp, "playback") != NULL);
-        } else if (g_conn_dst_idx >= 0) {
-            is_dst = (uri_to_plugin_idx(conn->to, &g_pedalboard) == g_conn_dst_idx);
-        }
-
-        if (is_dst) {
+        if (fok && tok && strcmp(from_jack, src_jack) == 0) {
             host_disconnect(from_jack, to_jack);
             pb_remove_connection(&g_pedalboard, conn->from, conn->to);
             g_pedalboard.modified = true;
             removed++;
-            continue; /* element removed — don't advance i */
+            continue; /* entry removed — don't advance i */
         }
         i++;
     }
@@ -499,12 +485,12 @@ static void conn_panel_close_btn_cb(lv_event_t *e) { (void)e; conn_panel_close()
 
 /* ── Connection panel open ───────────────────────────────────────────────────── */
 
-static void conn_panel_open(int src_idx, int dst_idx)
+static void conn_panel_open(int src_idx)
 {
     conn_panel_close();
 
     g_conn_src_idx   = src_idx;
-    g_conn_dst_idx   = dst_idx;
+    g_conn_dst_idx   = -99; /* unused: disconnect removes all from selected port */
     g_conn_mode      = CONN_MODE_PANEL_OPEN;
     g_src_port_count = collect_src_ports(src_idx, g_src_ports, CONN_PORT_MAX);
     memset(g_port_btns, 0, sizeof(g_port_btns));
@@ -529,7 +515,7 @@ static void conn_panel_open(int src_idx, int dst_idx)
 
     /* ── Header bar ── */
     char hdr[128];
-    snprintf(hdr, sizeof(hdr), "%s  >  %s", elem_name(src_idx), elem_name(dst_idx));
+    snprintf(hdr, sizeof(hdr), "Connections: %s", elem_name(src_idx));
 
     lv_obj_t *hdr_bar = lv_obj_create(g_conn_panel);
     lv_obj_set_size(hdr_bar, scr_w, 44);
@@ -577,7 +563,7 @@ static void conn_panel_open(int src_idx, int dst_idx)
     lv_obj_clear_flag(left, LV_OBJ_FLAG_SCROLLABLE);
 
     lv_obj_t *src_title = lv_label_create(left);
-    lv_label_set_text(src_title, "Source output:");
+    lv_label_set_text(src_title, TR(TR_PB_SOURCE_OUTPUT));
     lv_obj_set_style_text_color(src_title, UI_COLOR_TEXT_DIM, 0);
     lv_obj_set_style_text_font(src_title, &lv_font_montserrat_12, 0);
     lv_obj_set_pos(src_title, 0, 0);
@@ -632,7 +618,7 @@ static void conn_panel_open(int src_idx, int dst_idx)
     lv_obj_set_style_radius(conn_btn, 6, 0);
     lv_obj_set_style_shadow_width(conn_btn, 0, 0);
     lv_obj_t *conn_lbl = lv_label_create(conn_btn);
-    lv_label_set_text(conn_lbl, "Connect");
+    lv_label_set_text(conn_lbl, TR(TR_PB_CONNECT));
     lv_obj_set_style_text_color(conn_lbl, lv_color_hex(0xFFFFFF), 0);
     lv_obj_set_style_text_font(conn_lbl, &lv_font_montserrat_16, 0);
     lv_obj_center(conn_lbl);
@@ -647,7 +633,7 @@ static void conn_panel_open(int src_idx, int dst_idx)
     lv_obj_set_style_radius(disc_btn, 6, 0);
     lv_obj_set_style_shadow_width(disc_btn, 0, 0);
     lv_obj_t *disc_lbl = lv_label_create(disc_btn);
-    lv_label_set_text(disc_lbl, "Disconnect");
+    lv_label_set_text(disc_lbl, TR(TR_PB_DISCONNECT));
     lv_obj_set_style_text_color(disc_lbl, lv_color_hex(0xFFFFFF), 0);
     lv_obj_set_style_text_font(disc_lbl, &lv_font_montserrat_16, 0);
     lv_obj_center(disc_lbl);
@@ -658,39 +644,60 @@ static void conn_panel_open(int src_idx, int dst_idx)
 
 static void on_conn_square_event(lv_event_t *e)
 {
-    if (lv_event_get_code(e) != LV_EVENT_LONG_PRESSED) return;
-    int gi = (int)(intptr_t)lv_event_get_user_data(e);
-    if (gi < 0 || gi >= g_conn_group_count) return;
-    conn_panel_open(g_conn_groups[gi].src_idx, g_conn_groups[gi].dst_idx);
+    if (lv_event_get_code(e) != LV_EVENT_SHORT_CLICKED) return;
+    int src_idx = (int)(intptr_t)lv_event_get_user_data(e);
+    conn_panel_open(src_idx);
 }
 
-/* ── Draw connection lines + midpoint squares ────────────────────────────────── */
+/* ── Y coordinate for a specific system I/O port dot ─────────────────────────── */
+
+static lv_coord_t sysport_y(const char *port_sym, bool is_input)
+{
+    io_port_desc_t *descs = is_input ? g_io_in_c : g_io_out_c;
+    int n              = is_input ? g_n_in_c  : g_n_out_c;
+    if (n == 0) return (lv_coord_t)(UI_CANVAS_H / 2);
+
+    bool is_midi = (strncmp(port_sym, "midi", 4) == 0);
+    const char *p = strrchr(port_sym, '_');
+    int num = (p && *(p+1)) ? atoi(p + 1) : 1;   /* 1-based number in port name */
+
+    int idx;
+    if (!is_midi) {
+        idx = num - 1;
+    } else {
+        int audio_cnt = 0;
+        for (int i = 0; i < n; i++) if (!descs[i].is_midi) audio_cnt++;
+        idx = audio_cnt + (num - 1);
+    }
+    if (idx < 0 || idx >= n) idx = 0;
+
+    int total_h = n * IO_ROW_H - (IO_ROW_H - IO_DOT);
+    int start_y = (UI_CANVAS_H - total_h) / 2;
+    return (lv_coord_t)(start_y + idx * IO_ROW_H + IO_DOT / 2);
+}
+
+/* ── Draw connection lines ───────────────────────────────────────────────────── */
 
 static void redraw_connections(void)
 {
     if (!g_canvas_scroll) return;
     s_pts_used = 0;
 
-    /* Gather unique (src, dst) pairs from pedalboard connections */
+    /* Gather unique (src, dst) pairs — used by draw_conn_squares for stub check */
     g_conn_group_count = 0;
     for (int c = 0; c < g_pedalboard.connection_count; c++) {
         const char *fu = g_pedalboard.connections[c].from;
         const char *tu = g_pedalboard.connections[c].to;
-
         const char *fsys = uri_to_sysport(fu, &g_pedalboard);
         const char *tsys = uri_to_sysport(tu, &g_pedalboard);
-
         int si = fsys ? -1 : uri_to_plugin_idx(fu, &g_pedalboard);
         int di = tsys ? -2 : uri_to_plugin_idx(tu, &g_pedalboard);
-
-        if (!fsys && si < 0) continue; /* unresolvable from */
-        if (!tsys && di < 0) continue; /* unresolvable to   */
-
+        if (!fsys && si < 0) continue;
+        if (!tsys && di < 0) continue;
         bool dup = false;
-        for (int k = 0; k < g_conn_group_count; k++) {
+        for (int k = 0; k < g_conn_group_count; k++)
             if (g_conn_groups[k].src_idx == si && g_conn_groups[k].dst_idx == di)
                 { dup = true; break; }
-        }
         if (!dup && g_conn_group_count < CONN_GRPS_MAX) {
             g_conn_groups[g_conn_group_count].src_idx = si;
             g_conn_groups[g_conn_group_count].dst_idx = di;
@@ -698,73 +705,188 @@ static void redraw_connections(void)
         }
     }
 
-    /* Draw one line + one square per group */
-    for (int gi = 0; gi < g_conn_group_count; gi++) {
-        lv_coord_t x1, y1, x2, y2;
-        elem_right_center(g_conn_groups[gi].src_idx, &x1, &y1);
-        elem_left_center (g_conn_groups[gi].dst_idx, &x2, &y2);
+    /* Draw one orthogonal line per individual connection with port-accurate y */
+    for (int c = 0; c < g_pedalboard.connection_count; c++) {
+        const char *fu = g_pedalboard.connections[c].from;
+        const char *tu = g_pedalboard.connections[c].to;
+        const char *fsys = uri_to_sysport(fu, &g_pedalboard);
+        const char *tsys = uri_to_sysport(tu, &g_pedalboard);
+        int si = fsys ? -1 : uri_to_plugin_idx(fu, &g_pedalboard);
+        int di = tsys ? -2 : uri_to_plugin_idx(tu, &g_pedalboard);
+        if (!fsys && si < 0) continue;
+        if (!tsys && di < 0) continue;
 
-        if (s_pts_used >= LINE_PTS_MAX) break;
+        /* X positions from column edges */
+        lv_coord_t x1, x2, tmp;
+        elem_right_center(si, &x1, &tmp);
+        elem_left_center (di, &x2, &tmp);
 
-        /* Line (children added first = drawn behind blocks) */
-        s_pts[s_pts_used][0] = (lv_point_precise_t){(float)x1, (float)y1};
-        s_pts[s_pts_used][1] = (lv_point_precise_t){(float)x2, (float)y2};
+        /* Y: port-specific for system I/O, block centre for plugins */
+        lv_coord_t y1 = (si == -1 && fsys)
+            ? sysport_y(fsys, true)
+            : (lv_coord_t)(g_layout_y[si] + LAYOUT_BLOCK_H / 2);
+
+        lv_coord_t y2 = (di == -2 && tsys)
+            ? sysport_y(tsys, false)
+            : (lv_coord_t)(g_layout_y[di] + LAYOUT_BLOCK_H / 2);
+
+        /* Vertical segment placed close to the destination (1/4 gap before it) */
+        lv_coord_t mid_x = x2 - (lv_coord_t)(LAYOUT_H_GAP / 4);
+        if (mid_x < x1 + 4) mid_x = x1 + 4;
+
+        int n_pts;
+        if (y1 == y2) {
+            if (s_pts_used + 2 > LINE_PTS_MAX) break;
+            s_pts[s_pts_used + 0] = (lv_point_precise_t){(float)x1, (float)y1};
+            s_pts[s_pts_used + 1] = (lv_point_precise_t){(float)x2, (float)y1};
+            n_pts = 2;
+        } else {
+            if (s_pts_used + 4 > LINE_PTS_MAX) break;
+            s_pts[s_pts_used + 0] = (lv_point_precise_t){(float)x1,    (float)y1};
+            s_pts[s_pts_used + 1] = (lv_point_precise_t){(float)mid_x, (float)y1};
+            s_pts[s_pts_used + 2] = (lv_point_precise_t){(float)mid_x, (float)y2};
+            s_pts[s_pts_used + 3] = (lv_point_precise_t){(float)x2,    (float)y2};
+            n_pts = 4;
+        }
 
         lv_obj_t *line = lv_line_create(g_canvas_scroll);
-        lv_line_set_points(line, s_pts[s_pts_used], 2);
+        lv_line_set_points(line, &s_pts[s_pts_used], n_pts);
         lv_obj_set_style_line_color(line, lv_color_hex(0x505050), 0);
         lv_obj_set_style_line_width(line, 2, 0);
-        lv_obj_set_style_line_rounded(line, true, 0);
+        lv_obj_set_style_line_rounded(line, false, 0);
         lv_obj_clear_flag(line, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
-        s_pts_used++;
+        s_pts_used += n_pts;
+    }
 
-        /* Midpoint square */
-        lv_coord_t mx = (x1 + x2) / 2;
-        lv_coord_t my = (y1 + y2) / 2;
+    /* Stub line for plugins with no outgoing connections */
+    for (int i = 0; i < g_pedalboard.plugin_count; i++) {
+        bool has_out = false;
+        for (int k = 0; k < g_conn_group_count; k++) {
+            if (g_conn_groups[k].src_idx == i) { has_out = true; break; }
+        }
+        if (has_out) continue;
+        if (s_pts_used + 2 > LINE_PTS_MAX) break;
+
+        lv_coord_t x1, y1;
+        elem_right_center(i, &x1, &y1);
+        lv_coord_t stub_x = x1 + LAYOUT_H_GAP / 2;
+
+        s_pts[s_pts_used + 0] = (lv_point_precise_t){(float)x1,     (float)y1};
+        s_pts[s_pts_used + 1] = (lv_point_precise_t){(float)stub_x, (float)y1};
+
+        lv_obj_t *line = lv_line_create(g_canvas_scroll);
+        lv_line_set_points(line, &s_pts[s_pts_used], 2);
+        lv_obj_set_style_line_color(line, lv_color_hex(0x404040), 0);
+        lv_obj_set_style_line_width(line, 2, 0);
+        lv_obj_set_style_line_rounded(line, false, 0);
+        lv_obj_clear_flag(line, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+        s_pts_used += 2;
+    }
+
+}
+
+/* ── IO column tap callbacks ─────────────────────────────────────────────────── */
+
+static void on_io_col_tap(lv_event_t *e)
+{
+    if (lv_event_get_code(e) != LV_EVENT_SHORT_CLICKED) return;
+    int src_idx = (int)(intptr_t)lv_event_get_user_data(e);
+    conn_panel_open(src_idx);
+}
+
+static void on_io_out_tap(lv_event_t *e)
+{
+    if (lv_event_get_code(e) != LV_EVENT_SHORT_CLICKED) return;
+    if (g_conn_mode == CONN_MODE_CONNECTING)
+        conn_target_selected(-2);
+}
+
+/* ── Draw permanent connection squares (called AFTER plugin blocks) ─────────── */
+
+static void draw_conn_squares(void)
+{
+    if (!g_canvas_scroll) return;
+
+    /* One square per plugin, centered in the horizontal gap to the right */
+    for (int i = 0; i < g_pedalboard.plugin_count; i++) {
+        lv_coord_t sx = g_layout_x[i] + LAYOUT_BLOCK_W + LAYOUT_H_GAP / 2 - CONN_SQ_SIZE / 2;
+        lv_coord_t sy = g_layout_y[i] + LAYOUT_BLOCK_H / 2 - CONN_SQ_SIZE / 2;
 
         lv_obj_t *sq = lv_obj_create(g_canvas_scroll);
         lv_obj_set_size(sq, CONN_SQ_SIZE, CONN_SQ_SIZE);
-        lv_obj_set_pos(sq, mx - CONN_SQ_SIZE / 2, my - CONN_SQ_SIZE / 2);
-        lv_obj_set_style_bg_color(sq, lv_color_hex(0x707070), 0);
+        lv_obj_set_pos(sq, sx, sy);
+        lv_obj_set_style_bg_color(sq, lv_color_hex(0x505878), 0);
         lv_obj_set_style_bg_opa(sq, LV_OPA_COVER, 0);
-        lv_obj_set_style_border_color(sq, UI_COLOR_TEXT_DIM, 0);
+        lv_obj_set_style_border_color(sq, UI_COLOR_PRIMARY, 0);
         lv_obj_set_style_border_width(sq, 1, 0);
         lv_obj_set_style_radius(sq, 2, 0);
         lv_obj_set_style_shadow_width(sq, 0, 0);
         lv_obj_add_flag(sq, LV_OBJ_FLAG_CLICKABLE);
         lv_obj_clear_flag(sq, LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_add_event_cb(sq, on_conn_square_event, LV_EVENT_LONG_PRESSED,
-                            (void *)(intptr_t)gi);
+        lv_obj_add_event_cb(sq, on_conn_square_event, LV_EVENT_SHORT_CLICKED,
+                            (void *)(intptr_t)i);
     }
+}
+
+/* ─── Plugin click intercept (called from ui_plugin_block.c) ─────────────────── */
+
+bool ui_pedalboard_intercept_plugin_click(int instance_id)
+{
+    if (g_conn_mode != CONN_MODE_CONNECTING) return false;
+    for (int i = 0; i < g_pedalboard.plugin_count; i++) {
+        if (g_pedalboard.plugins[i].instance_id == instance_id) {
+            conn_target_selected(i);
+            return true;
+        }
+    }
+    return false;
 }
 
 /* ─── Block event handlers ───────────────────────────────────────────────────── */
 
 static void on_block_bypass(void *userdata);  /* forward declaration */
 
+static void on_patch_changed(int instance_id, const char *param_uri,
+                             const char *path, void *userdata)
+{
+    (void)userdata;
+    pb_plugin_t *plug = pb_find_plugin(&g_pedalboard, instance_id);
+    if (!plug) return;
+
+    /* Update or add patch param in plugin */
+    for (int i = 0; i < plug->patch_param_count; i++) {
+        if (strcmp(plug->patch_params[i].uri, param_uri) == 0) {
+            snprintf(plug->patch_params[i].path,
+                     sizeof(plug->patch_params[i].path), "%s", path);
+            g_pedalboard.modified = true;
+            return;
+        }
+    }
+    if (plug->patch_param_count < PB_MAX_PATCH_PARAMS) {
+        pb_patch_t *pp = &plug->patch_params[plug->patch_param_count++];
+        snprintf(pp->uri,  sizeof(pp->uri),  "%s", param_uri);
+        snprintf(pp->path, sizeof(pp->path), "%s", path);
+        g_pedalboard.modified = true;
+    }
+}
+
 static void on_block_tap(void *userdata)
 {
     int instance_id = (int)(intptr_t)userdata;
 
-    /* In connecting mode: treat tap as target selection */
-    if (g_conn_mode == CONN_MODE_CONNECTING) {
-        int dst_idx = -99;
-        for (int i = 0; i < g_pedalboard.plugin_count; i++) {
-            if (g_pedalboard.plugins[i].instance_id == instance_id)
-                { dst_idx = i; break; }
-        }
-        if (dst_idx >= 0) conn_target_selected(dst_idx);
-        return;
-    }
+    /* In connecting mode: already handled by intercept — nothing to do here */
+    if (g_conn_mode == CONN_MODE_CONNECTING) return;
 
     pb_plugin_t *plug = pb_find_plugin(&g_pedalboard, instance_id);
     if (!plug) return;
 
-    ui_param_editor_show(instance_id, plug->label,
+    ui_param_editor_show(instance_id, plug->label, plug->uri,
                          plug->ports, plug->port_count,
+                         plug->patch_params, plug->patch_param_count,
                          plug->enabled,
                          on_block_bypass, (void *)(intptr_t)instance_id,
-                         NULL, NULL);
+                         NULL, NULL,
+                         on_patch_changed, NULL);
 }
 
 static void on_block_bypass(void *userdata)
@@ -822,53 +944,6 @@ static const char *uri_to_sysport(const char *uri, const pedalboard_t *pb)
 
 /* Collect distinct system ports from 'from' (inputs) or 'to' (outputs) side.
  * Returns count; fills descs[]. */
-static int collect_sysports(const pedalboard_t *pb, bool want_inputs,
-                              io_port_desc_t *descs, int max)
-{
-    int count = 0;
-    /* Gather unique names */
-    char names[16][64]; int n_names = 0;
-
-    for (int c = 0; c < pb->connection_count && n_names < 16; c++) {
-        const char *sp = want_inputs
-            ? uri_to_sysport(pb->connections[c].from, pb)
-            : uri_to_sysport(pb->connections[c].to,   pb);
-        if (!sp) continue;
-        /* Only inputs have "capture", outputs have "playback" */
-        bool is_cap  = (strstr(sp, "capture")  != NULL);
-        bool is_play = (strstr(sp, "playback") != NULL);
-        if (want_inputs  && !is_cap)  continue;
-        if (!want_inputs && !is_play) continue;
-        /* Deduplicate */
-        bool dup = false;
-        for (int k = 0; k < n_names; k++) if (strcmp(names[k], sp) == 0) { dup = true; break; }
-        if (!dup) snprintf(names[n_names++], 64, "%s", sp);
-    }
-
-    /* Sort: audio first (no "midi" prefix), then MIDI */
-    /* Simple bubble sort */
-    for (int a = 0; a < n_names - 1; a++)
-        for (int b = a+1; b < n_names; b++) {
-            bool a_midi = (strncmp(names[a], "midi", 4) == 0);
-            bool b_midi = (strncmp(names[b], "midi", 4) == 0);
-            if (!a_midi && !b_midi) continue; /* both audio — keep order */
-            if (a_midi && !b_midi) { char tmp[64]; memcpy(tmp,names[a],64); memcpy(names[a],names[b],64); memcpy(names[b],tmp,64); }
-        }
-
-    for (int i = 0; i < n_names && count < max; i++) {
-        bool is_midi = (strncmp(names[i], "midi", 4) == 0);
-        const char *num = strrchr(names[i], '_');
-        if (is_midi)
-            snprintf(descs[count].label, sizeof(descs[0].label), "MIDI");
-        else if (want_inputs)
-            snprintf(descs[count].label, sizeof(descs[0].label), "In %s",  num ? num+1 : "?");
-        else
-            snprintf(descs[count].label, sizeof(descs[0].label), "Out %s", num ? num+1 : "?");
-        descs[count].is_midi = is_midi;
-        count++;
-    }
-    return count;
-}
 
 /* Build the I/O descriptor list for one side of the pedalboard.
  *
@@ -888,29 +963,22 @@ static int collect_io_descs(bool want_inputs, io_port_desc_t *descs, int max)
     bool jack_ok = (hw_detect_jack_ports(&jp) == 0 &&
                     (jp.audio_capture > 0 || jp.audio_playback > 0));
 
-    bool has_midi_cfg = (s->midi_port_count > 0);
-
-    /* Pure TTL fallback when JACK is unreachable and no MIDI configured */
-    if (!jack_ok && !has_midi_cfg)
-        return collect_sysports(&g_pedalboard, want_inputs, descs, max);
 
     int count = 0;
 
-    /* ── Audio ── */
+    /* ── Audio: always ascending (1, 2, …) ── */
+    int ach;
     if (jack_ok) {
-        int ach = want_inputs ? jp.audio_capture : jp.audio_playback;
-        for (int i = 0; i < ach && count < max; i++) {
-            snprintf(descs[count].label, sizeof(descs[0].label),
-                     want_inputs ? "In %d" : "Out %d", i + 1);
-            descs[count].is_midi = false;
-            count++;
-        }
+        ach = want_inputs ? jp.audio_capture : jp.audio_playback;
     } else {
-        /* JACK unreachable — audio from TTL, MIDI from settings below */
-        io_port_desc_t tmp[16];
-        int n = collect_sysports(&g_pedalboard, want_inputs, tmp, 16);
-        for (int i = 0; i < n && count < max; i++)
-            if (!tmp[i].is_midi) descs[count++] = tmp[i];
+        /* JACK unreachable — default to 2 channels so ports are always visible */
+        ach = 2;
+    }
+    for (int i = 0; i < ach && count < max; i++) {
+        snprintf(descs[count].label, sizeof(descs[0].label),
+                 want_inputs ? "In %d" : "Out %d", i + 1);
+        descs[count].is_midi = false;
+        count++;
     }
 
     /* ── MIDI from settings ── */
@@ -1107,6 +1175,30 @@ static void compute_layout(const pedalboard_t *pb,
         }
     }
 
+    /* ── De-collide: within each column sort by row then enforce 1-unit gaps ── */
+    for (int c = 0; c <= max_col; c++) {
+        if (col_sz[c] <= 1) continue;
+
+        /* Insertion sort col_nodes[c] by row value */
+        for (int a = 1; a < col_sz[c]; a++) {
+            int ua = col_nodes[c][a];
+            float ra = row[ua];
+            int b = a - 1;
+            while (b >= 0 && row[col_nodes[c][b]] > ra) {
+                col_nodes[c][b + 1] = col_nodes[c][b];
+                b--;
+            }
+            col_nodes[c][b + 1] = ua;
+        }
+
+        /* Push each node down so no two share the same row */
+        for (int j = 1; j < col_sz[c]; j++) {
+            float needed = row[col_nodes[c][j - 1]] + 1.0f;
+            if (row[col_nodes[c][j]] < needed)
+                row[col_nodes[c][j]] = needed;
+        }
+    }
+
     /* ── Convert to pixel coordinates, centering each column independently ── */
     for (int c = 0; c <= max_col; c++) {
         if (col_sz[c] == 0) continue;
@@ -1159,8 +1251,10 @@ void ui_pedalboard_refresh(void)
         if (right > max_right) max_right = right;
     }
 
+    /* Leave 2 × LAYOUT_H_GAP so the connection square (centred at LAYOUT_H_GAP/2
+     * past max_right) has enough clearance from the hardware output column. */
     g_right_col_x_c = (g_pedalboard.plugin_count > 0)
-        ? (int)(max_right + LAYOUT_H_GAP / 2)
+        ? (int)(max_right + 2 * LAYOUT_H_GAP)
         : g_left_offset_c;
 
     /* ── Draw connection lines + squares (behind everything) ── */
@@ -1168,6 +1262,20 @@ void ui_pedalboard_refresh(void)
 
     /* ── Draw left I/O column (inputs) ── */
     draw_io_column(g_canvas_scroll, g_io_in_c, g_n_in_c, 0, UI_CANVAS_H, false);
+
+    /* Transparent tap zone over the left IO column — opens connection panel */
+    if (g_n_in_c > 0) {
+        lv_obj_t *io_tap = lv_obj_create(g_canvas_scroll);
+        lv_obj_set_size(io_tap, g_left_offset_c, UI_CANVAS_H);
+        lv_obj_set_pos(io_tap, 0, 0);
+        lv_obj_set_style_bg_opa(io_tap, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(io_tap, 0, 0);
+        lv_obj_set_style_shadow_width(io_tap, 0, 0);
+        lv_obj_clear_flag(io_tap, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_add_flag(io_tap, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_event_cb(io_tap, on_io_col_tap, LV_EVENT_SHORT_CLICKED,
+                            (void *)(intptr_t)(-1));
+    }
 
     /* ── Create plugin blocks (on top of connection lines) ── */
     for (int i = 0; i < g_pedalboard.plugin_count; i++) {
@@ -1182,6 +1290,22 @@ void ui_pedalboard_refresh(void)
     /* ── Draw right I/O column (outputs) ── */
     draw_io_column(g_canvas_scroll, g_io_out_c, g_n_out_c,
                    g_right_col_x_c, UI_CANVAS_H, true);
+
+    /* Transparent tap zone over the right IO column — selects system output as target */
+    if (g_n_out_c > 0) {
+        lv_obj_t *io_out_tap = lv_obj_create(g_canvas_scroll);
+        lv_obj_set_size(io_out_tap, IO_COL_W, UI_CANVAS_H);
+        lv_obj_set_pos(io_out_tap, g_right_col_x_c, 0);
+        lv_obj_set_style_bg_opa(io_out_tap, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(io_out_tap, 0, 0);
+        lv_obj_set_style_shadow_width(io_out_tap, 0, 0);
+        lv_obj_clear_flag(io_out_tap, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_add_flag(io_out_tap, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_event_cb(io_out_tap, on_io_out_tap, LV_EVENT_SHORT_CLICKED, NULL);
+    }
+
+    /* ── Draw connection squares on top of everything ── */
+    draw_conn_squares();
 
     /* ── Dynamic content dimensions ── */
     int content_w = g_right_col_x_c + IO_COL_W + 20;
@@ -1236,7 +1360,7 @@ void ui_pedalboard_init(lv_obj_t *parent)
     } else {
         /* Show placeholder */
         lv_obj_t *lbl = lv_label_create(g_canvas_scroll);
-        lv_label_set_text(lbl, "No pedalboard loaded.\nTap 'Banks' to open one.");
+        lv_label_set_text(lbl, TR(TR_PB_EMPTY_MSG));
         lv_obj_set_style_text_color(lbl, UI_COLOR_TEXT_DIM, 0);
         lv_obj_set_style_text_font(lbl, &lv_font_montserrat_18, 0);
         lv_obj_align(lbl, LV_ALIGN_CENTER, 0, 0);
@@ -1304,13 +1428,65 @@ static bool uri_to_jack_port(const char *uri, const pedalboard_t *pb,
     return false;
 }
 
+/* ─── Last-state persistence ─────────────────────────────────────────────────── */
+
+static void last_state_save(void)
+{
+    if (!g_pb_loaded) return;
+    mpt_settings_t *s = settings_get();
+
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "pedalboard", g_pedalboard.path);
+    cJSON_AddNumberToObject(root, "snapshot",   g_pedalboard.current_snapshot);
+
+    char *json = cJSON_Print(root);
+    cJSON_Delete(root);
+    if (!json) return;
+
+    FILE *f = fopen(s->last_state_file, "w");
+    if (f) { fputs(json, f); fclose(f); }
+    free(json);
+}
+
+void ui_pedalboard_save_last_state(void)
+{
+    last_state_save();
+}
+
+/* ─── Apply snapshot to mod-host and refresh UI ──────────────────────────────── */
+
+void ui_pedalboard_apply_snapshot(int idx)
+{
+    if (!g_pb_loaded) return;
+    if (idx < 0 || idx >= g_pedalboard.snapshot_count) return;
+
+    pb_snapshot_load(&g_pedalboard, idx);
+
+    pb_snapshot_t *snap = &g_pedalboard.snapshots[idx];
+    for (int i = 0; i < snap->plugin_count; i++) {
+        snap_plugin_t *sp = &snap->plugins[i];
+        pb_plugin_t *plug = pb_find_plugin_by_symbol(&g_pedalboard, sp->symbol);
+        if (!plug) continue;
+        host_bypass(plug->instance_id, sp->bypassed);
+        for (int j = 0; j < sp->param_count; j++)
+            host_param_set(plug->instance_id, sp->params[j].symbol, sp->params[j].value);
+        for (int j = 0; j < sp->patch_param_count; j++)
+            if (sp->patch_params[j].path[0])
+                host_patch_set(plug->instance_id,
+                               sp->patch_params[j].uri,
+                               sp->patch_params[j].path);
+    }
+    ui_snapshot_bar_refresh();
+    last_state_save();
+}
+
 void ui_pedalboard_load(const char *bundle_path)
 {
     pb_init(&g_pedalboard);
     fprintf(stderr, "[ui_pedalboard] loading bundle: %s\n", bundle_path);
     if (pb_load(&g_pedalboard, bundle_path) < 0) {
         fprintf(stderr, "[ui_pedalboard] pb_load failed\n");
-        ui_app_show_message("Error", "Failed to load pedalboard.", 0);
+        ui_app_show_toast_error(TR(TR_MSG_PB_LOAD_ERROR));
         return;
     }
     fprintf(stderr, "[ui_pedalboard] loaded '%s': %d plugins, %d connections\n",
@@ -1343,6 +1519,13 @@ void ui_pedalboard_load(const char *bundle_path)
             host_param_set(plug->instance_id, port->symbol, port->value);
         }
 
+        /* Patch parameters (file paths) */
+        for (int j = 0; j < plug->patch_param_count; j++) {
+            pb_patch_t *pp = &plug->patch_params[j];
+            if (pp->path[0])
+                host_patch_set(plug->instance_id, pp->uri, pp->path);
+        }
+
         /* MIDI CC bindings */
         for (int j = 0; j < plug->port_count; j++) {
             pb_port_t *port = &plug->ports[j];
@@ -1372,27 +1555,113 @@ void ui_pedalboard_load(const char *bundle_path)
 
     ui_app_update_title(g_pedalboard.name, false);
     ui_pedalboard_refresh();
+    last_state_save();
 }
 
 void ui_pedalboard_save(void)
 {
     if (!g_pb_loaded) return;
     if (pb_save(&g_pedalboard) < 0) {
-        ui_app_show_message("Error", "Failed to save pedalboard.", 0);
+        ui_app_show_toast_error(TR(TR_MSG_PB_SAVE_FAIL));
         return;
     }
     ui_app_update_title(g_pedalboard.name, false);
 }
 
+void ui_pedalboard_save_snapshot(void)
+{
+    if (!g_pb_loaded) return;
+    int idx = g_pedalboard.current_snapshot;
+    if (idx < 0 || idx >= g_pedalboard.snapshot_count) return;
+
+    pb_snapshot_overwrite(&g_pedalboard, idx);
+
+    /* Save only snapshots.json (not the full TTL) */
+    char snap_path[1024];
+    snprintf(snap_path, sizeof(snap_path), "%s/snapshots.json", g_pedalboard.path);
+    if (snapshot_save(snap_path, g_pedalboard.snapshots,
+                      g_pedalboard.snapshot_count,
+                      g_pedalboard.current_snapshot) < 0) {
+        ui_app_show_toast_error(TR(TR_MSG_SNAP_SAVE_FAIL));
+        return;
+    }
+    g_pedalboard.modified = false;
+    ui_app_update_title(g_pedalboard.name, false);
+}
+
+void ui_pedalboard_delete_snapshot(void)
+{
+    if (!g_pb_loaded) return;
+    int idx = g_pedalboard.current_snapshot;
+    if (idx < 0 || idx >= g_pedalboard.snapshot_count) return;
+
+    pb_snapshot_delete(&g_pedalboard, idx);
+
+    char snap_path[1024];
+    snprintf(snap_path, sizeof(snap_path), "%s/snapshots.json", g_pedalboard.path);
+    snapshot_save(snap_path, g_pedalboard.snapshots,
+                  g_pedalboard.snapshot_count,
+                  g_pedalboard.current_snapshot);
+
+    ui_snapshot_bar_refresh();
+    ui_app_update_title(g_pedalboard.name, g_pedalboard.modified);
+}
+
+void ui_pedalboard_delete(void)
+{
+    if (!g_pb_loaded) return;
+
+    char bundle_path[PB_PATH_MAX];
+    snprintf(bundle_path, sizeof(bundle_path), "%s", g_pedalboard.path);
+
+    /* Unload from mod-host before removing files */
+    host_remove_all();
+
+    pb_init(&g_pedalboard);
+    g_pb_loaded = false;
+
+    pb_bundle_delete(bundle_path);
+
+    ui_pedalboard_refresh();
+    ui_app_update_title(TR(TR_NO_PEDALBOARD), false);
+}
+
+/* Async callback: update param editor on the main LVGL thread. */
+typedef struct { char sym[PB_SYMBOL_MAX]; float val; } param_upd_t;
+
+static void param_editor_async_cb(void *arg)
+{
+    param_upd_t *upd = arg;
+    ui_param_editor_update(upd->sym, upd->val);
+    free(upd);
+}
+
 void ui_pedalboard_update_param(int instance_id, const char *symbol, float value)
 {
+    /* Called from the feedback thread — protect g_pedalboard with the mutex. */
+    if (!g_pb_loaded) return;
+
+    bool found = false;
+    pthread_mutex_lock(&g_pb_mutex);
     pb_plugin_t *plug = pb_find_plugin(&g_pedalboard, instance_id);
-    if (!plug) return;
-    for (int i = 0; i < plug->port_count; i++) {
-        if (strcmp(plug->ports[i].symbol, symbol) == 0) {
-            plug->ports[i].value = value;
-            ui_param_editor_update(symbol, value);
-            break;
+    if (plug) {
+        for (int i = 0; i < plug->port_count; i++) {
+            if (strcmp(plug->ports[i].symbol, symbol) == 0) {
+                plug->ports[i].value = value;
+                found = true;
+                break;
+            }
+        }
+    }
+    pthread_mutex_unlock(&g_pb_mutex);
+
+    /* ui_param_editor_update touches LVGL — schedule on the main thread. */
+    if (found) {
+        param_upd_t *upd = malloc(sizeof(*upd));
+        if (upd) {
+            snprintf(upd->sym, sizeof(upd->sym), "%s", symbol);
+            upd->val = value;
+            lv_async_call(param_editor_async_cb, upd);
         }
     }
 }

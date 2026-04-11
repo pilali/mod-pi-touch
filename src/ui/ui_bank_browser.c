@@ -4,6 +4,7 @@
 #include "../bank.h"
 #include "../settings.h"
 #include "../pedalboard.h"
+#include "../i18n.h"
 
 #include <string.h>
 #include <stdio.h>
@@ -65,25 +66,31 @@ static void do_load(bool save_first)
 static void save_and_load_cb(lv_event_t *e)
 {
     lv_obj_t *overlay = lv_event_get_user_data(e);
-    lv_obj_del(overlay);
+    lv_obj_add_flag(overlay, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_delete_async(overlay);
     do_load(true);
 }
 
 static void discard_and_load_cb(lv_event_t *e)
 {
     lv_obj_t *overlay = lv_event_get_user_data(e);
-    lv_obj_del(overlay);
+    lv_obj_add_flag(overlay, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_delete_async(overlay);
     do_load(false);
 }
 
 static void cancel_load_cb(lv_event_t *e)
 {
     lv_obj_t *overlay = lv_event_get_user_data(e);
-    lv_obj_del(overlay);
+    lv_obj_add_flag(overlay, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_delete_async(overlay);
     /* Stay in bank browser — do nothing */
 }
 
-static void show_save_confirm(const char *pb_name)
+/* Show load confirmation dialog.
+ * If current pedalboard has unsaved changes: Save / Load / Cancel.
+ * Otherwise: Load / Cancel. */
+static void show_load_confirm(const char *new_name)
 {
     lv_obj_t *overlay = lv_obj_create(lv_layer_top());
     lv_obj_set_size(overlay, LV_PCT(100), LV_PCT(100));
@@ -92,7 +99,7 @@ static void show_save_confirm(const char *pb_name)
     lv_obj_center(overlay);
 
     lv_obj_t *box = lv_obj_create(overlay);
-    lv_obj_set_size(box, 560, 180);
+    lv_obj_set_size(box, 560, LV_SIZE_CONTENT);
     lv_obj_center(box);
     lv_obj_set_style_bg_color(box, UI_COLOR_SURFACE, 0);
     lv_obj_set_style_border_color(box, UI_COLOR_PRIMARY, 0);
@@ -105,13 +112,21 @@ static void show_save_confirm(const char *pb_name)
     lv_obj_set_style_pad_row(box, 12, 0);
 
     /* Message */
-    char msg[PB_NAME_MAX + 40];
-    snprintf(msg, sizeof(msg), "Save changes to '%s'?", pb_name);
+    char msg[PB_NAME_MAX * 2 + 80];
+    bool has_unsaved = ui_pedalboard_is_loaded() && ui_pedalboard_get()->modified;
+    if (has_unsaved) {
+        snprintf(msg, sizeof(msg),
+                 "Load \"%s\"?\n\nUnsaved changes to \"%s\" will be lost.",
+                 new_name, ui_pedalboard_get()->name);
+    } else {
+        snprintf(msg, sizeof(msg), "Load \"%s\"?", new_name);
+    }
     lv_obj_t *lbl = lv_label_create(box);
     lv_label_set_text(lbl, msg);
     lv_obj_set_style_text_color(lbl, UI_COLOR_TEXT, 0);
     lv_obj_set_style_text_font(lbl, &lv_font_montserrat_18, 0);
     lv_obj_set_width(lbl, LV_PCT(100));
+    lv_label_set_long_mode(lbl, LV_LABEL_LONG_WRAP);
 
     /* Button row */
     lv_obj_t *row = lv_obj_create(box);
@@ -123,28 +138,30 @@ static void show_save_confirm(const char *pb_name)
     lv_obj_set_style_border_width(row, 0, 0);
     lv_obj_set_style_pad_all(row, 0, 0);
 
-    /* Save */
-    lv_obj_t *btn_save = lv_btn_create(row);
-    lv_obj_set_size(btn_save, 140, 44);
-    lv_obj_set_style_bg_color(btn_save, UI_COLOR_PRIMARY, 0);
-    lv_obj_t *lbl_s = lv_label_create(btn_save);
-    lv_label_set_text(lbl_s, LV_SYMBOL_SAVE " Save");
-    lv_obj_center(lbl_s);
-    lv_obj_add_event_cb(btn_save, save_and_load_cb, LV_EVENT_CLICKED, overlay);
+    if (has_unsaved) {
+        /* Save first, then load */
+        lv_obj_t *btn_save = lv_btn_create(row);
+        lv_obj_set_size(btn_save, 140, 44);
+        lv_obj_set_style_bg_color(btn_save, UI_COLOR_ACCENT, 0);
+        lv_obj_t *lbl_s = lv_label_create(btn_save);
+        lv_label_set_text(lbl_s, LV_SYMBOL_SAVE " Save & Load");
+        lv_obj_center(lbl_s);
+        lv_obj_add_event_cb(btn_save, save_and_load_cb, LV_EVENT_CLICKED, overlay);
+    }
 
-    /* Don't Save */
-    lv_obj_t *btn_discard = lv_btn_create(row);
-    lv_obj_set_size(btn_discard, 160, 44);
-    lv_obj_set_style_bg_color(btn_discard, UI_COLOR_BYPASS, 0);
-    lv_obj_t *lbl_d = lv_label_create(btn_discard);
-    lv_label_set_text(lbl_d, "Don't Save");
-    lv_obj_center(lbl_d);
-    lv_obj_add_event_cb(btn_discard, discard_and_load_cb, LV_EVENT_CLICKED, overlay);
+    /* Load without saving */
+    lv_obj_t *btn_load = lv_btn_create(row);
+    lv_obj_set_size(btn_load, has_unsaved ? 120 : 160, 44);
+    lv_obj_set_style_bg_color(btn_load, UI_COLOR_PRIMARY, 0);
+    lv_obj_t *lbl_l = lv_label_create(btn_load);
+    lv_label_set_text(lbl_l, has_unsaved ? "Load" : LV_SYMBOL_RIGHT " Load");
+    lv_obj_center(lbl_l);
+    lv_obj_add_event_cb(btn_load, discard_and_load_cb, LV_EVENT_CLICKED, overlay);
 
     /* Cancel */
     lv_obj_t *btn_cancel = lv_btn_create(row);
     lv_obj_set_size(btn_cancel, 120, 44);
-    lv_obj_set_style_bg_color(btn_cancel, UI_COLOR_ACCENT, 0);
+    lv_obj_set_style_bg_color(btn_cancel, UI_COLOR_BYPASS, 0);
     lv_obj_t *lbl_c = lv_label_create(btn_cancel);
     lv_label_set_text(lbl_c, "Cancel");
     lv_obj_center(lbl_c);
@@ -158,14 +175,15 @@ static void pedal_select_cb(lv_event_t *e)
 
     snprintf(g_pending_bundle, sizeof(g_pending_bundle), "%s", bundle);
 
-    /* Show save-confirm only if a pedalboard is loaded with unsaved changes */
-    if (ui_pedalboard_is_loaded() && ui_pedalboard_get()->modified) {
-        show_save_confirm(ui_pedalboard_get()->name);
-        return;
-    }
+    /* Extract pedalboard name from bundle path for the dialog */
+    const char *sl = strrchr(g_pending_bundle, '/');
+    char name[PB_NAME_MAX];
+    snprintf(name, sizeof(name), "%s", sl ? sl + 1 : g_pending_bundle);
+    char *dot = strrchr(name, '.');
+    if (dot) *dot = '\0';
 
-    ui_app_show_screen(UI_SCREEN_PEDALBOARD);
-    ui_pedalboard_load(g_pending_bundle);
+    /* Always confirm before loading */
+    show_load_confirm(name);
 }
 
 static void refresh_pedalboard_list(void)
@@ -181,7 +199,7 @@ static void refresh_pedalboard_list(void)
         g_pb_count = pb_list(s->pedalboards_dir, g_pb_paths, 256);
         if (g_pb_count == 0) {
             lv_obj_t *lbl = lv_label_create(g_list);
-            lv_label_set_text(lbl, "No pedalboards found.");
+            lv_label_set_text(lbl, TR(TR_BANK_NO_PB_FOUND));
             lv_obj_set_style_text_color(lbl, UI_COLOR_TEXT_DIM, 0);
             return;
         }
@@ -201,7 +219,7 @@ static void refresh_pedalboard_list(void)
         bank_t *bank = &g_banks.banks[g_selected_bank];
         if (bank->pedal_count == 0) {
             lv_obj_t *lbl = lv_label_create(g_list);
-            lv_label_set_text(lbl, "No pedalboards in this bank.");
+            lv_label_set_text(lbl, TR(TR_BANK_NO_PB_IN_BANK));
             lv_obj_set_style_text_color(lbl, UI_COLOR_TEXT_DIM, 0);
             return;
         }
@@ -269,12 +287,12 @@ void ui_bank_browser_show(lv_obj_t *parent)
     lv_obj_set_size(btn_back, 80, 36);
     lv_obj_set_style_bg_color(btn_back, UI_COLOR_PRIMARY, 0);
     lv_obj_t *lbl_back = lv_label_create(btn_back);
-    lv_label_set_text(lbl_back, LV_SYMBOL_LEFT " Back");
+    lv_label_set_text_fmt(lbl_back, LV_SYMBOL_LEFT " %s", TR(TR_BACK));
     lv_obj_center(lbl_back);
     lv_obj_add_event_cb(btn_back, back_cb, LV_EVENT_CLICKED, NULL);
 
     lv_obj_t *hdr_lbl = lv_label_create(hdr);
-    lv_label_set_text(hdr_lbl, "Pedalboards");
+    lv_label_set_text(hdr_lbl, TR(TR_BANK_TITLE));
     lv_obj_set_style_text_color(hdr_lbl, UI_COLOR_TEXT, 0);
     lv_obj_set_style_text_font(hdr_lbl, &lv_font_montserrat_18, 0);
 
@@ -296,7 +314,7 @@ void ui_bank_browser_show(lv_obj_t *parent)
         lv_obj_set_height(btn_all, 34);
         lv_obj_set_style_bg_color(btn_all, UI_COLOR_PRIMARY, 0);
         lv_obj_t *lbl_all = lv_label_create(btn_all);
-        lv_label_set_text(lbl_all, "All");
+        lv_label_set_text(lbl_all, TR(TR_BANK_ALL));
         lv_obj_center(lbl_all);
         lv_obj_add_event_cb(btn_all, filter_cb, LV_EVENT_CLICKED, (void *)(intptr_t)-1);
         g_filter_btns[g_filter_btn_count++] = btn_all;

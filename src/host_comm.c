@@ -13,6 +13,7 @@
 #include <sys/select.h>
 #include <time.h>
 #include <stdarg.h>
+#include <sys/time.h>
 
 /* ─── Internal types ────────────────────────────────────────────────────────── */
 
@@ -60,6 +61,11 @@ static int tcp_connect(const char *addr, int port)
 
     int flag = 1;
     setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
+
+    /* RST on close — prevents mod-host from getting stuck in CLOSE_WAIT when
+     * we exit or crash, which would block the next connection attempt */
+    struct linger lg = { .l_onoff = 1, .l_linger = 0 };
+    setsockopt(fd, SOL_SOCKET, SO_LINGER, &lg, sizeof(lg));
 
     struct sockaddr_in sa = {
         .sin_family = AF_INET,
@@ -121,19 +127,26 @@ static void *fb_thread_func(void *arg)
         buf_len += n;
         buf[buf_len] = '\0';
 
-        /* Process null-terminated messages */
+        /* Process null-terminated messages.
+         * Use strnlen to stay within received data — a message without a null
+         * terminator would otherwise make strlen scan past buf_len. */
         char *p = buf;
         while (p < buf + buf_len) {
-            size_t mlen = strlen(p);
+            size_t remaining = (size_t)(buf + buf_len - p);
+            size_t mlen = strnlen(p, remaining);
             if (mlen == 0) { p++; continue; }
+            if (mlen == remaining) {
+                /* No null terminator yet — incomplete message; wait for more data */
+                break;
+            }
             if (h->feedback_cb)
                 h->feedback_cb(p, h->feedback_ud);
             p += mlen + 1;
         }
-        /* Shift remaining partial data */
-        int remaining = (int)(buf + buf_len - p);
-        if (remaining > 0) memmove(buf, p, remaining);
-        buf_len = remaining;
+        /* Shift remaining partial data to front of buffer */
+        int leftover = (int)(buf + buf_len - p);
+        if (leftover > 0) memmove(buf, p, (size_t)leftover);
+        buf_len = leftover;
     }
     return NULL;
 }
@@ -314,7 +327,7 @@ int host_add_plugin(int instance, const char *uri)
 {
     char cmd[HOST_CMD_MAX];
     snprintf(cmd, sizeof(cmd), "add %s %d", uri, instance);
-    int r = host_comm_send_sync(cmd, NULL, 0, 5000);
+    int r = host_comm_send_sync(cmd, NULL, 0, 30000);
     fprintf(stderr, "[host] add %d %s → %d\n", instance, uri, r);
     return r;
 }
@@ -443,4 +456,14 @@ int host_cpu_load(float *out)
     int status = host_comm_send_sync("cpu_load", val, sizeof(val), 2000);
     if (status >= 0 && out) *out = (float)atof(val);
     return status;
+}
+
+int host_patch_set(int instance, const char *param_uri, const char *path)
+{
+    char cmd[HOST_CMD_MAX];
+    /* mod-host requires the value to be double-quoted */
+    snprintf(cmd, sizeof(cmd), "patch_set %d %s \"%s\"", instance, param_uri, path);
+    int r = host_comm_send_sync(cmd, NULL, 0, 3000);
+    fprintf(stderr, "[host] patch_set %d %s \"%s\" → %d\n", instance, param_uri, path, r);
+    return r;
 }

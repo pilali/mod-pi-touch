@@ -13,6 +13,13 @@
 #define PB_PATH_MAX       1024
 #define PB_SYMBOL_MAX     128
 
+/* ─── Patch parameter value (patch:writable atom:Path) ──────────────────────── */
+#define PB_MAX_PATCH_PARAMS 8
+typedef struct {
+    char uri[PB_URI_MAX];       /* parameter URI */
+    char path[PB_PATH_MAX];     /* current file path (empty = not set) */
+} pb_patch_t;
+
 /* ─── Plugin port (control input) ───────────────────────────────────────────── */
 typedef struct {
     char   symbol[PB_SYMBOL_MAX];
@@ -44,6 +51,9 @@ typedef struct {
     pb_port_t ports[PB_MAX_PORTS];
     int        port_count;
 
+    pb_patch_t patch_params[PB_MAX_PATCH_PARAMS];
+    int        patch_param_count;
+
     int    bypass_midi_channel;
     int    bypass_midi_cc;
 } pb_plugin_t;
@@ -60,12 +70,20 @@ typedef struct {
     float value;
 } snap_param_t;
 
+#define SNAP_MAX_PATCH_PARAMS 2
+typedef struct {
+    char uri[256];
+    char path[512];
+} snap_patch_t;
+
 typedef struct {
     char symbol[PB_SYMBOL_MAX];
     bool  bypassed;
     char  preset_uri[PB_URI_MAX];
-    snap_param_t params[PB_MAX_PORTS];
+    snap_param_t  params[PB_MAX_PORTS];
     int           param_count;
+    snap_patch_t  patch_params[SNAP_MAX_PATCH_PARAMS];
+    int           patch_param_count;
 } snap_plugin_t;
 
 typedef struct {
@@ -116,6 +134,10 @@ int pb_save_as(pedalboard_t *pb, const char *new_dir);
  * Returns count; fills paths array (each entry is a malloc'd string). */
 int pb_list(const char *base_dir, char **paths, int max_paths);
 
+/* Delete all files inside a bundle directory and the directory itself.
+ * Returns 0 on success, -1 on error. */
+int pb_bundle_delete(const char *bundle_path);
+
 /* Find a plugin by instance_id. Returns NULL if not found. */
 pb_plugin_t *pb_find_plugin(pedalboard_t *pb, int instance_id);
 
@@ -133,6 +155,7 @@ void pb_remove_connection(pedalboard_t *pb, const char *from, const char *to);
 
 /* Snapshot helpers */
 int  pb_snapshot_save_current(pedalboard_t *pb, const char *name);
+int  pb_snapshot_overwrite(pedalboard_t *pb, int index);   /* update slot with live state */
 int  pb_snapshot_load(pedalboard_t *pb, int index);
 void pb_snapshot_delete(pedalboard_t *pb, int index);
 void pb_snapshot_rename(pedalboard_t *pb, int index, const char *name);

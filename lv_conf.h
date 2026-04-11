@@ -16,6 +16,10 @@
 /* ─── Memory ────────────────────────────────────────────────────────────────── */
 #define LV_MEM_SIZE (8 * 1024 * 1024U)  /* 8 MB for UI objects */
 
+/* ─── OS / threading ────────────────────────────────────────────────────────── */
+/* Enable pthread support so lv_async_call() is thread-safe (mutex-protected). */
+#define LV_USE_OS   LV_OS_PTHREAD
+
 /* ─── HAL settings ─────────────────────────────────────────────────────────── */
 #define LV_DEF_REFR_PERIOD 16   /* ~60 fps */
 #define LV_INDEV_DEF_READ_PERIOD 16
@@ -93,8 +97,16 @@
 #define LV_USE_PERF_MONITOR 0
 #define LV_USE_MEM_MONITOR 0
 
-/* ─── File system (not used) ────────────────────────────────────────────────── */
-#define LV_USE_FS_POSIX 0
+/* ─── File system ───────────────────────────────────────────────────────────── */
+#define LV_USE_FS_POSIX 1
+#if LV_USE_FS_POSIX
+    #define LV_FS_POSIX_LETTER 'A'  /* paths: "A:/absolute/path/to/file" */
+    #define LV_FS_POSIX_PATH   ""   /* prepended to path after drive letter+colon */
+    #define LV_FS_POSIX_CACHE_SIZE 0
+#endif
+
+/* ─── PNG decoder (lodepng, bundled) ────────────────────────────────────────── */
+#define LV_USE_LODEPNG 1
 
 /* ─── Assert ────────────────────────────────────────────────────────────────── */
 #define LV_USE_ASSERT_NULL 1

@@ -46,11 +46,15 @@ add_subdirectory(${LVGL_DIR} lvgl EXCLUDE_FROM_ALL)
 # LVGL falls back to portable C blend paths when these are absent.
 get_target_property(_lvgl_srcs lvgl SOURCES)
 list(FILTER _lvgl_srcs EXCLUDE REGEX "\\.S$")
+# Remove built-in Montserrat fonts — replaced by resources/fonts/ versions
+# compiled with Latin-1 Supplement (0xC0-0xFF) for accented character support.
+list(FILTER _lvgl_srcs EXCLUDE REGEX "lv_font_montserrat_[0-9]+\\.c$")
 set_target_properties(lvgl PROPERTIES SOURCES "${_lvgl_srcs}")
 
 # ─── Source files ─────────────────────────────────────────────────────────────
 set(SOURCES
     src/main.c
+    src/i18n.c
     src/host_comm.c
     src/hw_detect.c
     src/pedalboard.c
@@ -64,10 +68,19 @@ set(SOURCES
     src/ui/ui_plugin_block.c
     src/ui/ui_plugin_browser.c
     src/ui/ui_param_editor.c
+    src/ui/ui_file_browser.c
     src/ui/ui_snapshot_bar.c
     src/ui/ui_bank_browser.c
     src/ui/ui_settings.c
     ${CJSON_SRC}
+    resources/fonts/lv_font_montserrat_12.c
+    resources/fonts/lv_font_montserrat_14.c
+    resources/fonts/lv_font_montserrat_16.c
+    resources/fonts/lv_font_montserrat_18.c
+    resources/fonts/lv_font_montserrat_20.c
+    resources/fonts/lv_font_montserrat_24.c
+    resources/fonts/lv_font_montserrat_28.c
+    resources/fonts/lv_font_montserrat_32.c
 )
 
 # Linux display/input drivers from LVGL

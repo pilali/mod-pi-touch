@@ -2,6 +2,7 @@
 #include "ui_app.h"
 #include "ui_pedalboard.h"
 #include "../settings.h"
+#include "../i18n.h"
 #include "../host_comm.h"
 #include "../hw_detect.h"
 
@@ -124,8 +125,7 @@ static void apply_audio_cb(lv_event_t *e)
     if (ui_pedalboard_is_loaded())
         ui_pedalboard_refresh();
 
-    ui_app_show_message("Audio",
-        "JACK restarting.\nReload pedalboard if needed.", 0);
+    ui_app_show_toast(TR(TR_SETTINGS_JACK_RESTARTING));
 }
 
 static void build_audio_section(lv_obj_t *parent)
@@ -169,22 +169,22 @@ static void build_audio_section(lv_obj_t *parent)
         snprintf(in_str,  sizeof(in_str),  "N/A");
         snprintf(out_str, sizeof(out_str), "N/A");
     }
-    add_info_row(parent, "Detected inputs",  in_str);
-    add_info_row(parent, "Detected outputs", out_str);
-    add_info_row(parent, "Sample rate",      "48000 Hz (fixed)");
+    add_info_row(parent, TR(TR_SETTINGS_DETECTED_IN),  in_str);
+    add_info_row(parent, TR(TR_SETTINGS_DETECTED_OUT), out_str);
+    add_info_row(parent, TR(TR_SETTINGS_SAMPLE_RATE),  TR(TR_SETTINGS_SAMPLE_RATE_VAL));
 
     /* Dropdowns */
-    g_dd_device = add_dropdown_row(parent, "Interface", dev_opts,           cur_dev_sel);
-    g_dd_buffer = add_dropdown_row(parent, "Buffer",    "32\n64\n128\n256", buf_sel);
-    g_dd_bits   = add_dropdown_row(parent, "Bit depth", "16 bit\n24 bit",   bits_sel);
+    g_dd_device = add_dropdown_row(parent, TR(TR_SETTINGS_INTERFACE), dev_opts,                     cur_dev_sel);
+    g_dd_buffer = add_dropdown_row(parent, TR(TR_SETTINGS_BUFFER),    TR(TR_SETTINGS_BUFFER_SIZES), buf_sel);
+    g_dd_bits   = add_dropdown_row(parent, TR(TR_SETTINGS_BIT_DEPTH), TR(TR_SETTINGS_BIT_DEPTH_OPTS), bits_sel);
 
     /* Apply button */
     lv_obj_t *btn = lv_btn_create(parent);
-    lv_obj_set_size(btn, 220, 40);
+    lv_obj_set_size(btn, 260, 40);
     lv_obj_set_style_bg_color(btn, UI_COLOR_PRIMARY, 0);
     lv_obj_add_event_cb(btn, apply_audio_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t *lbl = lv_label_create(btn);
-    lv_label_set_text(lbl, "Apply (restart JACK)");
+    lv_label_set_text(lbl, TR(TR_SETTINGS_APPLY_JACK));
     lv_obj_center(lbl);
 }
 
@@ -214,7 +214,7 @@ static void build_midi_section(lv_obj_t *parent)
 
     if (n_hw == 0) {
         lv_obj_t *lbl = lv_label_create(parent);
-        lv_label_set_text(lbl, "No MIDI devices detected.");
+        lv_label_set_text(lbl, TR(TR_SETTINGS_NO_MIDI));
         lv_obj_set_style_text_color(lbl, UI_COLOR_TEXT_DIM, 0);
         return;
     }
@@ -273,6 +273,24 @@ static void build_midi_section(lv_obj_t *parent)
     }
 }
 
+/* ─── Language change ────────────────────────────────────────────────────────── */
+
+static void lang_changed_cb(lv_event_t *e)
+{
+    lv_obj_t *dd = lv_event_get_target(e);
+    uint16_t sel = lv_dropdown_get_selected(dd);
+    mpt_lang_t lang = (sel < LANG_COUNT) ? (mpt_lang_t)sel : LANG_EN;
+
+    i18n_set_lang(lang);
+
+    mpt_settings_t *s = settings_get();
+    snprintf(s->language, sizeof(s->language), "%s", i18n_lang_code(lang));
+    settings_save_prefs(s);
+
+    /* Rebuild the whole UI with new language */
+    ui_app_apply_language();
+}
+
 /* ─── Main entry point ───────────────────────────────────────────────────────── */
 
 void ui_settings_show(lv_obj_t *parent)
@@ -305,36 +323,37 @@ void ui_settings_show(lv_obj_t *parent)
     lv_obj_set_size(btn_back, 80, 36);
     lv_obj_set_style_bg_color(btn_back, UI_COLOR_PRIMARY, 0);
     lv_obj_t *lbl_back = lv_label_create(btn_back);
-    lv_label_set_text(lbl_back, LV_SYMBOL_LEFT " Back");
+    lv_label_set_text_fmt(lbl_back, LV_SYMBOL_LEFT " %s", TR(TR_BACK));
     lv_obj_center(lbl_back);
     lv_obj_add_event_cb(btn_back, back_cb, LV_EVENT_CLICKED, NULL);
 
     lv_obj_t *hdr_lbl = lv_label_create(hdr);
-    lv_label_set_text(hdr_lbl, "Settings");
+    lv_label_set_text(hdr_lbl, TR(TR_SETTINGS_TITLE));
     lv_obj_set_style_text_color(hdr_lbl, UI_COLOR_TEXT, 0);
     lv_obj_set_style_text_font(hdr_lbl, &lv_font_montserrat_18, 0);
 
     /* ── System ── */
-    add_section_header(parent, "System");
-    add_info_row(parent, "mod-host address", s->host_addr);
+    add_section_header(parent, TR(TR_SETTINGS_SYSTEM));
+    add_info_row(parent, TR(TR_SETTINGS_HOST_ADDR), s->host_addr);
     {
         char port_str[16];
         snprintf(port_str, sizeof(port_str), "%d", s->host_cmd_port);
-        add_info_row(parent, "mod-host port", port_str);
+        add_info_row(parent, TR(TR_SETTINGS_HOST_PORT), port_str);
     }
-    add_info_row(parent, "Pedalboards", s->pedalboards_dir);
-    add_info_row(parent, "Framebuffer",  s->fb_device);
-    add_info_row(parent, "Touch",        s->touch_device);
-    add_info_row(parent, "mod-host",
-        host_comm_is_connected() ? "Connected" : "Disconnected");
+    add_info_row(parent, TR(TR_SETTINGS_PB_DIR),  s->pedalboards_dir);
+    add_info_row(parent, TR(TR_SETTINGS_FB),       s->fb_device);
+    add_info_row(parent, TR(TR_SETTINGS_TOUCH),    s->touch_device);
+    add_info_row(parent, TR(TR_SETTINGS_MOD_HOST),
+        host_comm_is_connected() ? TR(TR_SETTINGS_CONNECTED)
+                                 : TR(TR_SETTINGS_DISCONNECTED));
 
     {
         lv_obj_t *cpu_row = make_row(parent);
         lv_obj_t *cpu_key = lv_label_create(cpu_row);
-        lv_label_set_text(cpu_key, "CPU load");
+        lv_label_set_text(cpu_key, TR(TR_SETTINGS_CPU));
         lv_obj_set_style_text_color(cpu_key, UI_COLOR_TEXT_DIM, 0);
         lv_obj_t *cpu_val = lv_label_create(cpu_row);
-        lv_label_set_text(cpu_val, "-- %");
+        lv_label_set_text(cpu_val, TR(TR_SETTINGS_CPU_DEFAULT));
         lv_obj_set_style_text_color(cpu_val, UI_COLOR_TEXT, 0);
         lv_obj_t *cpu_btn = lv_btn_create(cpu_row);
         lv_obj_set_size(cpu_btn, 44, 32);
@@ -345,11 +364,19 @@ void ui_settings_show(lv_obj_t *parent)
         lv_obj_add_event_cb(cpu_btn, cpu_refresh_cb, LV_EVENT_CLICKED, cpu_val);
     }
 
+    /* ── Language ── */
+    {
+        lv_obj_t *dd_lang = add_dropdown_row(parent, TR(TR_SETTINGS_LANGUAGE),
+                                              TR(TR_SETTINGS_LANGUAGE_OPTS),
+                                              (int)i18n_get_lang());
+        lv_obj_add_event_cb(dd_lang, lang_changed_cb, LV_EVENT_VALUE_CHANGED, NULL);
+    }
+
     /* ── Audio ── */
-    add_section_header(parent, "Audio");
+    add_section_header(parent, TR(TR_SETTINGS_AUDIO));
     build_audio_section(parent);
 
     /* ── MIDI ── */
-    add_section_header(parent, "MIDI");
+    add_section_header(parent, TR(TR_SETTINGS_MIDI));
     build_midi_section(parent);
 }

@@ -8,6 +8,7 @@
 #include <lilv/lilv.h>
 #include <lv2/atom/atom.h>
 #include <lv2/midi/midi.h>
+#include <lv2/patch/patch.h>
 #include "cJSON.h"
 
 /* ─── Internal state ─────────────────────────────────────────────────────────── */
@@ -38,26 +39,37 @@ static void extract_port(LilvPlugin *plugin, LilvPort *port, pm_port_info_t *pi)
     lilv_node_free(name_n);
 
     /* Type */
-    LilvNode *audio  = lilv_new_uri(w, LV2_CORE__AudioPort);
-    LilvNode *midi   = lilv_new_uri(w, LV2_ATOM__AtomPort);  /* modern LV2 MIDI uses atom:AtomPort */
-    LilvNode *ctrl   = lilv_new_uri(w, LV2_CORE__ControlPort);
-    LilvNode *input  = lilv_new_uri(w, LV2_CORE__InputPort);
-    LilvNode *output = lilv_new_uri(w, LV2_CORE__OutputPort);
-    LilvNode *cv     = lilv_new_uri(w, LV2_CORE__CVPort);
+    LilvNode *audio       = lilv_new_uri(w, LV2_CORE__AudioPort);
+    LilvNode *atom_port   = lilv_new_uri(w, LV2_ATOM__AtomPort);
+    LilvNode *atom_sup    = lilv_new_uri(w, LV2_ATOM__supports);
+    LilvNode *midi_event  = lilv_new_uri(w, LV2_MIDI__MidiEvent);
+    LilvNode *ctrl        = lilv_new_uri(w, LV2_CORE__ControlPort);
+    LilvNode *input       = lilv_new_uri(w, LV2_CORE__InputPort);
+    LilvNode *output      = lilv_new_uri(w, LV2_CORE__OutputPort);
+    LilvNode *cv          = lilv_new_uri(w, LV2_CORE__CVPort);
 
     bool is_in  = lilv_port_is_a(plugin, port, input);
     bool is_out = lilv_port_is_a(plugin, port, output);
 
-    if      (lilv_port_is_a(plugin, port, audio))
+    if (lilv_port_is_a(plugin, port, audio)) {
         pi->type = is_in ? PM_PORT_AUDIO_IN : PM_PORT_AUDIO_OUT;
-    else if (lilv_port_is_a(plugin, port, midi))
-        pi->type = is_in ? PM_PORT_MIDI_IN : PM_PORT_MIDI_OUT;
-    else if (lilv_port_is_a(plugin, port, cv))
+    } else if (lilv_port_is_a(plugin, port, atom_port)) {
+        /* Only treat as MIDI if the port explicitly supports midi:MidiEvent.
+         * Ports that only carry atom:Sequence/patch notifications ("Notify")
+         * are internal and should not appear in the user connection panel. */
+        LilvNodes *sup = lilv_port_get_value(plugin, port, atom_sup);
+        bool is_midi = sup && lilv_nodes_contains(sup, midi_event);
+        lilv_nodes_free(sup);
+        pi->type = is_midi ? (is_in ? PM_PORT_MIDI_IN : PM_PORT_MIDI_OUT)
+                           : (is_in ? PM_PORT_CV_IN   : PM_PORT_CV_OUT);
+    } else if (lilv_port_is_a(plugin, port, cv)) {
         pi->type = is_in ? PM_PORT_CV_IN : PM_PORT_CV_OUT;
-    else
+    } else {
         pi->type = is_in ? PM_PORT_CONTROL_IN : PM_PORT_CONTROL_OUT;
+    }
 
-    lilv_node_free(audio); lilv_node_free(midi); lilv_node_free(ctrl);
+    lilv_node_free(audio); lilv_node_free(atom_port); lilv_node_free(atom_sup);
+    lilv_node_free(midi_event); lilv_node_free(ctrl);
     lilv_node_free(input); lilv_node_free(output); lilv_node_free(cv);
 
     /* Range (for control ports) */
@@ -123,6 +135,93 @@ static void extract_plugin(const LilvPlugin *plugin, pm_plugin_info_t *pi)
         (void)parent;
     }
 
+    /* patch:writable parameters (e.g. file path params) */
+    {
+        LilvNode *pw_uri    = lilv_new_uri(g_world, LV2_PATCH__writable);
+        LilvNode *rdfs_rng  = lilv_new_uri(g_world, "http://www.w3.org/2000/01/rdf-schema#range");
+        LilvNode *rdfs_lbl  = lilv_new_uri(g_world, "http://www.w3.org/2000/01/rdf-schema#label");
+        LilvNode *atom_path = lilv_new_uri(g_world, LV2_ATOM__Path);
+        LilvNode *mod_ft    = lilv_new_uri(g_world, "http://moddevices.com/ns/mod#fileTypes");
+
+        LilvNodes *writables = lilv_plugin_get_value(plugin, pw_uri);
+        if (writables) {
+            LILV_FOREACH(nodes, it, writables) {
+                if (pi->patch_param_count >= PM_PATCH_MAX) break;
+                const LilvNode *param_uri = lilv_nodes_get(writables, it);
+
+                /* Check rdfs:range == atom:Path */
+                LilvNode *range = lilv_world_get(g_world, param_uri, rdfs_rng, NULL);
+                if (!range || !lilv_node_equals(range, atom_path)) {
+                    lilv_node_free(range);
+                    continue;
+                }
+                lilv_node_free(range);
+
+                pm_patch_param_t *pp = &pi->patch_params[pi->patch_param_count++];
+                memset(pp, 0, sizeof(*pp));
+                snprintf(pp->uri, sizeof(pp->uri), "%s", lilv_str(param_uri));
+
+                LilvNode *lbl = lilv_world_get(g_world, param_uri, rdfs_lbl, NULL);
+                if (lbl) {
+                    snprintf(pp->label, sizeof(pp->label), "%s", lilv_str(lbl));
+                    lilv_node_free(lbl);
+                }
+                LilvNode *ft = lilv_world_get(g_world, param_uri, mod_ft, NULL);
+                if (ft) {
+                    snprintf(pp->file_types, sizeof(pp->file_types), "%s", lilv_str(ft));
+                    lilv_node_free(ft);
+                }
+
+                /* Default browse dir: plugin bundle + "models"
+                 * Bundle URI is "file:///path/to/plugin.lv2/" */
+                const LilvNode *bundle = lilv_plugin_get_bundle_uri(plugin);
+                if (bundle) {
+                    const char *buri = lilv_str(bundle);
+                    /* Strip "file://" prefix */
+                    const char *bpath = buri;
+                    if (strncmp(bpath, "file://", 7) == 0) bpath += 7;
+                    /* Strip trailing slash */
+                    size_t blen = strlen(bpath);
+                    if (blen > 0 && bpath[blen-1] == '/')
+                        snprintf(pp->default_dir, sizeof(pp->default_dir),
+                                 "%.*smodels", (int)(blen-1), bpath);
+                    else
+                        snprintf(pp->default_dir, sizeof(pp->default_dir),
+                                 "%s/models", bpath);
+                }
+            }
+            lilv_nodes_free(writables);
+        }
+        lilv_node_free(pw_uri);
+        lilv_node_free(rdfs_rng);
+        lilv_node_free(rdfs_lbl);
+        lilv_node_free(atom_path);
+        lilv_node_free(mod_ft);
+    }
+
+    /* modgui:thumbnail — path to plugin preview PNG */
+    {
+        LilvNode *modgui_gui  = lilv_new_uri(g_world, "http://moddevices.com/ns/modgui#gui");
+        LilvNode *modgui_thumb = lilv_new_uri(g_world, "http://moddevices.com/ns/modgui#thumbnail");
+        LilvNodes *guis = lilv_plugin_get_value(plugin, modgui_gui);
+        if (guis) {
+            LILV_FOREACH(nodes, it, guis) {
+                const LilvNode *gui = lilv_nodes_get(guis, it);
+                LilvNode *thumb = lilv_world_get(g_world, gui, modgui_thumb, NULL);
+                if (thumb) {
+                    const char *uri = lilv_str(thumb);
+                    if (strncmp(uri, "file://", 7) == 0)
+                        snprintf(pi->thumbnail_path, sizeof(pi->thumbnail_path), "%s", uri + 7);
+                    lilv_node_free(thumb);
+                    break;
+                }
+            }
+            lilv_nodes_free(guis);
+        }
+        lilv_node_free(modgui_thumb);
+        lilv_node_free(modgui_gui);
+    }
+
     /* Ports */
     uint32_t num_ports = lilv_plugin_get_num_ports(plugin);
     for (uint32_t i = 0; i < num_ports && pi->port_count < PM_PORT_MAX; i++) {
@@ -143,9 +242,13 @@ static void extract_plugin(const LilvPlugin *plugin, pm_plugin_info_t *pi)
 
 /* ─── JSON cache ─────────────────────────────────────────────────────────────── */
 
+/* Bump this when the cache schema changes to force automatic regeneration */
+#define CACHE_VERSION 4
+
 static void save_cache(const char *cache_path)
 {
     cJSON *root = cJSON_CreateObject();
+    cJSON_AddNumberToObject(root, "version", CACHE_VERSION);
     cJSON *arr  = cJSON_CreateArray();
     cJSON_AddItemToObject(root, "plugins", arr);
 
@@ -161,17 +264,47 @@ static void save_cache(const char *cache_path)
         for (int j = 0; j < p->port_count; j++) {
             pm_port_info_t *pt = &p->ports[j];
             cJSON *po = cJSON_CreateObject();
-            cJSON_AddStringToObject(po, "symbol", pt->symbol);
-            cJSON_AddStringToObject(po, "name",   pt->name);
-            cJSON_AddNumberToObject(po, "type",   (double)pt->type);
-            cJSON_AddNumberToObject(po, "min",    (double)pt->min);
-            cJSON_AddNumberToObject(po, "max",    (double)pt->max);
-            cJSON_AddNumberToObject(po, "default",(double)pt->default_val);
-            cJSON_AddBoolToObject(po, "toggled",  pt->toggled);
-            cJSON_AddBoolToObject(po, "integer",  pt->integer);
+            cJSON_AddStringToObject(po, "symbol",  pt->symbol);
+            cJSON_AddStringToObject(po, "name",    pt->name);
+            cJSON_AddNumberToObject(po, "type",    (double)pt->type);
+            cJSON_AddNumberToObject(po, "min",     (double)pt->min);
+            cJSON_AddNumberToObject(po, "max",     (double)pt->max);
+            cJSON_AddNumberToObject(po, "default", (double)pt->default_val);
+            cJSON_AddBoolToObject(po, "toggled",   pt->toggled);
+            cJSON_AddBoolToObject(po, "integer",   pt->integer);
+            cJSON_AddBoolToObject(po, "enumeration", pt->enumeration);
+            if (pt->enum_count > 0) {
+                cJSON *elabels = cJSON_CreateArray();
+                cJSON *evalues = cJSON_CreateArray();
+                for (int k = 0; k < pt->enum_count; k++) {
+                    cJSON_AddItemToArray(elabels,
+                        cJSON_CreateString(pt->enum_labels[k]));
+                    cJSON_AddItemToArray(evalues,
+                        cJSON_CreateNumber((double)pt->enum_values[k]));
+                }
+                cJSON_AddItemToObject(po, "enum_labels", elabels);
+                cJSON_AddItemToObject(po, "enum_values", evalues);
+            }
             cJSON_AddItemToArray(ports, po);
         }
         cJSON_AddItemToObject(obj, "ports", ports);
+
+        /* patch:writable parameters */
+        if (p->patch_param_count > 0) {
+            cJSON *pps = cJSON_CreateArray();
+            for (int j = 0; j < p->patch_param_count; j++) {
+                pm_patch_param_t *pp = &p->patch_params[j];
+                cJSON *ppo = cJSON_CreateObject();
+                cJSON_AddStringToObject(ppo, "uri",         pp->uri);
+                cJSON_AddStringToObject(ppo, "label",       pp->label);
+                cJSON_AddStringToObject(ppo, "file_types",  pp->file_types);
+                cJSON_AddStringToObject(ppo, "default_dir", pp->default_dir);
+                cJSON_AddItemToArray(pps, ppo);
+            }
+            cJSON_AddItemToObject(obj, "patch_params", pps);
+        }
+
+        cJSON_AddStringToObject(obj, "thumbnail_path", p->thumbnail_path);
         cJSON_AddItemToArray(arr, obj);
     }
 
@@ -201,6 +334,14 @@ static bool load_cache(const char *cache_path)
     free(buf);
     if (!root) return false;
 
+    /* Reject cache if version doesn't match — forces lilv rescan */
+    cJSON *ver = cJSON_GetObjectItem(root, "version");
+    if (!cJSON_IsNumber(ver) || (int)ver->valuedouble != CACHE_VERSION) {
+        cJSON_Delete(root);
+        printf("[plugin_manager] Cache version mismatch — rescanning LV2 plugins\n");
+        return false;
+    }
+
     cJSON *arr = cJSON_GetObjectItem(root, "plugins");
     if (!cJSON_IsArray(arr)) { cJSON_Delete(root); return false; }
 
@@ -222,6 +363,8 @@ static bool load_cache(const char *cache_path)
         if (cJSON_IsString(nm))  snprintf(p->name,     sizeof(p->name),     "%s", nm->valuestring);
         if (cJSON_IsString(au))  snprintf(p->author,   sizeof(p->author),   "%s", au->valuestring);
         if (cJSON_IsString(cat)) snprintf(p->category, sizeof(p->category), "%s", cat->valuestring);
+        cJSON *tp = cJSON_GetObjectItem(obj, "thumbnail_path");
+        if (cJSON_IsString(tp)) snprintf(p->thumbnail_path, sizeof(p->thumbnail_path), "%s", tp->valuestring);
 
         cJSON *ports = cJSON_GetObjectItem(obj, "ports");
         if (cJSON_IsArray(ports)) {
@@ -229,16 +372,58 @@ static bool load_cache(const char *cache_path)
             for (int j = 0; j < np && p->port_count < PM_PORT_MAX; j++) {
                 cJSON *po = cJSON_GetArrayItem(ports, j);
                 pm_port_info_t *pt = &p->ports[p->port_count++];
-                cJSON *s = cJSON_GetObjectItem(po, "symbol");
-                cJSON *t = cJSON_GetObjectItem(po, "type");
-                cJSON *mn = cJSON_GetObjectItem(po, "min");
-                cJSON *mx = cJSON_GetObjectItem(po, "max");
-                cJSON *df = cJSON_GetObjectItem(po, "default");
-                if (cJSON_IsString(s)) snprintf(pt->symbol, sizeof(pt->symbol), "%s", s->valuestring);
-                if (cJSON_IsNumber(t)) pt->type = (pm_port_type_t)(int)t->valuedouble;
-                if (cJSON_IsNumber(mn)) pt->min = (float)mn->valuedouble;
-                if (cJSON_IsNumber(mx)) pt->max = (float)mx->valuedouble;
+                cJSON *s   = cJSON_GetObjectItem(po, "symbol");
+                cJSON *nm  = cJSON_GetObjectItem(po, "name");
+                cJSON *t   = cJSON_GetObjectItem(po, "type");
+                cJSON *mn  = cJSON_GetObjectItem(po, "min");
+                cJSON *mx  = cJSON_GetObjectItem(po, "max");
+                cJSON *df  = cJSON_GetObjectItem(po, "default");
+                cJSON *tog = cJSON_GetObjectItem(po, "toggled");
+                cJSON *itg = cJSON_GetObjectItem(po, "integer");
+                cJSON *enu = cJSON_GetObjectItem(po, "enumeration");
+                if (cJSON_IsString(s))  snprintf(pt->symbol, sizeof(pt->symbol), "%s", s->valuestring);
+                if (cJSON_IsString(nm)) snprintf(pt->name,   sizeof(pt->name),   "%s", nm->valuestring);
+                if (cJSON_IsNumber(t))  pt->type        = (pm_port_type_t)(int)t->valuedouble;
+                if (cJSON_IsNumber(mn)) pt->min         = (float)mn->valuedouble;
+                if (cJSON_IsNumber(mx)) pt->max         = (float)mx->valuedouble;
                 if (cJSON_IsNumber(df)) pt->default_val = (float)df->valuedouble;
+                if (cJSON_IsBool(tog))  pt->toggled     = cJSON_IsTrue(tog);
+                if (cJSON_IsBool(itg))  pt->integer     = cJSON_IsTrue(itg);
+                if (cJSON_IsBool(enu))  pt->enumeration = cJSON_IsTrue(enu);
+                cJSON *elabels = cJSON_GetObjectItem(po, "enum_labels");
+                cJSON *evalues = cJSON_GetObjectItem(po, "enum_values");
+                if (cJSON_IsArray(elabels) && cJSON_IsArray(evalues)) {
+                    int nc = cJSON_GetArraySize(elabels);
+                    if (nc > 16) nc = 16;
+                    for (int k = 0; k < nc; k++) {
+                        cJSON *lbl = cJSON_GetArrayItem(elabels, k);
+                        cJSON *val = cJSON_GetArrayItem(evalues, k);
+                        if (cJSON_IsString(lbl))
+                            snprintf(pt->enum_labels[k], PM_NAME_MAX, "%s", lbl->valuestring);
+                        if (cJSON_IsNumber(val))
+                            pt->enum_values[k] = (float)val->valuedouble;
+                    }
+                    pt->enum_count = nc;
+                }
+            }
+        }
+
+        /* patch:writable parameters */
+        cJSON *pps = cJSON_GetObjectItem(obj, "patch_params");
+        if (cJSON_IsArray(pps)) {
+            int npp = cJSON_GetArraySize(pps);
+            for (int j = 0; j < npp && p->patch_param_count < PM_PATCH_MAX; j++) {
+                cJSON *ppo = cJSON_GetArrayItem(pps, j);
+                pm_patch_param_t *pp = &p->patch_params[p->patch_param_count++];
+                memset(pp, 0, sizeof(*pp));
+                cJSON *u  = cJSON_GetObjectItem(ppo, "uri");
+                cJSON *lb = cJSON_GetObjectItem(ppo, "label");
+                cJSON *ft = cJSON_GetObjectItem(ppo, "file_types");
+                cJSON *dd = cJSON_GetObjectItem(ppo, "default_dir");
+                if (cJSON_IsString(u))  snprintf(pp->uri,         sizeof(pp->uri),         "%s", u->valuestring);
+                if (cJSON_IsString(lb)) snprintf(pp->label,       sizeof(pp->label),       "%s", lb->valuestring);
+                if (cJSON_IsString(ft)) snprintf(pp->file_types,  sizeof(pp->file_types),  "%s", ft->valuestring);
+                if (cJSON_IsString(dd)) snprintf(pp->default_dir, sizeof(pp->default_dir), "%s", dd->valuestring);
             }
         }
     }
@@ -252,6 +437,10 @@ static bool load_cache(const char *cache_path)
 
 int pm_init(const char *lv2_paths, const char *cache_path)
 {
+    /* Cleanup previous state if reinitializing */
+    if (g_plugins) { free(g_plugins); g_plugins = NULL; g_count = 0; }
+    if (g_world)   { lilv_world_free(g_world); g_world = NULL; }
+
     /* Try cache first */
     if (cache_path && load_cache(cache_path)) return 0;
 
@@ -261,6 +450,7 @@ int pm_init(const char *lv2_paths, const char *cache_path)
     /* Load paths */
     if (lv2_paths) {
         char *paths = strdup(lv2_paths);
+        if (!paths) { lilv_world_free(g_world); g_world = NULL; return -1; }
         char *tok = strtok(paths, ":");
         while (tok) {
             LilvNode *path = lilv_new_file_uri(g_world, NULL, tok);
@@ -275,7 +465,7 @@ int pm_init(const char *lv2_paths, const char *cache_path)
     const LilvPlugins *plugins = lilv_world_get_all_plugins(g_world);
     int total = (int)lilv_plugins_size(plugins);
     g_plugins = calloc(total, sizeof(pm_plugin_info_t));
-    if (!g_plugins) return -1;
+    if (!g_plugins) { lilv_world_free(g_world); g_world = NULL; return -1; }
     g_count = 0;
 
     LILV_FOREACH(plugins, i, plugins) {

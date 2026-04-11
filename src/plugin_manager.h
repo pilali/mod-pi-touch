@@ -7,6 +7,7 @@
 #define PM_NAME_MAX   256
 #define PM_CAT_MAX    128
 #define PM_PORT_MAX   64
+#define PM_PATCH_MAX  8   /* max patch:writable parameters per plugin */
 
 /* ─── Port descriptor (for display purposes) ─────────────────────────────────── */
 typedef enum {
@@ -36,6 +37,14 @@ typedef struct {
     int            enum_count;
 } pm_port_info_t;
 
+/* ─── Patch parameter (patch:writable with atom:Path range) ──────────────────── */
+typedef struct {
+    char uri[PM_URI_MAX];               /* full parameter URI */
+    char label[PM_NAME_MAX];            /* rdfs:label */
+    char file_types[PM_NAME_MAX];       /* mod:fileTypes e.g. "aidadspmodel" */
+    char default_dir[PM_URI_MAX];       /* suggested browse root (bundle models/) */
+} pm_patch_param_t;
+
 /* ─── Plugin descriptor ───────────────────────────────────────────────────────── */
 typedef struct {
     char uri[PM_URI_MAX];
@@ -52,6 +61,11 @@ typedef struct {
     int midi_in_count;
     int midi_out_count;
     int ctrl_in_count;
+
+    pm_patch_param_t patch_params[PM_PATCH_MAX];
+    int              patch_param_count;
+
+    char thumbnail_path[PM_URI_MAX]; /* absolute fs path to modgui thumbnail PNG, or "" */
 } pm_plugin_info_t;
 
 /* ─── API ─────────────────────────────────────────────────────────────────────── */

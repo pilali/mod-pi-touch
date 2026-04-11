@@ -60,6 +60,11 @@ SordModel *lv2u_load_ttl(const char *path)
 
 /* ─── TTL saving ─────────────────────────────────────────────────────────────── */
 
+static size_t file_sink(const void *buf, size_t len, void *stream)
+{
+    return fwrite(buf, 1, len, (FILE *)stream);
+}
+
 int lv2u_save_ttl(SordModel *model, const char *path, const char *base_uri)
 {
     FILE *f = fopen(path, "w");
@@ -92,14 +97,10 @@ int lv2u_save_ttl(SordModel *model, const char *path, const char *base_uri)
 
     SerdWriter *writer = serd_writer_new(
         SERD_TURTLE, SERD_STYLE_ABBREVIATED | SERD_STYLE_CURIED,
-        env,
-        &base,
-        (SerdSink)fwrite, f);
+        env, &base, file_sink, f);
 
-    /* Write env prefixes */
     serd_env_foreach(env, (SerdPrefixSink)serd_writer_set_prefix, writer);
 
-    /* Write all quads */
     SordIter *it = sord_begin(model);
     while (!sord_iter_end(it)) {
         SordQuad q;

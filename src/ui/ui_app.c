@@ -1,5 +1,8 @@
 #include "ui_app.h"
 #include "ui_pedalboard.h"
+#include "../pedalboard.h"
+#include "../settings.h"
+#include "../i18n.h"
 #include "ui_plugin_browser.h"
 #include "ui_bank_browser.h"
 #include "ui_settings.h"
@@ -20,12 +23,18 @@ lv_color_t UI_COLOR_BYPASS    = {0};
 lv_color_t UI_COLOR_ACTIVE    = {0};
 
 /* ─── Internal state ─────────────────────────────────────────────────────────── */
-static lv_obj_t *g_screen       = NULL;
-static lv_obj_t *g_top_bar      = NULL;
-static lv_obj_t *g_content_area = NULL;
-static lv_obj_t *g_snap_bar     = NULL;
-static lv_obj_t *g_title_label  = NULL;
-static lv_obj_t *g_mod_dot      = NULL;
+static lv_obj_t   *g_screen       = NULL;
+static lv_obj_t   *g_top_bar      = NULL;
+static lv_obj_t   *g_content_area = NULL;
+static lv_obj_t   *g_snap_bar     = NULL;
+static lv_obj_t   *g_title_label  = NULL;
+static lv_obj_t   *g_mod_dot      = NULL;
+static lv_obj_t   *g_banks_label  = NULL;
+static ui_screen_t g_current_screen = UI_SCREEN_PEDALBOARD;
+/* Toast state — declared here so ui_app_show_screen can cancel it before
+ * lv_obj_clean(lv_layer_top()) destroys g_toast without nulling the pointer. */
+static lv_obj_t   *g_toast       = NULL;
+static lv_timer_t *g_toast_timer = NULL;
 
 /* ─── Color theme (dark) ─────────────────────────────────────────────────────── */
 static void init_colors(void)
@@ -53,10 +62,222 @@ static void btn_add_cb(lv_event_t *e)
     ui_app_show_screen(UI_SCREEN_PLUGIN_BROWSER);
 }
 
+/* ─── Save menu ──────────────────────────────────────────────────────────────── */
+
+static lv_obj_t *g_save_menu = NULL;
+
+/* Sync close — safe only when called from outside the save menu's event tree
+ * (e.g. nav bar buttons, ui_app_show_screen). */
+static void save_menu_close(void)
+{
+    if (g_save_menu) { lv_obj_del(g_save_menu); g_save_menu = NULL; }
+}
+
+/* Async close — required when called from a callback whose sender is a child
+ * of g_save_menu (or g_save_menu itself), to avoid deleting the parent while
+ * LVGL is still dispatching the event. */
+static void save_menu_close_async(void)
+{
+    if (g_save_menu) {
+        lv_obj_add_flag(g_save_menu, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_delete_async(g_save_menu);
+        g_save_menu = NULL;
+    }
+}
+
+static void save_menu_overlay_cb(lv_event_t *e) { (void)e; save_menu_close_async(); }
+
+/* Save pedalboard flow */
+static void do_save_pedalboard(void *ud)
+{
+    (void)ud;
+    ui_pedalboard_save();
+    ui_app_show_message(TR(TR_SAVED), TR(TR_MSG_PB_SAVED), 2000);
+}
+static void confirm_save_pedalboard_cb(lv_event_t *e)
+{
+    (void)e;
+    save_menu_close_async();
+    ui_app_show_confirm(TR(TR_MENU_SAVE_PB),
+                        TR(TR_CONFIRM_SAVE_PB),
+                        do_save_pedalboard, NULL);
+}
+
+/* Save snapshot flow */
+static void do_save_snapshot(void *ud)
+{
+    (void)ud;
+    ui_pedalboard_save_snapshot();
+    ui_app_show_message(TR(TR_SAVED), TR(TR_MSG_SNAP_SAVED), 2000);
+}
+static void confirm_save_snapshot_cb(lv_event_t *e)
+{
+    (void)e;
+    save_menu_close_async();
+
+    pedalboard_t *pb = ui_pedalboard_get();
+    if (!pb || pb->current_snapshot < 0) {
+        ui_app_show_message(TR(TR_MSG_NO_SNAP), TR(TR_MSG_SELECT_SNAP_FIRST), 2000);
+        return;
+    }
+    char msg[256];
+    snprintf(msg, sizeof(msg), TR(TR_CONFIRM_SAVE_SNAP),
+             pb->snapshots[pb->current_snapshot].name);
+    ui_app_show_confirm(TR(TR_MENU_SAVE_SNAP), msg, do_save_snapshot, NULL);
+}
+
+/* Save as flow */
+static void do_save_as_input(const char *name, void *ud)
+{
+    (void)ud;
+    if (!name || !name[0]) return;
+    pedalboard_t *pb = ui_pedalboard_get();
+    if (!pb) return;
+
+    mpt_settings_t *s = settings_get();
+    char new_dir[PB_PATH_MAX];
+    snprintf(new_dir, sizeof(new_dir), "%s/%s.pedalboard", s->pedalboards_dir, name);
+
+    /* Update name before saving so the TTL reflects the new name */
+    snprintf(pb->name, sizeof(pb->name), "%s", name);
+
+    if (pb_save_as(pb, new_dir) == 0) {
+        ui_app_update_title(pb->name, false);
+        ui_pedalboard_save_last_state();
+        ui_app_show_toast(TR(TR_MSG_PB_SAVED));
+    } else {
+        ui_app_show_toast_error(TR(TR_MSG_PB_SAVE_ERROR));
+    }
+}
+static void save_as_cb(lv_event_t *e)
+{
+    (void)e;
+    save_menu_close_async();
+    pedalboard_t *pb = ui_pedalboard_get();
+    const char *current_name = pb ? pb->name : "";
+    ui_app_show_input("Save pedalboard as...", current_name, do_save_as_input, NULL);
+}
+
+/* Delete snapshot flow */
+static void do_delete_snapshot(void *ud)
+{
+    (void)ud;
+    ui_pedalboard_delete_snapshot();
+    ui_app_show_message(TR(TR_DELETED), TR(TR_MSG_SNAP_DELETED), 2000);
+}
+static void confirm_delete_snapshot_cb(lv_event_t *e)
+{
+    (void)e;
+    save_menu_close_async();
+    pedalboard_t *pb = ui_pedalboard_get();
+    if (!pb || pb->current_snapshot < 0) {
+        ui_app_show_message(TR(TR_MSG_NO_SNAP), TR(TR_MSG_SELECT_SNAP_FIRST), 2000);
+        return;
+    }
+    char msg[256];
+    snprintf(msg, sizeof(msg), TR(TR_CONFIRM_DELETE_SNAP),
+             pb->snapshots[pb->current_snapshot].name);
+    ui_app_show_confirm(TR(TR_SNAP_DELETE_TITLE), msg, do_delete_snapshot, NULL);
+}
+
+/* Delete pedalboard flow */
+static void do_delete_pedalboard(void *ud)
+{
+    (void)ud;
+    ui_pedalboard_delete();
+    ui_app_show_message(TR(TR_DELETED), TR(TR_MSG_PB_DELETED), 2000);
+}
+static void confirm_delete_pedalboard_cb(lv_event_t *e)
+{
+    (void)e;
+    save_menu_close_async();
+    pedalboard_t *pb = ui_pedalboard_get();
+    if (!pb || !ui_pedalboard_is_loaded()) {
+        ui_app_show_message(TR(TR_MSG_NO_PB_LOADED_TITLE), TR(TR_MSG_NO_PB_LOADED), 2000);
+        return;
+    }
+    char msg[256];
+    snprintf(msg, sizeof(msg), TR(TR_CONFIRM_DELETE_PB), pb->name);
+    ui_app_show_confirm(TR(TR_MENU_DELETE_PB), msg, do_delete_pedalboard, NULL);
+}
+
 static void btn_save_cb(lv_event_t *e)
 {
     (void)e;
-    ui_pedalboard_save();
+    if (g_save_menu) { save_menu_close(); return; }
+
+    /* Build a small dropdown near the save button */
+    lv_obj_t *overlay = lv_obj_create(lv_layer_top());
+    lv_obj_set_size(overlay, LV_PCT(100), LV_PCT(100));
+    lv_obj_set_style_bg_opa(overlay, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(overlay, 0, 0);
+    lv_obj_add_event_cb(overlay, save_menu_overlay_cb, LV_EVENT_CLICKED, NULL);
+    g_save_menu = overlay;
+
+    lv_obj_t *panel = lv_obj_create(overlay);
+    lv_obj_set_size(panel, 320, LV_SIZE_CONTENT);
+    lv_obj_align(panel, LV_ALIGN_TOP_RIGHT, -8, UI_TOP_BAR_H + 4);
+    lv_obj_set_style_bg_color(panel, UI_COLOR_SURFACE, 0);
+    lv_obj_set_style_border_color(panel, UI_COLOR_PRIMARY, 0);
+    lv_obj_set_style_border_width(panel, 1, 0);
+    lv_obj_set_style_radius(panel, 6, 0);
+    lv_obj_set_style_pad_all(panel, 6, 0);
+    lv_obj_set_style_pad_row(panel, 4, 0);
+    lv_obj_set_flex_flow(panel, LV_FLEX_FLOW_COLUMN);
+
+    lv_obj_t *b1 = lv_btn_create(panel);
+    lv_obj_set_size(b1, LV_PCT(100), 48);
+    lv_obj_set_style_bg_color(b1, UI_COLOR_ACCENT, 0);
+    lv_obj_set_style_radius(b1, 4, 0);
+    lv_obj_t *l1 = lv_label_create(b1);
+    lv_label_set_text_fmt(l1, LV_SYMBOL_SAVE " %s", TR(TR_MENU_SAVE_PB));
+    lv_obj_set_style_text_color(l1, UI_COLOR_TEXT, 0);
+    lv_obj_center(l1);
+    lv_obj_add_event_cb(b1, confirm_save_pedalboard_cb, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *b2 = lv_btn_create(panel);
+    lv_obj_set_size(b2, LV_PCT(100), 48);
+    lv_obj_set_style_bg_color(b2, UI_COLOR_SURFACE, 0);
+    lv_obj_set_style_border_color(b2, UI_COLOR_ACCENT, 0);
+    lv_obj_set_style_border_width(b2, 1, 0);
+    lv_obj_set_style_radius(b2, 4, 0);
+    lv_obj_t *l2 = lv_label_create(b2);
+    lv_label_set_text_fmt(l2, LV_SYMBOL_SAVE " %s", TR(TR_MENU_SAVE_PB_AS));
+    lv_obj_set_style_text_color(l2, UI_COLOR_TEXT, 0);
+    lv_obj_center(l2);
+    lv_obj_add_event_cb(b2, save_as_cb, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *b3 = lv_btn_create(panel);
+    lv_obj_set_size(b3, LV_PCT(100), 48);
+    lv_obj_set_style_bg_color(b3, UI_COLOR_PRIMARY, 0);
+    lv_obj_set_style_radius(b3, 4, 0);
+    lv_obj_t *l3 = lv_label_create(b3);
+    lv_label_set_text_fmt(l3, LV_SYMBOL_DOWNLOAD " %s", TR(TR_MENU_SAVE_SNAP));
+    lv_obj_set_style_text_color(l3, UI_COLOR_TEXT, 0);
+    lv_obj_center(l3);
+    lv_obj_add_event_cb(b3, confirm_save_snapshot_cb, LV_EVENT_CLICKED, NULL);
+
+    lv_color_t danger = lv_color_hex(0xC0392B);
+
+    lv_obj_t *b4 = lv_btn_create(panel);
+    lv_obj_set_size(b4, LV_PCT(100), 48);
+    lv_obj_set_style_bg_color(b4, danger, 0);
+    lv_obj_set_style_radius(b4, 4, 0);
+    lv_obj_t *l4 = lv_label_create(b4);
+    lv_label_set_text_fmt(l4, LV_SYMBOL_TRASH " %s", TR(TR_MENU_DELETE_SNAP));
+    lv_obj_set_style_text_color(l4, UI_COLOR_TEXT, 0);
+    lv_obj_center(l4);
+    lv_obj_add_event_cb(b4, confirm_delete_snapshot_cb, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *b5 = lv_btn_create(panel);
+    lv_obj_set_size(b5, LV_PCT(100), 48);
+    lv_obj_set_style_bg_color(b5, danger, 0);
+    lv_obj_set_style_radius(b5, 4, 0);
+    lv_obj_t *l5 = lv_label_create(b5);
+    lv_label_set_text_fmt(l5, LV_SYMBOL_TRASH " %s", TR(TR_MENU_DELETE_PB));
+    lv_obj_set_style_text_color(l5, UI_COLOR_TEXT, 0);
+    lv_obj_center(l5);
+    lv_obj_add_event_cb(b5, confirm_delete_pedalboard_cb, LV_EVENT_CLICKED, NULL);
 }
 
 static void btn_settings_cb(lv_event_t *e)
@@ -80,17 +301,17 @@ static void create_top_bar(void)
 
     /* Banks button (left) */
     lv_obj_t *btn_banks = lv_btn_create(g_top_bar);
-    lv_obj_set_size(btn_banks, 100, 44);
+    lv_obj_set_size(btn_banks, 110, 44);
     lv_obj_align(btn_banks, LV_ALIGN_LEFT_MID, 0, 0);
     lv_obj_set_style_bg_color(btn_banks, UI_COLOR_PRIMARY, 0);
     lv_obj_add_event_cb(btn_banks, btn_banks_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_t *lbl = lv_label_create(btn_banks);
-    lv_label_set_text(lbl, LV_SYMBOL_LIST " Pedalboards");
-    lv_obj_center(lbl);
+    g_banks_label = lv_label_create(btn_banks);
+    lv_label_set_text_fmt(g_banks_label, LV_SYMBOL_LIST " %s", TR(TR_BANKS));
+    lv_obj_center(g_banks_label);
 
     /* Pedalboard title (center) */
     g_title_label = lv_label_create(g_top_bar);
-    lv_label_set_text(g_title_label, "No pedalboard");
+    lv_label_set_text(g_title_label, TR(TR_NO_PEDALBOARD));
     lv_obj_set_style_text_color(g_title_label, UI_COLOR_TEXT, 0);
     lv_obj_set_style_text_font(g_title_label, &lv_font_montserrat_18, 0);
     lv_obj_align(g_title_label, LV_ALIGN_CENTER, 0, 0);
@@ -133,12 +354,6 @@ static void create_top_bar(void)
 
 /* ─── Modal helpers ──────────────────────────────────────────────────────────── */
 
-static void overlay_close_cb(lv_event_t *e)
-{
-    lv_obj_t *overlay = lv_event_get_user_data(e);
-    lv_obj_del(overlay);
-}
-
 typedef struct {
     ui_confirm_cb_t cb;
     void           *ud;
@@ -148,15 +363,19 @@ typedef struct {
 static void confirm_ok_cb(lv_event_t *e)
 {
     confirm_ctx_t *ctx = lv_event_get_user_data(e);
-    lv_obj_del(ctx->overlay);
-    if (ctx->cb) ctx->cb(ctx->ud);
+    lv_obj_add_flag(ctx->overlay, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_delete_async(ctx->overlay);
+    ui_confirm_cb_t cb = ctx->cb;
+    void           *ud = ctx->ud;
     free(ctx);
+    if (cb) cb(ud);
 }
 
 static void confirm_cancel_cb(lv_event_t *e)
 {
     confirm_ctx_t *ctx = lv_event_get_user_data(e);
-    lv_obj_del(ctx->overlay);
+    lv_obj_add_flag(ctx->overlay, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_delete_async(ctx->overlay);
     free(ctx);
 }
 
@@ -171,18 +390,25 @@ typedef struct {
 static void input_ok_cb(lv_event_t *e)
 {
     input_ctx_t *ctx = lv_event_get_user_data(e);
-    const char  *text = lv_textarea_get_text(ctx->ta);
-    lv_obj_del(ctx->kbd);
-    lv_obj_del(ctx->overlay);
-    if (ctx->cb) ctx->cb(text, ctx->ud);
+    /* Copy text before anything is deleted */
+    const char *text = lv_textarea_get_text(ctx->ta);
+    char text_copy[512];
+    snprintf(text_copy, sizeof(text_copy), "%s", text ? text : "");
+    lv_obj_add_flag(ctx->overlay, LV_OBJ_FLAG_HIDDEN);
+    lv_keyboard_set_textarea(ctx->kbd, NULL);
+    lv_obj_delete_async(ctx->overlay);
+    ui_input_cb_t cb = ctx->cb;
+    void          *ud = ctx->ud;
     free(ctx);
+    if (cb) cb(text_copy, ud);
 }
 
 static void input_cancel_cb(lv_event_t *e)
 {
     input_ctx_t *ctx = lv_event_get_user_data(e);
-    lv_obj_del(ctx->kbd);
-    lv_obj_del(ctx->overlay);
+    lv_obj_add_flag(ctx->overlay, LV_OBJ_FLAG_HIDDEN);
+    lv_keyboard_set_textarea(ctx->kbd, NULL);
+    lv_obj_delete_async(ctx->overlay);
     free(ctx);
 }
 
@@ -229,8 +455,23 @@ void ui_app_init(void)
 
 void ui_app_show_screen(ui_screen_t screen)
 {
+    /* Dismiss any open overlays on lv_layer_top() before switching screens.
+     * These overlays are not children of g_content_area so lv_obj_clean()
+     * alone would leave them orphaned. */
+    save_menu_close();
+    ui_snapshot_bar_dismiss();
+    /* Cancel any active toast: lv_obj_clean() below will destroy g_toast,
+     * so we must NULL it first to prevent the stale timer callback from
+     * calling lv_obj_del() on the already-freed object (→ SIGSEGV). */
+    if (g_toast_timer) { lv_timer_del(g_toast_timer); g_toast_timer = NULL; }
+    g_toast = NULL;
+    /* Clean any remaining overlays (confirm/input dialogs, context menus).
+     * All objects on lv_layer_top() are app-owned modals — safe to clear. */
+    lv_obj_clean(lv_layer_top());
+
     lv_obj_clean(g_content_area);
 
+    g_current_screen = screen;
     switch (screen) {
         case UI_SCREEN_PEDALBOARD:
             ui_pedalboard_init(g_content_area);
@@ -256,14 +497,56 @@ void ui_app_update_title(const char *name, bool modified)
     }
 }
 
+/* ── Toast notification ──────────────────────────────────────────────────────── */
+
+static void toast_timer_cb(lv_timer_t *t)
+{
+    lv_timer_del(t);
+    g_toast_timer = NULL;
+    if (g_toast) { lv_obj_del(g_toast); g_toast = NULL; }
+}
+
+static void show_toast_colored(const char *msg, lv_color_t bg)
+{
+    if (g_toast_timer) { lv_timer_del(g_toast_timer); g_toast_timer = NULL; }
+    if (g_toast)       { lv_obj_del(g_toast);          g_toast = NULL; }
+
+    g_toast = lv_obj_create(lv_layer_top());
+    lv_obj_set_size(g_toast, 700, 46);
+    lv_obj_align(g_toast, LV_ALIGN_TOP_MID, 0, UI_TOP_BAR_H + 8);
+    lv_obj_set_style_bg_color(g_toast, bg, 0);
+    lv_obj_set_style_bg_opa(g_toast, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(g_toast, 6, 0);
+    lv_obj_set_style_border_width(g_toast, 0, 0);
+    lv_obj_set_style_shadow_width(g_toast, 0, 0);
+    lv_obj_set_style_pad_all(g_toast, 0, 0);
+    lv_obj_clear_flag(g_toast, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+
+    lv_obj_t *lbl = lv_label_create(g_toast);
+    lv_label_set_text(lbl, msg);
+    lv_obj_set_style_text_color(lbl, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_text_font(lbl, &lv_font_montserrat_14, 0);
+    lv_obj_center(lbl);
+
+    g_toast_timer = lv_timer_create(toast_timer_cb, 3000, NULL);
+    lv_timer_set_repeat_count(g_toast_timer, 1);
+}
+
+void ui_app_show_toast(const char *msg)
+{
+    show_toast_colored(msg, UI_COLOR_PRIMARY);
+}
+
+void ui_app_show_toast_error(const char *msg)
+{
+    show_toast_colored(msg, lv_color_hex(0xCC2222));
+}
+
 void ui_app_show_message(const char *title, const char *body, int autodismiss_ms)
 {
+    (void)title;
     (void)autodismiss_ms;
-    lv_obj_t *box = lv_msgbox_create(NULL);
-    lv_msgbox_add_title(box, title);
-    lv_msgbox_add_text(box, body);
-    lv_msgbox_add_close_button(box);
-    lv_obj_center(box);
+    ui_app_show_toast(body);
 }
 
 void ui_app_show_input(const char *title, const char *placeholder,
@@ -314,7 +597,7 @@ void ui_app_show_input(const char *title, const char *placeholder,
     lv_obj_set_size(btn_cancel, 100, 36);
     lv_obj_set_style_bg_color(btn_cancel, UI_COLOR_BYPASS, 0);
     lv_obj_t *lbl_cancel = lv_label_create(btn_cancel);
-    lv_label_set_text(lbl_cancel, "Cancel");
+    lv_label_set_text(lbl_cancel, TR(TR_CANCEL));
     lv_obj_center(lbl_cancel);
     lv_obj_add_event_cb(btn_cancel, input_cancel_cb, LV_EVENT_CLICKED, ctx);
 
@@ -322,7 +605,7 @@ void ui_app_show_input(const char *title, const char *placeholder,
     lv_obj_set_size(btn_ok, 100, 36);
     lv_obj_set_style_bg_color(btn_ok, UI_COLOR_PRIMARY, 0);
     lv_obj_t *lbl_ok = lv_label_create(btn_ok);
-    lv_label_set_text(lbl_ok, "OK");
+    lv_label_set_text(lbl_ok, TR(TR_OK));
     lv_obj_center(lbl_ok);
     lv_obj_add_event_cb(btn_ok, input_ok_cb, LV_EVENT_CLICKED, ctx);
 }
@@ -369,7 +652,7 @@ void ui_app_show_confirm(const char *title, const char *message,
     lv_obj_set_size(btn_cancel, 100, 40);
     lv_obj_set_style_bg_color(btn_cancel, UI_COLOR_BYPASS, 0);
     lv_obj_t *lbl_cancel = lv_label_create(btn_cancel);
-    lv_label_set_text(lbl_cancel, "Cancel");
+    lv_label_set_text(lbl_cancel, TR(TR_CANCEL));
     lv_obj_center(lbl_cancel);
     lv_obj_add_event_cb(btn_cancel, confirm_cancel_cb, LV_EVENT_CLICKED, ctx);
 
@@ -377,9 +660,22 @@ void ui_app_show_confirm(const char *title, const char *message,
     lv_obj_set_size(btn_ok, 100, 40);
     lv_obj_set_style_bg_color(btn_ok, UI_COLOR_PRIMARY, 0);
     lv_obj_t *lbl_ok = lv_label_create(btn_ok);
-    lv_label_set_text(lbl_ok, "OK");
+    lv_label_set_text(lbl_ok, TR(TR_OK));
     lv_obj_center(lbl_ok);
     lv_obj_add_event_cb(btn_ok, confirm_ok_cb, LV_EVENT_CLICKED, ctx);
 }
 
 lv_obj_t *ui_app_content_area(void) { return g_content_area; }
+
+void ui_app_apply_language(void)
+{
+    /* Update persistent top-bar label */
+    if (g_banks_label)
+        lv_label_set_text_fmt(g_banks_label, LV_SYMBOL_LIST " %s", TR(TR_BANKS));
+
+    /* Update snapshot bar prefix */
+    ui_snapshot_bar_update_lang();
+
+    /* Rebuild the current content screen with new strings */
+    ui_app_show_screen(g_current_screen);
+}

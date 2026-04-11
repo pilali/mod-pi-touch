@@ -10,11 +10,13 @@
 #include <src/drivers/evdev/lv_evdev.h>
 
 #include "settings.h"
+#include "i18n.h"
 #include "host_comm.h"
 #include "plugin_manager.h"
 #include "lv2_utils.h"
 #include "ui/ui_app.h"
 #include "ui/ui_pedalboard.h"
+#include "cJSON.h"
 
 /* ─── Signal handling ────────────────────────────────────────────────────────── */
 static volatile bool g_running = true;
@@ -62,6 +64,7 @@ int main(int argc, char *argv[])
     /* ── Settings ── */
     mpt_settings_t settings;
     settings_init(&settings);
+    i18n_set_lang(i18n_lang_from_code(settings.language));
 
     /* ── LVGL init ── */
     lv_init();
@@ -119,6 +122,43 @@ int main(int argc, char *argv[])
 
     /* ── Build UI ── */
     ui_app_init();
+
+    /* ── Auto-load last pedalboard + snapshot ── */
+    {
+        FILE *f = fopen(settings.last_state_file, "r");
+        if (f) {
+            fseek(f, 0, SEEK_END);
+            long sz = ftell(f);
+            rewind(f);
+            char *buf = malloc(sz + 1);
+            if (buf) {
+                fread(buf, 1, sz, f);
+                buf[sz] = '\0';
+                cJSON *root = cJSON_Parse(buf);
+                if (root) {
+                    cJSON *jpath = cJSON_GetObjectItem(root, "pedalboard");
+                    cJSON *jsnap = cJSON_GetObjectItem(root, "snapshot");
+                    if (cJSON_IsString(jpath) && jpath->valuestring[0]) {
+                        printf("[main] Auto-loading last pedalboard: %s\n",
+                               jpath->valuestring);
+                        ui_pedalboard_load(jpath->valuestring);
+                        if (cJSON_IsNumber(jsnap)) {
+                            int snap_idx = (int)jsnap->valuedouble;
+                            pedalboard_t *pb = ui_pedalboard_get();
+                            if (pb && snap_idx >= 0 && snap_idx < pb->snapshot_count
+                                    && snap_idx != pb->current_snapshot) {
+                                printf("[main] Restoring snapshot %d\n", snap_idx);
+                                ui_pedalboard_apply_snapshot(snap_idx);
+                            }
+                        }
+                    }
+                    cJSON_Delete(root);
+                }
+                free(buf);
+            }
+            fclose(f);
+        }
+    }
 
     /* ── LVGL tick thread ── */
     pthread_t tick_tid;

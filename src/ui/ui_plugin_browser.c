@@ -4,10 +4,12 @@
 #include "../plugin_manager.h"
 #include "../host_comm.h"
 #include "../pedalboard.h"
+#include "../i18n.h"
 
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <pthread.h>
 
 /* ─── State ─────────────────────────────────────────────────────────────────── */
 
@@ -15,6 +17,7 @@
 
 static lv_obj_t *g_scroll    = NULL;
 static lv_obj_t *g_search_ta = NULL;
+static lv_obj_t *g_keyboard  = NULL;
 static char      g_search[128] = "";
 
 static char g_cats[MAX_CATS][PM_CAT_MAX];
@@ -36,7 +39,74 @@ static void load_categories(void)
     memset(g_expanded, 0, sizeof(g_expanded));
 }
 
-/* ─── Plugin add ─────────────────────────────────────────────────────────────── */
+/* ─── Plugin add (async — host_add_plugin can block several seconds) ─────────── */
+
+typedef struct {
+    int  instance_id;
+    char uri[PM_URI_MAX];
+    char sym[64];
+    int  result;
+} add_plugin_ctx_t;
+
+static void add_plugin_done(void *arg)
+{
+    add_plugin_ctx_t *ctx = arg;
+
+    if (ctx->result >= 0) {
+        extern pedalboard_t *ui_pedalboard_get(void);
+        pedalboard_t *pb = ui_pedalboard_get();
+        if (pb) {
+            pb_plugin_t *plug = pb_add_plugin(pb, ctx->instance_id, ctx->sym, ctx->uri);
+            if (plug) {
+                plug->canvas_x = 200.0f + ctx->instance_id * 180.0f;
+                plug->canvas_y = 200.0f;
+                const pm_plugin_info_t *info = pm_plugin_by_uri(ctx->uri);
+                if (info) {
+                    snprintf(plug->label, sizeof(plug->label), "%s", info->name);
+                    /* Populate ports from plugin manager so the param editor has
+                     * something to show immediately (without a TTL round-trip). */
+                    plug->port_count = 0;
+                    for (int i = 0; i < info->port_count && plug->port_count < PB_MAX_PORTS; i++) {
+                        const pm_port_info_t *pi = &info->ports[i];
+                        if (pi->type != PM_PORT_CONTROL_IN) continue;
+                        pb_port_t *pp = &plug->ports[plug->port_count++];
+                        snprintf(pp->symbol, sizeof(pp->symbol), "%s", pi->symbol);
+                        pp->value        = pi->default_val;
+                        pp->min          = pi->min;
+                        pp->max          = pi->max;
+                        pp->snapshotable = true;
+                        pp->midi_channel = -1;
+                        pp->midi_cc      = -1;
+                    }
+                    /* Populate patch params (e.g. AIDA-X model file) */
+                    plug->patch_param_count = 0;
+                    for (int i = 0; i < info->patch_param_count && plug->patch_param_count < PB_MAX_PATCH_PARAMS; i++) {
+                        pb_patch_t *pp = &plug->patch_params[plug->patch_param_count++];
+                        snprintf(pp->uri,  sizeof(pp->uri),  "%s", info->patch_params[i].uri);
+                        pp->path[0] = '\0';
+                    }
+                }
+            }
+        }
+        ui_app_show_screen(UI_SCREEN_PEDALBOARD);
+        ui_pedalboard_refresh();
+    } else {
+        const pm_plugin_info_t *info = pm_plugin_by_uri(ctx->uri);
+        char msg[256];
+        snprintf(msg, sizeof(msg), "Failed to load:\n%s",
+                 info ? info->name : ctx->uri);
+        ui_app_show_toast_error(msg);
+    }
+    free(ctx);
+}
+
+static void *add_plugin_thread(void *arg)
+{
+    add_plugin_ctx_t *ctx = arg;
+    ctx->result = host_add_plugin(ctx->instance_id, ctx->uri);
+    lv_async_call(add_plugin_done, ctx);
+    return NULL;
+}
 
 static void plugin_select_cb(lv_event_t *e)
 {
@@ -45,25 +115,27 @@ static void plugin_select_cb(lv_event_t *e)
 
     extern pedalboard_t *ui_pedalboard_get(void);
     pedalboard_t *pb = ui_pedalboard_get();
-    int instance_id = pb->plugin_count;
 
-    char sym[64];
+    int instance_id = 0;
+    for (int i = 0; i < pb->plugin_count; i++)
+        if (pb->plugins[i].instance_id >= instance_id)
+            instance_id = pb->plugins[i].instance_id + 1;
+
+    add_plugin_ctx_t *ctx = malloc(sizeof(*ctx));
+    if (!ctx) return;
+    ctx->instance_id = instance_id;
+    snprintf(ctx->uri, sizeof(ctx->uri), "%s", uri);
     const char *last = strrchr(uri, '/');
-    snprintf(sym, sizeof(sym), "%s_%d", last ? last + 1 : "plugin", instance_id);
+    snprintf(ctx->sym, sizeof(ctx->sym), "%s_%d", last ? last + 1 : "plugin", instance_id);
 
-    if (host_add_plugin(instance_id, uri) >= 0) {
-        pb_plugin_t *plug = pb_add_plugin(pb, instance_id, sym, uri);
-        if (plug) {
-            plug->canvas_x = 200.0f + instance_id * 180.0f;
-            plug->canvas_y = 200.0f;
-            const pm_plugin_info_t *info = pm_plugin_by_uri(uri);
-            if (info) snprintf(plug->label, sizeof(plug->label), "%s", info->name);
-        }
-        ui_app_show_screen(UI_SCREEN_PEDALBOARD);
-        ui_pedalboard_refresh();
-    } else {
-        ui_app_show_message("Error", "Failed to add plugin.", 3000);
-    }
+    ui_app_show_toast(TR(TR_PLUGIN_LOADING));
+
+    pthread_t tid;
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+    pthread_create(&tid, &attr, add_plugin_thread, ctx);
+    pthread_attr_destroy(&attr);
 }
 
 /* ─── Tree refresh ───────────────────────────────────────────────────────────── */
@@ -129,10 +201,17 @@ static void rebuild_category_tree(void)
 
 static void cat_toggle_cb(lv_event_t *e)
 {
+    /* Save scroll position before toggle so we can restore after rebuild */
+    lv_coord_t scroll_before = g_scroll ? lv_obj_get_scroll_y(g_scroll) : 0;
+
     int ci = (int)(intptr_t)lv_event_get_user_data(e);
     if (ci >= 0 && ci < g_cat_count)
         g_expanded[ci] = !g_expanded[ci];
     rebuild_category_tree();
+
+    /* Restore scroll — use a small async so LVGL has laid out new content */
+    if (g_scroll)
+        lv_obj_scroll_to_y(g_scroll, scroll_before, LV_ANIM_OFF);
 }
 
 static void refresh_tree(void)
@@ -146,7 +225,7 @@ static void refresh_tree(void)
         int count = pm_search(g_search, indices, 512);
         if (count == 0) {
             lv_obj_t *lbl = lv_label_create(g_scroll);
-            lv_label_set_text(lbl, "No plugins found.");
+            lv_label_set_text(lbl, TR(TR_PLUGIN_NOT_FOUND));
             lv_obj_set_style_text_color(lbl, UI_COLOR_TEXT_DIM, 0);
             return;
         }
@@ -178,9 +257,38 @@ static void search_cb(lv_event_t *e)
     refresh_tree();
 }
 
+/* ─── Keyboard ───────────────────────────────────────────────────────────────── */
+
+static void keyboard_ready_cb(lv_event_t *e)
+{
+    (void)e;
+    /* "OK" / "Hide" pressed — unfocus textarea and hide keyboard */
+    if (g_keyboard) lv_obj_add_flag(g_keyboard, LV_OBJ_FLAG_HIDDEN);
+    if (g_search_ta) lv_obj_clear_state(g_search_ta, LV_STATE_FOCUSED);
+}
+
+static void ta_focused_cb(lv_event_t *e)
+{
+    (void)e;
+    if (!g_keyboard) return;
+    lv_keyboard_set_textarea(g_keyboard, g_search_ta);
+    lv_obj_clear_flag(g_keyboard, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void ta_defocused_cb(lv_event_t *e)
+{
+    (void)e;
+    if (g_keyboard) lv_obj_add_flag(g_keyboard, LV_OBJ_FLAG_HIDDEN);
+}
+
 static void back_cb(lv_event_t *e)
 {
     (void)e;
+    /* Hide keyboard before leaving */
+    if (g_keyboard) {
+        lv_obj_del(g_keyboard);
+        g_keyboard = NULL;
+    }
     ui_app_show_screen(UI_SCREEN_PEDALBOARD);
 }
 
@@ -189,8 +297,9 @@ static void back_cb(lv_event_t *e)
 void ui_plugin_browser_show(lv_obj_t *parent)
 {
     g_search[0] = '\0';
-    g_scroll = NULL;
+    g_scroll    = NULL;
     g_search_ta = NULL;
+    g_keyboard  = NULL;
 
     if (g_cat_count == 0) load_categories();
 
@@ -217,21 +326,31 @@ void ui_plugin_browser_show(lv_obj_t *parent)
     lv_obj_set_size(btn_back, 80, 36);
     lv_obj_set_style_bg_color(btn_back, UI_COLOR_PRIMARY, 0);
     lv_obj_t *lbl_back = lv_label_create(btn_back);
-    lv_label_set_text(lbl_back, LV_SYMBOL_LEFT " Back");
+    lv_label_set_text_fmt(lbl_back, LV_SYMBOL_LEFT " %s", TR(TR_BACK));
     lv_obj_center(lbl_back);
     lv_obj_add_event_cb(btn_back, back_cb, LV_EVENT_CLICKED, NULL);
 
     lv_obj_t *hdr_lbl = lv_label_create(hdr);
-    lv_label_set_text(hdr_lbl, "Add Plugin");
+    lv_label_set_text(hdr_lbl, TR(TR_PLUGIN_BROWSER_TITLE));
     lv_obj_set_style_text_color(hdr_lbl, UI_COLOR_TEXT, 0);
     lv_obj_set_style_text_font(hdr_lbl, &lv_font_montserrat_18, 0);
 
     /* ── Search box ── */
     g_search_ta = lv_textarea_create(parent);
     lv_obj_set_size(g_search_ta, LV_PCT(100), 40);
-    lv_textarea_set_placeholder_text(g_search_ta, "Search plugins...");
+    lv_textarea_set_placeholder_text(g_search_ta, TR(TR_PLUGIN_SEARCH_HINT));
     lv_textarea_set_one_line(g_search_ta, true);
-    lv_obj_add_event_cb(g_search_ta, search_cb, LV_EVENT_VALUE_CHANGED, NULL);
+    lv_obj_add_event_cb(g_search_ta, search_cb,      LV_EVENT_VALUE_CHANGED, NULL);
+    lv_obj_add_event_cb(g_search_ta, ta_focused_cb,  LV_EVENT_FOCUSED,       NULL);
+    lv_obj_add_event_cb(g_search_ta, ta_defocused_cb,LV_EVENT_DEFOCUSED,     NULL);
+
+    /* ── Virtual keyboard (hidden until textarea focused) ── */
+    g_keyboard = lv_keyboard_create(lv_layer_top());
+    lv_obj_set_size(g_keyboard, LV_PCT(100), LV_VER_RES / 3);
+    lv_obj_align(g_keyboard, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_obj_add_flag(g_keyboard, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_event_cb(g_keyboard, keyboard_ready_cb, LV_EVENT_READY,  NULL);
+    lv_obj_add_event_cb(g_keyboard, keyboard_ready_cb, LV_EVENT_CANCEL, NULL);
 
     /* ── Scrollable category tree ── */
     g_scroll = lv_obj_create(parent);
