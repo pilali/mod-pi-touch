@@ -4,6 +4,7 @@
 
 #include <string.h>
 #include <stdio.h>
+#include <math.h>
 #include <pthread.h>
 
 /* ─── Plugin URIs ─────────────────────────────────────────────────────────────── */
@@ -91,16 +92,15 @@ void pre_fx_apply_tuner_ref(void)
 {
     if (!g_loaded) return;
     mpt_settings_t *s = settings_get();
-    host_param_set(PRE_FX_TUNER_INSTANCE, "tuning", s->tuner_ref_freq);
+    /* mod-ui uses "REFFREQ" (integer Hz) for the tuna reference frequency port */
+    host_param_set(PRE_FX_TUNER_INSTANCE, "REFFREQ", (float)(int)s->tuner_ref_freq);
 }
 
 void pre_fx_tuner_start_monitoring(void)
 {
     if (!g_loaded || g_monitoring) return;
+    /* mod-ui only monitors freq_out and derives note/cents from it */
     host_monitor_output(PRE_FX_TUNER_INSTANCE, "freq_out");
-    host_monitor_output(PRE_FX_TUNER_INSTANCE, "note");
-    host_monitor_output(PRE_FX_TUNER_INSTANCE, "cent");
-    host_monitor_output(PRE_FX_TUNER_INSTANCE, "octave");
     g_monitoring = true;
 }
 
@@ -111,12 +111,24 @@ void pre_fx_tuner_stop_monitoring(void)
 
 void pre_fx_on_feedback(int instance, const char *symbol, float value)
 {
-    (void)instance; /* caller already checked instance == PRE_FX_TUNER_INSTANCE */
+    (void)instance;
+    if (strcmp(symbol, "freq_out") != 0) return;
+
     pthread_mutex_lock(&g_tuner_mutex);
-    if      (strcmp(symbol, "note")     == 0) g_tuner.note    = (int)value;
-    else if (strcmp(symbol, "cent")     == 0) g_tuner.cent    = value;
-    else if (strcmp(symbol, "freq_out") == 0) g_tuner.freq_hz = value;
-    else if (strcmp(symbol, "octave")   == 0) g_tuner.octave  = (int)value;
+    g_tuner.freq_hz = value;
+
+    if (value >= 10.0f) {
+        /* Derive note / cents / octave from frequency (same logic as mod-ui) */
+        mpt_settings_t *s = settings_get();
+        float ref = (s->tuner_ref_freq > 0.0f) ? s->tuner_ref_freq : 440.0f;
+        float cents_from_a4 = 1200.0f * log2f(value / ref);
+        int   semitone      = (int)roundf(cents_from_a4 / 100.0f);
+        g_tuner.cent   = cents_from_a4 - (float)semitone * 100.0f;
+        /* MIDI note: A4 = 69, note (0=C): midi%12, octave: midi/12 - 1 */
+        int midi        = 69 + semitone;
+        g_tuner.note   = ((midi % 12) + 12) % 12;
+        g_tuner.octave = midi / 12 - 1;
+    }
     pthread_mutex_unlock(&g_tuner_mutex);
 }
 

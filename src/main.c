@@ -32,16 +32,21 @@ static void sig_handler(int sig)
 static void feedback_handler(const char *msg, void *ud)
 {
     (void)ud;
-    /* Parse monitoring messages: "param <instance> <symbol> <value>" */
-    int  instance;
-    char symbol[128];
+    int   instance;
+    char  symbol[128];
     float value;
-    if (sscanf(msg, "param %d %127s %f", &instance, symbol, &value) == 3) {
-        if (instance == PRE_FX_GATE_INSTANCE || instance == PRE_FX_TUNER_INSTANCE) {
+
+    /* "output_set <instance> <symbol> <value>" — monitor_output feedback */
+    if (sscanf(msg, "output_set %d %127s %f", &instance, symbol, &value) == 3) {
+        if (instance == PRE_FX_TUNER_INSTANCE)
             pre_fx_on_feedback(instance, symbol, value);
-        } else {
+        return;
+    }
+
+    /* "param_set <instance> <symbol> <value>" — parameter feedback */
+    if (sscanf(msg, "param_set %d %127s %f", &instance, symbol, &value) == 3) {
+        if (instance != PRE_FX_GATE_INSTANCE && instance != PRE_FX_TUNER_INSTANCE)
             ui_pedalboard_update_param(instance, symbol, value);
-        }
     }
 }
 
