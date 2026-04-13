@@ -18,6 +18,26 @@ static bool            g_monitoring = false;
 static pthread_mutex_t g_tuner_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pre_fx_tuner_t  g_tuner       = {0};
 
+/* Polling thread — replaces monitor_output (which only sends one snapshot) */
+static pthread_t     g_poll_tid;
+static volatile bool g_poll_running = false;
+
+/* ─── Polling thread ──────────────────────────────────────────────────────────── */
+
+static void *tuner_poll_thread(void *arg)
+{
+    (void)arg;
+    while (g_poll_running) {
+        if (g_monitoring && g_loaded) {
+            float freq = 0.0f;
+            if (host_param_get(PRE_FX_TUNER_INSTANCE, "freq_out", &freq) >= 0)
+                pre_fx_on_feedback(PRE_FX_TUNER_INSTANCE, "freq_out", freq);
+        }
+        usleep(100000); /* 100 ms */
+    }
+    return NULL;
+}
+
 /* ─── Internal helpers ────────────────────────────────────────────────────────── */
 
 static void do_load(void)
@@ -68,6 +88,8 @@ static void do_load(void)
 
 void pre_fx_init(void)
 {
+    g_poll_running = true;
+    pthread_create(&g_poll_tid, NULL, tuner_poll_thread, NULL);
     do_load();
 }
 
@@ -99,9 +121,8 @@ void pre_fx_apply_tuner_ref(void)
 void pre_fx_tuner_start_monitoring(void)
 {
     if (!g_loaded || g_monitoring) return;
-    int r = host_monitor_output(PRE_FX_TUNER_INSTANCE, "freq_out");
-    fprintf(stderr, "[pre_fx] monitor_output freq_out → %d\n", r);
-    if (r >= 0) g_monitoring = true; /* mod-host returns 1 (not 0) for this cmd */
+    g_monitoring = true;
+    fprintf(stderr, "[pre_fx] tuner polling started\n");
 }
 
 void pre_fx_tuner_stop_monitoring(void)
