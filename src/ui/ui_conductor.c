@@ -474,8 +474,12 @@ void ui_conductor_open(void)
     lv_obj_center(_l); \
 } while(0)
 
-        TRANSPORT_BTN(g_btn_play, TR(TR_CONDUCTOR_PLAY), play_cb);
-        TRANSPORT_BTN(g_btn_stop, TR(TR_CONDUCTOR_STOP), stop_cb);
+        /* Prepend LVGL symbols (defined in lvgl.h, available here) */
+        char play_lbl[64], stop_lbl[64];
+        snprintf(play_lbl, sizeof(play_lbl), LV_SYMBOL_PLAY " %s", TR(TR_CONDUCTOR_PLAY));
+        snprintf(stop_lbl, sizeof(stop_lbl), LV_SYMBOL_STOP " %s", TR(TR_CONDUCTOR_STOP));
+        TRANSPORT_BTN(g_btn_play, play_lbl, play_cb);
+        TRANSPORT_BTN(g_btn_stop, stop_lbl, stop_cb);
 #undef TRANSPORT_BTN
 
         refresh_rolling_buttons(roll);

@@ -85,8 +85,8 @@ static const char * const g_en[TR_COUNT] = {
     /* TR_CONDUCTOR_CLOCK */       "Clock source",
     /* TR_CONDUCTOR_INTERNAL */    "Internal",
     /* TR_CONDUCTOR_MIDI_SLAVE */  "MIDI Slave",
-    /* TR_CONDUCTOR_PLAY */        LV_SYMBOL_PLAY " Play",
-    /* TR_CONDUCTOR_STOP */        LV_SYMBOL_STOP " Stop",
+    /* TR_CONDUCTOR_PLAY */        "Play",
+    /* TR_CONDUCTOR_STOP */        "Stop",
     /* TR_CONDUCTOR_TAP */         "Tap",
 
     /* TR_SETTINGS_TITLE */        "Settings",
@@ -203,8 +203,8 @@ static const char * const g_fr[TR_COUNT] = {
     /* TR_CONDUCTOR_CLOCK */       "Source d'horloge",
     /* TR_CONDUCTOR_INTERNAL */    "Interne",
     /* TR_CONDUCTOR_MIDI_SLAVE */  "Esclave MIDI",
-    /* TR_CONDUCTOR_PLAY */        LV_SYMBOL_PLAY " Jouer",
-    /* TR_CONDUCTOR_STOP */        LV_SYMBOL_STOP " Arr\xc3\xaater",
+    /* TR_CONDUCTOR_PLAY */        "Jouer",
+    /* TR_CONDUCTOR_STOP */        "Arr\xc3\xaater",
     /* TR_CONDUCTOR_TAP */         "Tap",
 
     /* TR_SETTINGS_TITLE */        "R\xc3\xa9glages",
