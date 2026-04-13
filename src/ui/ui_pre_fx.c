@@ -213,53 +213,6 @@ static void tab_gate_cb(lv_event_t *e)   { (void)e; show_tab(false); }
 
 /* ─── Body builders ───────────────────────────────────────────────────────────── */
 
-static lv_obj_t *make_slider_row(lv_obj_t *parent,
-                                 const char *title,
-                                 int min, int max, int initial,
-                                 lv_event_cb_t value_cb,
-                                 lv_event_cb_t released_cb,
-                                 lv_obj_t **slider_out,
-                                 lv_obj_t **label_out,
-                                 const char *unit)
-{
-    lv_obj_t *row = lv_obj_create(parent);
-    lv_obj_set_size(row, LV_PCT(100), LV_SIZE_CONTENT);
-    lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(row, 0, 0);
-    lv_obj_set_style_pad_all(row, 0, 0);
-    lv_obj_set_style_pad_column(row, 8, 0);
-    lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
-
-    lv_obj_t *lbl_title = lv_label_create(row);
-    lv_label_set_text(lbl_title, title);
-    lv_obj_set_style_text_color(lbl_title, UI_COLOR_TEXT, 0);
-    lv_obj_set_style_text_font(lbl_title, &lv_font_montserrat_16, 0);
-    lv_obj_set_pos(lbl_title, 0, 0);
-
-    lv_obj_t *slider = lv_slider_create(row);
-    lv_slider_set_range(slider, min, max);
-    lv_slider_set_value(slider, initial, LV_ANIM_OFF);
-    lv_obj_set_size(slider, LV_PCT(75), 28);
-    lv_obj_set_pos(slider, 0, 28);
-    lv_obj_set_style_bg_color(slider, UI_COLOR_SURFACE, LV_PART_MAIN);
-    lv_obj_set_style_bg_color(slider, UI_COLOR_PRIMARY, LV_PART_INDICATOR);
-    lv_obj_set_style_bg_color(slider, lv_color_white(), LV_PART_KNOB);
-    if (value_cb)   lv_obj_add_event_cb(slider, value_cb,    LV_EVENT_VALUE_CHANGED, NULL);
-    if (released_cb) lv_obj_add_event_cb(slider, released_cb, LV_EVENT_RELEASED, NULL);
-
-    lv_obj_t *val_lbl = lv_label_create(row);
-    char buf[24];
-    snprintf(buf, sizeof(buf), "%d %s", initial, unit);
-    lv_label_set_text(val_lbl, buf);
-    lv_obj_set_style_text_color(val_lbl, UI_COLOR_TEXT, 0);
-    lv_obj_set_style_text_font(val_lbl, &lv_font_montserrat_16, 0);
-    lv_obj_set_pos(val_lbl, LV_PCT(78), 28 + 4);
-
-    if (slider_out) *slider_out = slider;
-    if (label_out)  *label_out  = val_lbl;
-    return row;
-}
-
 static void build_tuner_body(lv_obj_t *parent)
 {
     mpt_settings_t *s = settings_get();
@@ -295,7 +248,7 @@ static void build_tuner_body(lv_obj_t *parent)
 
     /* Cents scale labels */
     lv_obj_t *lbl_neg = lv_label_create(parent);
-    lv_label_set_text(lbl_neg, "-50¢");
+    lv_label_set_text(lbl_neg, "-50c");
     lv_obj_set_style_text_color(lbl_neg, UI_COLOR_TEXT_DIM, 0);
     lv_obj_set_style_text_font(lbl_neg, &lv_font_montserrat_14, 0);
     lv_obj_align(lbl_neg, LV_ALIGN_TOP_MID, -260, 143);
@@ -307,7 +260,7 @@ static void build_tuner_body(lv_obj_t *parent)
     lv_obj_align(lbl_zero, LV_ALIGN_TOP_MID, 0, 143);
 
     lv_obj_t *lbl_pos = lv_label_create(parent);
-    lv_label_set_text(lbl_pos, "+50¢");
+    lv_label_set_text(lbl_pos, "+50c");
     lv_obj_set_style_text_color(lbl_pos, UI_COLOR_TEXT_DIM, 0);
     lv_obj_set_style_text_font(lbl_pos, &lv_font_montserrat_14, 0);
     lv_obj_align(lbl_pos, LV_ALIGN_TOP_MID, 260, 143);
