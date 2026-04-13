@@ -36,6 +36,10 @@ void ui_pedalboard_apply_snapshot(int idx);
 /* Persist current pedalboard path + snapshot index to last.json. */
 void ui_pedalboard_save_last_state(void);
 
+/* Bypass all pedalboard plugins (for tuner mute). When bypass_all=false,
+ * each plugin is restored to its stored enabled state. */
+void ui_pedalboard_chain_bypass(bool bypass_all);
+
 /* Accessors */
 pedalboard_t *ui_pedalboard_get(void);
 bool          ui_pedalboard_is_loaded(void);

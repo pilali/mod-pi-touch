@@ -65,6 +65,10 @@ int host_transport(bool rolling, float bpb, float bpm);
 int host_transport_sync(const char *mode);
 int host_cpu_load(float *out);
 
+/* Subscribe to real-time monitoring of a control output port.
+ * Feedback arrives as: "param <instance> <symbol> <value>" on port 5556. */
+int host_monitor_output(int instance, const char *symbol);
+
 /* Send a patch:writable parameter (file path) to a plugin instance.
  * Sends: patch_set <instance> <param_uri> <path> */
 int host_patch_set(int instance, const char *param_uri, const char *path);

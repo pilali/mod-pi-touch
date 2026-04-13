@@ -457,6 +457,13 @@ int host_transport_sync(const char *mode)
     return host_comm_send_sync(cmd, NULL, 0, 2000);
 }
 
+int host_monitor_output(int instance, const char *symbol)
+{
+    char cmd[HOST_CMD_MAX];
+    snprintf(cmd, sizeof(cmd), "monitor_output %d %s", instance, symbol);
+    return host_comm_send_sync(cmd, NULL, 0, 2000);
+}
+
 int host_cpu_load(float *out)
 {
     char val[32];

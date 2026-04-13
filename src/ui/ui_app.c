@@ -8,6 +8,7 @@
 #include "ui_settings.h"
 #include "ui_snapshot_bar.h"
 #include "ui_conductor.h"
+#include "ui_pre_fx.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -56,6 +57,13 @@ static void btn_banks_cb(lv_event_t *e)
 {
     (void)e;
     ui_app_show_screen(UI_SCREEN_BANK_BROWSER);
+}
+
+static void btn_pre_fx_cb(lv_event_t *e)
+{
+    (void)e;
+    if (ui_pre_fx_is_open()) ui_pre_fx_close();
+    else                     ui_pre_fx_open();
 }
 
 static void btn_conductor_cb(lv_event_t *e)
@@ -345,10 +353,15 @@ static void create_top_bar(void)
         UI_COLOR_PRIMARY, btn_banks_cb, &g_banks_label);
     lv_obj_align(btn_banks, LV_ALIGN_LEFT_MID, 0, 0);
 
+    lv_obj_t *btn_pre_fx = make_top_btn(g_top_bar,
+        LV_SYMBOL_EDIT, TR(TR_PREFX_TITLE),
+        lv_color_hex(0x1A7A4A), btn_pre_fx_cb, NULL);
+    lv_obj_align(btn_pre_fx, LV_ALIGN_LEFT_MID, UI_TOP_BTN_SZ + 6, 0);
+
     lv_obj_t *btn_cond = make_top_btn(g_top_bar,
         LV_SYMBOL_AUDIO, TR(TR_CONDUCTOR_TITLE),
         lv_color_hex(0x6A4C9C), btn_conductor_cb, NULL);
-    lv_obj_align(btn_cond, LV_ALIGN_LEFT_MID, UI_TOP_BTN_SZ + 6, 0);
+    lv_obj_align(btn_cond, LV_ALIGN_LEFT_MID, (UI_TOP_BTN_SZ + 6) * 2, 0);
 
     /* ── Center: pedalboard title ── */
     g_title_label = lv_label_create(g_top_bar);
@@ -511,8 +524,9 @@ void ui_app_show_screen(ui_screen_t screen)
      * calling lv_obj_del() on the already-freed object (→ SIGSEGV). */
     if (g_toast_timer) { lv_timer_del(g_toast_timer); g_toast_timer = NULL; }
     g_toast = NULL;
-    /* Null conductor pointers before lv_obj_clean destroys the overlay. */
+    /* Null pointers before lv_obj_clean destroys overlays. */
     ui_conductor_close();
+    ui_pre_fx_close();
     /* Clean any remaining overlays (confirm/input dialogs, context menus).
      * All objects on lv_layer_top() are app-owned modals — safe to clear. */
     lv_obj_clean(lv_layer_top());

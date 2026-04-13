@@ -102,6 +102,13 @@ void settings_init(mpt_settings_t *s)
     s->audio_capture_ch  = 0;   /* 0 = not yet configured, infer from TTL */
     s->audio_playback_ch = 0;
 
+    /* pre-fx defaults */
+    s->gate_enabled   = false;
+    s->gate_threshold = -60.0f;
+    s->gate_decay     = 10.0f;
+    s->gate_mode      = 3;       /* Stereo */
+    s->tuner_ref_freq = 440.0f;
+
     /* Ensure directories exist */
     ensure_dir(s->data_dir);
     ensure_dir(s->pedalboards_dir);
@@ -163,6 +170,18 @@ void settings_init(mpt_settings_t *s)
                         p->enabled   = cJSON_IsTrue(men);
                     }
                 }
+
+                /* pre-fx */
+                cJSON *ge = cJSON_GetObjectItem(root, "gate_enabled");
+                if (cJSON_IsBool(ge))    s->gate_enabled   = cJSON_IsTrue(ge);
+                cJSON *gt = cJSON_GetObjectItem(root, "gate_threshold");
+                if (cJSON_IsNumber(gt))  s->gate_threshold = (float)gt->valuedouble;
+                cJSON *gd = cJSON_GetObjectItem(root, "gate_decay");
+                if (cJSON_IsNumber(gd))  s->gate_decay     = (float)gd->valuedouble;
+                cJSON *gm = cJSON_GetObjectItem(root, "gate_mode");
+                if (cJSON_IsNumber(gm))  s->gate_mode      = (int)gm->valuedouble;
+                cJSON *tr = cJSON_GetObjectItem(root, "tuner_ref");
+                if (cJSON_IsNumber(tr))  s->tuner_ref_freq = (float)tr->valuedouble;
 
                 cJSON_Delete(root);
             }
@@ -238,6 +257,13 @@ int settings_save_prefs(const mpt_settings_t *s)
         cJSON_AddBoolToObject(mp,   "enabled", s->midi_ports[i].enabled);
         cJSON_AddItemToArray(jmidi_arr, mp);
     }
+
+    /* pre-fx */
+    cJSON_AddBoolToObject(root,   "gate_enabled",   s->gate_enabled);
+    cJSON_AddNumberToObject(root, "gate_threshold", s->gate_threshold);
+    cJSON_AddNumberToObject(root, "gate_decay",     s->gate_decay);
+    cJSON_AddNumberToObject(root, "gate_mode",      s->gate_mode);
+    cJSON_AddNumberToObject(root, "tuner_ref",      s->tuner_ref_freq);
 
     char *str = cJSON_Print(root);
     cJSON_Delete(root);

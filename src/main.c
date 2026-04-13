@@ -12,6 +12,7 @@
 #include "settings.h"
 #include "i18n.h"
 #include "host_comm.h"
+#include "pre_fx.h"
 #include "plugin_manager.h"
 #include "lv2_utils.h"
 #include "ui/ui_app.h"
@@ -36,9 +37,11 @@ static void feedback_handler(const char *msg, void *ud)
     char symbol[128];
     float value;
     if (sscanf(msg, "param %d %127s %f", &instance, symbol, &value) == 3) {
-        /* Update UI (must be called from LVGL thread — use a mutex or LVGL event) */
-        /* For now just update the internal state; visual update happens on next refresh */
-        ui_pedalboard_update_param(instance, symbol, value);
+        if (instance == PRE_FX_GATE_INSTANCE || instance == PRE_FX_TUNER_INSTANCE) {
+            pre_fx_on_feedback(instance, symbol, value);
+        } else {
+            ui_pedalboard_update_param(instance, symbol, value);
+        }
     }
 }
 
@@ -119,6 +122,9 @@ int main(int argc, char *argv[])
                 "Start mod-host first.\n");
         /* Continue anyway — user can see disconnected status in settings */
     }
+
+    /* ── Pre-FX (tuner + noise gate) — load after host connect ── */
+    pre_fx_init();
 
     /* ── Build UI ── */
     ui_app_init();

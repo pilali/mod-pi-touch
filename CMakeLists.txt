@@ -73,6 +73,8 @@ set(SOURCES
     src/ui/ui_bank_browser.c
     src/ui/ui_settings.c
     src/ui/ui_conductor.c
+    src/pre_fx.c
+    src/ui/ui_pre_fx.c
     ${CJSON_SRC}
     resources/fonts/lv_font_montserrat_12.c
     resources/fonts/lv_font_montserrat_14.c

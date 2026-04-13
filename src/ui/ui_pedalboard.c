@@ -9,6 +9,7 @@
 #include "../settings.h"
 #include "../hw_detect.h"
 #include "../i18n.h"
+#include "../pre_fx.h"
 
 #include "../plugin_manager.h"
 #include "cJSON.h"
@@ -1406,6 +1407,14 @@ static bool uri_to_jack_port(const char *uri, const pedalboard_t *pb,
     if (!slash) {
         /* Single component — hardware port: capture_N, playback_N, midi_* */
         snprintf(out, outsz, "system:%s", rel);
+        /* Redirect audio captures through the pre-fx noise gate when loaded.
+         * system:capture_1 → effect_9993:Output_1, etc. */
+        if (pre_fx_is_loaded()
+                && strncmp(rel, "capture_", 8) == 0
+                && rel[8] >= '1' && rel[8] <= '8') {
+            snprintf(out, outsz, "effect_%d:Output_%c",
+                     PRE_FX_GATE_INSTANCE, rel[8]);
+        }
         return true;
     }
 
@@ -1497,6 +1506,9 @@ void ui_pedalboard_load(const char *bundle_path)
 
     /* 1. Clear all existing plugins */
     host_remove_all();
+
+    /* Reload pre-fx instances (host_remove_all removes them too) */
+    pre_fx_reload();
 
     /* 2. Add plugins, set bypass and port values */
     for (int i = 0; i < g_pedalboard.plugin_count; i++) {
@@ -1624,6 +1636,17 @@ void ui_pedalboard_delete(void)
 
     ui_pedalboard_refresh();
     ui_app_update_title(TR(TR_NO_PEDALBOARD), false);
+}
+
+void ui_pedalboard_chain_bypass(bool bypass_all)
+{
+    if (!g_pb_loaded) return;
+    pthread_mutex_lock(&g_pb_mutex);
+    for (int i = 0; i < g_pedalboard.plugin_count; i++) {
+        pb_plugin_t *plug = &g_pedalboard.plugins[i];
+        host_bypass(plug->instance_id, bypass_all ? true : !plug->enabled);
+    }
+    pthread_mutex_unlock(&g_pb_mutex);
 }
 
 /* Async callback: update param editor on the main LVGL thread. */

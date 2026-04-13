@@ -74,6 +74,13 @@ typedef struct {
     /* MIDI */
     mpt_midi_port_t midi_ports[MPT_MAX_MIDI_PORTS];
     int             midi_port_count;
+
+    /* pre-fx (tuner + noise gate) */
+    bool  gate_enabled;      /* false = bypass */
+    float gate_threshold;    /* -70..-10 dB, default -60 */
+    float gate_decay;        /* 1-500 ms, default 10 */
+    int   gate_mode;         /* 0=Off 1=In1 2=In2 3=Stereo, default 3 */
+    float tuner_ref_freq;    /* 220-880 Hz, default 440 */
 } mpt_settings_t;
 
 /* Load settings from env vars + config file. Safe to call multiple times. */
