@@ -30,7 +30,9 @@ static void *tuner_poll_thread(void *arg)
     while (g_poll_running) {
         if (g_monitoring && g_loaded) {
             float freq = 0.0f;
-            if (host_param_get(PRE_FX_TUNER_INSTANCE, "freq_out", &freq) >= 0)
+            int r = host_param_get(PRE_FX_TUNER_INSTANCE, "freq_out", &freq);
+            fprintf(stderr, "[tuner] poll → r=%d freq=%.2f\n", r, (double)freq);
+            if (r >= 0)
                 pre_fx_on_feedback(PRE_FX_TUNER_INSTANCE, "freq_out", freq);
         }
         usleep(100000); /* 100 ms */
