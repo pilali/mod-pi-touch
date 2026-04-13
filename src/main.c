@@ -32,6 +32,7 @@ static void sig_handler(int sig)
 static void feedback_handler(const char *msg, void *ud)
 {
     (void)ud;
+    fprintf(stderr, "[fb] %s\n", msg);   /* diagnostic — remove once tuner confirmed */
     int   instance;
     char  symbol[128];
     float value;

@@ -92,16 +92,16 @@ void pre_fx_apply_tuner_ref(void)
 {
     if (!g_loaded) return;
     mpt_settings_t *s = settings_get();
-    /* mod-ui uses "REFFREQ" (integer Hz) for the tuna reference frequency port */
-    host_param_set(PRE_FX_TUNER_INSTANCE, "REFFREQ", (float)(int)s->tuner_ref_freq);
+    /* LV2 port symbol per tuna.ttl index 5 */
+    host_param_set(PRE_FX_TUNER_INSTANCE, "tuning", s->tuner_ref_freq);
 }
 
 void pre_fx_tuner_start_monitoring(void)
 {
     if (!g_loaded || g_monitoring) return;
-    /* mod-ui only monitors freq_out and derives note/cents from it */
-    host_monitor_output(PRE_FX_TUNER_INSTANCE, "freq_out");
-    g_monitoring = true;
+    int r = host_monitor_output(PRE_FX_TUNER_INSTANCE, "freq_out");
+    fprintf(stderr, "[pre_fx] monitor_output freq_out → %d\n", r);
+    if (r == 0) g_monitoring = true;
 }
 
 void pre_fx_tuner_stop_monitoring(void)
