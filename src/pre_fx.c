@@ -23,6 +23,13 @@ static void do_load(void)
 {
     g_loaded = false;
 
+    /* Explicitly remove previous instances before re-adding.
+     * host_remove_all() (-1) may not update mod-host's bookkeeping for
+     * non-sequential instance IDs, causing ERR_INSTANCE_ALREADY_EXISTS (-2).
+     * Ignore errors here — the instances may or may not exist. */
+    host_remove_plugin(PRE_FX_TUNER_INSTANCE);
+    host_remove_plugin(PRE_FX_GATE_INSTANCE);
+
     if (host_add_plugin(PRE_FX_GATE_INSTANCE, GATE_URI) < 0) {
         fprintf(stderr, "[pre_fx] Failed to load noise gate (%s)\n", GATE_URI);
         return;
