@@ -18,9 +18,11 @@
  * └────────────────────────────────────────────────────────┘
  */
 
-#define UI_TOP_BAR_H      60
+#define UI_TOP_BAR_H      120
 #define UI_SNAPSHOT_BAR_H 80
 #define UI_CANVAS_H       (720 - UI_TOP_BAR_H - UI_SNAPSHOT_BAR_H)
+/* Size of each square top-bar button */
+#define UI_TOP_BTN_SZ     110
 
 /* App screen identifiers */
 typedef enum {

@@ -30,7 +30,8 @@ static lv_obj_t   *g_content_area = NULL;
 static lv_obj_t   *g_snap_bar     = NULL;
 static lv_obj_t   *g_title_label  = NULL;
 static lv_obj_t   *g_mod_dot      = NULL;
-static lv_obj_t   *g_banks_label  = NULL;
+static lv_obj_t   *g_banks_label  = NULL;  /* text sub-label of Banks button */
+static lv_obj_t   *g_btn_add_float = NULL; /* floating + button on canvas */
 static ui_screen_t g_current_screen = UI_SCREEN_PEDALBOARD;
 /* Toast state — declared here so ui_app_show_screen can cancel it before
  * lv_obj_clean(lv_layer_top()) destroys g_toast without nulling the pointer. */
@@ -294,6 +295,38 @@ static void btn_settings_cb(lv_event_t *e)
 }
 
 /* ─── Top bar creation ───────────────────────────────────────────────────────── */
+
+/* Helper: create a square top-bar button with icon on top and label below. */
+static lv_obj_t *make_top_btn(lv_obj_t *parent,
+                               const char *icon, const char *label_txt,
+                               lv_color_t bg, lv_event_cb_t cb,
+                               lv_obj_t **label_out)
+{
+    lv_obj_t *btn = lv_btn_create(parent);
+    lv_obj_set_size(btn, UI_TOP_BTN_SZ, UI_TOP_BTN_SZ);
+    lv_obj_set_style_bg_color(btn, bg, 0);
+    lv_obj_set_style_radius(btn, 10, 0);
+    lv_obj_set_flex_flow(btn, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(btn, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_row(btn, 4, 0);
+    lv_obj_set_style_pad_all(btn, 6, 0);
+    lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *ico = lv_label_create(btn);
+    lv_label_set_text(ico, icon);
+    lv_obj_set_style_text_color(ico, lv_color_white(), 0);
+    lv_obj_set_style_text_font(ico, &lv_font_montserrat_28, 0);
+
+    lv_obj_t *lbl = lv_label_create(btn);
+    lv_label_set_text(lbl, label_txt);
+    lv_obj_set_style_text_color(lbl, lv_color_white(), 0);
+    lv_obj_set_style_text_font(lbl, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, 0);
+
+    if (label_out) *label_out = lbl;
+    return btn;
+}
+
 static void create_top_bar(void)
 {
     g_top_bar = lv_obj_create(g_screen);
@@ -303,70 +336,50 @@ static void create_top_bar(void)
     lv_obj_set_style_bg_opa(g_top_bar, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(g_top_bar, 0, 0);
     lv_obj_set_style_radius(g_top_bar, 0, 0);
-    lv_obj_set_style_pad_all(g_top_bar, 8, 0);
+    lv_obj_set_style_pad_all(g_top_bar, 5, 0);
     lv_obj_clear_flag(g_top_bar, LV_OBJ_FLAG_SCROLLABLE);
 
-    /* Banks button (left) */
-    lv_obj_t *btn_banks = lv_btn_create(g_top_bar);
-    lv_obj_set_size(btn_banks, 110, 44);
+    /* ── Left side: Banks + Conductor ── */
+    lv_obj_t *btn_banks = make_top_btn(g_top_bar,
+        LV_SYMBOL_LIST, TR(TR_BANKS),
+        UI_COLOR_PRIMARY, btn_banks_cb, &g_banks_label);
     lv_obj_align(btn_banks, LV_ALIGN_LEFT_MID, 0, 0);
-    lv_obj_set_style_bg_color(btn_banks, UI_COLOR_PRIMARY, 0);
-    lv_obj_add_event_cb(btn_banks, btn_banks_cb, LV_EVENT_CLICKED, NULL);
-    g_banks_label = lv_label_create(btn_banks);
-    lv_label_set_text_fmt(g_banks_label, LV_SYMBOL_LIST " %s", TR(TR_BANKS));
-    lv_obj_center(g_banks_label);
 
-    /* Conductor button (next to Banks) */
-    lv_obj_t *btn_cond = lv_btn_create(g_top_bar);
-    lv_obj_set_size(btn_cond, 44, 44);
-    lv_obj_align(btn_cond, LV_ALIGN_LEFT_MID, 110 + 6, 0);
-    lv_obj_set_style_bg_color(btn_cond, lv_color_hex(0x6A4C9C), 0);  /* violet */
-    lv_obj_add_event_cb(btn_cond, btn_conductor_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_t *lbl_cond = lv_label_create(btn_cond);
-    lv_label_set_text(lbl_cond, LV_SYMBOL_AUDIO);
-    lv_obj_center(lbl_cond);
+    lv_obj_t *btn_cond = make_top_btn(g_top_bar,
+        LV_SYMBOL_AUDIO, TR(TR_CONDUCTOR_TITLE),
+        lv_color_hex(0x6A4C9C), btn_conductor_cb, NULL);
+    lv_obj_align(btn_cond, LV_ALIGN_LEFT_MID, UI_TOP_BTN_SZ + 6, 0);
 
-    /* Pedalboard title (center) */
+    /* ── Center: pedalboard title ── */
     g_title_label = lv_label_create(g_top_bar);
     lv_label_set_text(g_title_label, TR(TR_NO_PEDALBOARD));
     lv_obj_set_style_text_color(g_title_label, UI_COLOR_TEXT, 0);
-    lv_obj_set_style_text_font(g_title_label, &lv_font_montserrat_18, 0);
-    lv_obj_align(g_title_label, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_set_style_text_font(g_title_label, &lv_font_montserrat_20, 0);
+    lv_label_set_long_mode(g_title_label, LV_LABEL_LONG_DOT);
+    lv_obj_set_width(g_title_label, 680);
+    lv_obj_set_style_text_align(g_title_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(g_title_label, LV_ALIGN_CENTER, 0, -10);
 
     /* Modified indicator ("*") */
     g_mod_dot = lv_label_create(g_top_bar);
     lv_label_set_text(g_mod_dot, "*");
     lv_obj_set_style_text_color(g_mod_dot, UI_COLOR_PRIMARY, 0);
+    lv_obj_set_style_text_font(g_mod_dot, &lv_font_montserrat_20, 0);
     lv_obj_align_to(g_mod_dot, g_title_label, LV_ALIGN_OUT_RIGHT_MID, 4, 0);
     lv_obj_add_flag(g_mod_dot, LV_OBJ_FLAG_HIDDEN);
 
-    /* Right-side: save / add / settings */
-    lv_obj_t *btn_set = lv_btn_create(g_top_bar);
-    lv_obj_set_size(btn_set, 44, 44);
+    /* ── Right side: Save + Settings ── */
+    lv_obj_t *btn_set = make_top_btn(g_top_bar,
+        LV_SYMBOL_SETTINGS, TR(TR_SETTINGS_TITLE),
+        UI_COLOR_SURFACE, btn_settings_cb, NULL);
+    lv_obj_set_style_border_color(btn_set, UI_COLOR_TEXT_DIM, 0);
+    lv_obj_set_style_border_width(btn_set, 1, 0);
     lv_obj_align(btn_set, LV_ALIGN_RIGHT_MID, 0, 0);
-    lv_obj_set_style_bg_color(btn_set, UI_COLOR_SURFACE, 0);
-    lv_obj_add_event_cb(btn_set, btn_settings_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_t *lbl_set = lv_label_create(btn_set);
-    lv_label_set_text(lbl_set, LV_SYMBOL_SETTINGS);
-    lv_obj_center(lbl_set);
 
-    lv_obj_t *btn_add = lv_btn_create(g_top_bar);
-    lv_obj_set_size(btn_add, 44, 44);
-    lv_obj_align(btn_add, LV_ALIGN_RIGHT_MID, -(44 + 6), 0);
-    lv_obj_set_style_bg_color(btn_add, UI_COLOR_ACTIVE, 0);
-    lv_obj_add_event_cb(btn_add, btn_add_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_t *lbl_add = lv_label_create(btn_add);
-    lv_label_set_text(lbl_add, LV_SYMBOL_PLUS);
-    lv_obj_center(lbl_add);
-
-    lv_obj_t *btn_save = lv_btn_create(g_top_bar);
-    lv_obj_set_size(btn_save, 44, 44);
-    lv_obj_align(btn_save, LV_ALIGN_RIGHT_MID, -(44 + 6) * 2, 0);
-    lv_obj_set_style_bg_color(btn_save, UI_COLOR_ACCENT, 0);
-    lv_obj_add_event_cb(btn_save, btn_save_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_t *lbl_save = lv_label_create(btn_save);
-    lv_label_set_text(lbl_save, LV_SYMBOL_SAVE);
-    lv_obj_center(lbl_save);
+    lv_obj_t *btn_save = make_top_btn(g_top_bar,
+        LV_SYMBOL_SAVE, TR(TR_MENU_SAVE_PB),
+        UI_COLOR_ACCENT, btn_save_cb, NULL);
+    lv_obj_align(btn_save, LV_ALIGN_RIGHT_MID, -(UI_TOP_BTN_SZ + 6), 0);
 }
 
 /* ─── Modal helpers ──────────────────────────────────────────────────────────── */
@@ -463,6 +476,22 @@ void ui_app_init(void)
     lv_obj_set_style_radius(g_snap_bar, 0, 0);
     lv_obj_clear_flag(g_snap_bar, LV_OBJ_FLAG_SCROLLABLE);
 
+    /* Floating "add plugin" button — fixed in top-right of canvas, always on top */
+    g_btn_add_float = lv_btn_create(g_screen);
+    lv_obj_set_size(g_btn_add_float, 64, 64);
+    /* Position: top-right of canvas, 12px from edges */
+    lv_obj_set_pos(g_btn_add_float, 1280 - 64 - 12, UI_TOP_BAR_H + 12);
+    lv_obj_set_style_bg_color(g_btn_add_float, UI_COLOR_ACTIVE, 0);
+    lv_obj_set_style_radius(g_btn_add_float, 32, 0);  /* circle */
+    lv_obj_set_style_shadow_width(g_btn_add_float, 8, 0);
+    lv_obj_set_style_shadow_color(g_btn_add_float, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_shadow_opa(g_btn_add_float, LV_OPA_40, 0);
+    lv_obj_add_event_cb(g_btn_add_float, btn_add_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *lbl_add_float = lv_label_create(g_btn_add_float);
+    lv_label_set_text(lbl_add_float, LV_SYMBOL_PLUS);
+    lv_obj_set_style_text_font(lbl_add_float, &lv_font_montserrat_28, 0);
+    lv_obj_center(lbl_add_float);
+
     /* Initialize sub-views */
     ui_pedalboard_init(g_content_area);
     ui_snapshot_bar_init(g_snap_bar);
@@ -504,6 +533,14 @@ void ui_app_show_screen(ui_screen_t screen)
         case UI_SCREEN_SETTINGS:
             ui_settings_show(g_content_area);
             break;
+    }
+
+    /* Show the floating + button only on the pedalboard view */
+    if (g_btn_add_float) {
+        if (screen == UI_SCREEN_PEDALBOARD)
+            lv_obj_clear_flag(g_btn_add_float, LV_OBJ_FLAG_HIDDEN);
+        else
+            lv_obj_add_flag(g_btn_add_float, LV_OBJ_FLAG_HIDDEN);
     }
 }
 
@@ -690,7 +727,7 @@ void ui_app_apply_language(void)
 {
     /* Update persistent top-bar label */
     if (g_banks_label)
-        lv_label_set_text_fmt(g_banks_label, LV_SYMBOL_LIST " %s", TR(TR_BANKS));
+        lv_label_set_text(g_banks_label, TR(TR_BANKS));
 
     /* Update snapshot bar prefix */
     ui_snapshot_bar_update_lang();
