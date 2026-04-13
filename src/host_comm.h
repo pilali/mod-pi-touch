@@ -66,7 +66,8 @@ int host_transport_sync(const char *mode);
 int host_cpu_load(float *out);
 
 /* Subscribe to real-time monitoring of a control output port.
- * Feedback arrives as: "param <instance> <symbol> <value>" on port 5556. */
+ * Uses condition "> -1" so mod-host sends continuous updates on value change.
+ * Feedback arrives as: "output_set <instance> <symbol> <value>" on port 5556. */
 int host_monitor_output(int instance, const char *symbol);
 
 /* Send a patch:writable parameter (file path) to a plugin instance.
