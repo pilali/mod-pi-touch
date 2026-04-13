@@ -100,9 +100,11 @@ void pre_fx_apply_tuner_ref(void)
 void pre_fx_tuner_start_monitoring(void)
 {
     if (!g_loaded || g_monitoring) return;
-    int r = host_monitor_output(PRE_FX_TUNER_INSTANCE, "freq_out");
-    fprintf(stderr, "[pre_fx] monitor_output freq_out → %d\n", r);
-    if (r >= 0) g_monitoring = true;
+    int r1 = host_monitor_output(PRE_FX_TUNER_INSTANCE, "freq_out");
+    int r2 = host_monitor_output(PRE_FX_TUNER_INSTANCE, "note");
+    int r3 = host_monitor_output(PRE_FX_TUNER_INSTANCE, "octave");
+    fprintf(stderr, "[pre_fx] monitor_output freq_out=%d note=%d octave=%d\n", r1, r2, r3);
+    if (r1 >= 0) g_monitoring = true;
 }
 
 void pre_fx_tuner_stop_monitoring(void)
