@@ -61,6 +61,8 @@ int host_midi_map(int instance, const char *symbol, int channel, int cc,
                   float min, float max);
 int host_midi_unmap(int instance, const char *symbol);
 int host_transport(bool rolling, float bpb, float bpm);
+/* Set transport sync source: "none" (internal) or "midi" (MIDI slave). */
+int host_transport_sync(const char *mode);
 int host_cpu_load(float *out);
 
 /* Send a patch:writable parameter (file path) to a plugin instance.

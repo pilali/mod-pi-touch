@@ -450,6 +450,13 @@ int host_transport(bool rolling, float bpb, float bpm)
     return host_comm_send_sync(cmd, NULL, 0, 2000);
 }
 
+int host_transport_sync(const char *mode)
+{
+    char cmd[HOST_CMD_MAX];
+    snprintf(cmd, sizeof(cmd), "transport_sync %s", mode);
+    return host_comm_send_sync(cmd, NULL, 0, 2000);
+}
+
 int host_cpu_load(float *out)
 {
     char val[32];

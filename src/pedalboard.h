@@ -109,6 +109,8 @@ typedef struct {
 
     float  bpm;
     float  bpb;
+    bool   transport_rolling;   /* true = playing */
+    int    transport_sync;      /* 0=internal, 1=midi_clock_slave */
     bool   modified;
 } pedalboard_t;
 

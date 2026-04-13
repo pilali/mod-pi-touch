@@ -79,6 +79,16 @@ static const char * const g_en[TR_COUNT] = {
     /* TR_PB_CONNECT */            "Connect",
     /* TR_PB_DISCONNECT */         "Disconnect",
 
+    /* TR_CONDUCTOR_TITLE */       "Conductor",
+    /* TR_CONDUCTOR_TEMPO */       "Tempo (BPM)",
+    /* TR_CONDUCTOR_TIME_SIG */    "Time signature",
+    /* TR_CONDUCTOR_CLOCK */       "Clock source",
+    /* TR_CONDUCTOR_INTERNAL */    "Internal",
+    /* TR_CONDUCTOR_MIDI_SLAVE */  "MIDI Slave",
+    /* TR_CONDUCTOR_PLAY */        LV_SYMBOL_PLAY " Play",
+    /* TR_CONDUCTOR_STOP */        LV_SYMBOL_STOP " Stop",
+    /* TR_CONDUCTOR_TAP */         "Tap",
+
     /* TR_SETTINGS_TITLE */        "Settings",
     /* TR_SETTINGS_SYSTEM */       "System",
     /* TR_SETTINGS_AUDIO */        "Audio",
@@ -186,6 +196,16 @@ static const char * const g_fr[TR_COUNT] = {
     /* TR_PB_SOURCE_OUTPUT */      "Sortie source :",
     /* TR_PB_CONNECT */            "Connecter",
     /* TR_PB_DISCONNECT */         "D\xc3\xa9" "connecter",
+
+    /* TR_CONDUCTOR_TITLE */       "Conducteur",
+    /* TR_CONDUCTOR_TEMPO */       "Tempo (BPM)",
+    /* TR_CONDUCTOR_TIME_SIG */    "Mesure",
+    /* TR_CONDUCTOR_CLOCK */       "Source d'horloge",
+    /* TR_CONDUCTOR_INTERNAL */    "Interne",
+    /* TR_CONDUCTOR_MIDI_SLAVE */  "Esclave MIDI",
+    /* TR_CONDUCTOR_PLAY */        LV_SYMBOL_PLAY " Jouer",
+    /* TR_CONDUCTOR_STOP */        LV_SYMBOL_STOP " Arr\xc3\xaater",
+    /* TR_CONDUCTOR_TAP */         "Tap",
 
     /* TR_SETTINGS_TITLE */        "R\xc3\xa9glages",
     /* TR_SETTINGS_SYSTEM */       "Syst\xc3\xa8me",

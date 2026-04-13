@@ -11,6 +11,8 @@
 #include <unistd.h>
 #include <errno.h>
 
+#include "cJSON.h"
+
 #include <sord/sord.h>
 
 /* ─── Helpers ───────────────────────────────────────────────────────────────── */
@@ -408,6 +410,39 @@ int pb_load(pedalboard_t *pb, const char *bundle_dir)
     snapshot_load(snap_path, pb->snapshots, &pb->snapshot_count,
                   PB_MAX_SNAPSHOTS, &pb->current_snapshot);
 
+    /* Load transport settings (optional — not a hard error if absent) */
+    char trans_path[PB_PATH_MAX];
+    snprintf(trans_path, sizeof(trans_path), "%s/transport.json", bundle_dir);
+    FILE *tf = fopen(trans_path, "r");
+    if (tf) {
+        fseek(tf, 0, SEEK_END);
+        long tsz = ftell(tf);
+        rewind(tf);
+        if (tsz > 0 && tsz < 4096) {
+            char *tbuf = malloc((size_t)tsz + 1);
+            if (tbuf) {
+                fread(tbuf, 1, (size_t)tsz, tf);
+                tbuf[tsz] = '\0';
+                cJSON *tj = cJSON_Parse(tbuf);
+                free(tbuf);
+                if (tj) {
+                    cJSON *jbpm = cJSON_GetObjectItem(tj, "bpm");
+                    cJSON *jbpb = cJSON_GetObjectItem(tj, "bpb");
+                    cJSON *jroll = cJSON_GetObjectItem(tj, "rolling");
+                    cJSON *jsync = cJSON_GetObjectItem(tj, "sync");
+                    if (cJSON_IsNumber(jbpm))  pb->bpm = (float)jbpm->valuedouble;
+                    if (cJSON_IsNumber(jbpb))  pb->bpb = (float)jbpb->valuedouble;
+                    if (cJSON_IsBool(jroll))   pb->transport_rolling = cJSON_IsTrue(jroll);
+                    if (cJSON_IsString(jsync)) {
+                        pb->transport_sync = strcmp(jsync->valuestring, "midi_clock_slave") == 0 ? 1 : 0;
+                    }
+                    cJSON_Delete(tj);
+                }
+            }
+        }
+        fclose(tf);
+    }
+
     pb->modified = false;
     return 0;
 }
@@ -579,6 +614,23 @@ int pb_save(pedalboard_t *pb)
     snprintf(snap_path, sizeof(snap_path), "%s/snapshots.json", pb->path);
     if (snapshot_save(snap_path, pb->snapshots, pb->snapshot_count,
                       pb->current_snapshot) < 0) return -1;
+
+    /* Save transport settings */
+    char trans_path[PB_PATH_MAX];
+    snprintf(trans_path, sizeof(trans_path), "%s/transport.json", pb->path);
+    FILE *tf = fopen(trans_path, "w");
+    if (tf) {
+        cJSON *tj = cJSON_CreateObject();
+        cJSON_AddNumberToObject(tj, "bpm",     (double)pb->bpm);
+        cJSON_AddNumberToObject(tj, "bpb",     (double)pb->bpb);
+        cJSON_AddBoolToObject  (tj, "rolling", pb->transport_rolling);
+        cJSON_AddStringToObject(tj, "sync",
+            pb->transport_sync == 1 ? "midi_clock_slave" : "none");
+        char *out = cJSON_Print(tj);
+        if (out) { fputs(out, tf); free(out); }
+        cJSON_Delete(tj);
+        fclose(tf);
+    }
 
     pb->modified = false;
     return 0;

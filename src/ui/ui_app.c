@@ -7,6 +7,7 @@
 #include "ui_bank_browser.h"
 #include "ui_settings.h"
 #include "ui_snapshot_bar.h"
+#include "ui_conductor.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -54,6 +55,12 @@ static void btn_banks_cb(lv_event_t *e)
 {
     (void)e;
     ui_app_show_screen(UI_SCREEN_BANK_BROWSER);
+}
+
+static void btn_conductor_cb(lv_event_t *e)
+{
+    (void)e;
+    ui_conductor_open();
 }
 
 static void btn_add_cb(lv_event_t *e)
@@ -309,6 +316,16 @@ static void create_top_bar(void)
     lv_label_set_text_fmt(g_banks_label, LV_SYMBOL_LIST " %s", TR(TR_BANKS));
     lv_obj_center(g_banks_label);
 
+    /* Conductor button (next to Banks) */
+    lv_obj_t *btn_cond = lv_btn_create(g_top_bar);
+    lv_obj_set_size(btn_cond, 44, 44);
+    lv_obj_align(btn_cond, LV_ALIGN_LEFT_MID, 110 + 6, 0);
+    lv_obj_set_style_bg_color(btn_cond, lv_color_hex(0x6A4C9C), 0);  /* violet */
+    lv_obj_add_event_cb(btn_cond, btn_conductor_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *lbl_cond = lv_label_create(btn_cond);
+    lv_label_set_text(lbl_cond, LV_SYMBOL_AUDIO);
+    lv_obj_center(lbl_cond);
+
     /* Pedalboard title (center) */
     g_title_label = lv_label_create(g_top_bar);
     lv_label_set_text(g_title_label, TR(TR_NO_PEDALBOARD));
@@ -465,6 +482,8 @@ void ui_app_show_screen(ui_screen_t screen)
      * calling lv_obj_del() on the already-freed object (→ SIGSEGV). */
     if (g_toast_timer) { lv_timer_del(g_toast_timer); g_toast_timer = NULL; }
     g_toast = NULL;
+    /* Null conductor pointers before lv_obj_clean destroys the overlay. */
+    ui_conductor_close();
     /* Clean any remaining overlays (confirm/input dialogs, context menus).
      * All objects on lv_layer_top() are app-owned modals — safe to clear. */
     lv_obj_clean(lv_layer_top());
