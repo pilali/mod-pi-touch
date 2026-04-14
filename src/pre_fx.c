@@ -106,6 +106,7 @@ void pre_fx_tuner_start_monitoring(void)
 {
     if (!g_loaded || g_monitoring) return;
     int r = host_monitor_output(PRE_FX_TUNER_INSTANCE, "freq_out");
+    host_monitor_output(PRE_FX_TUNER_INSTANCE, "rms");
     fprintf(stderr, "[pre_fx] monitor_output freq_out → %d\n", r);
     if (r >= 0) g_monitoring = true;
 }
