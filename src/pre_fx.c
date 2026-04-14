@@ -31,9 +31,14 @@ static volatile bool g_poll_running = false;
 static void *tuner_poll_thread(void *arg)
 {
     (void)arg;
+    int tick = 0;
     while (g_poll_running) {
-        if (g_monitoring && g_loaded)
-            host_monitor_output(PRE_FX_TUNER_INSTANCE, "freq_out");
+        if (g_monitoring && g_loaded) {
+            int r = host_monitor_output(PRE_FX_TUNER_INSTANCE, "freq_out");
+            if ((tick++ % 10) == 0)  /* log every 1s */
+                fprintf(stderr, "[tuner_poll] monitor_output → %d  freq=%.1f\n",
+                        r, (double)pre_fx_get_tuner().freq_hz);
+        }
         usleep(100000); /* 100 ms */
     }
     return NULL;
