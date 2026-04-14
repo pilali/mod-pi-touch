@@ -36,6 +36,7 @@ static void feedback_handler(const char *msg, void *ud)
     char  symbol[128];
     float value;
 
+    fprintf(stderr, "[fb] %s\n", msg);
     /* "output_set <instance> <symbol> <value>" — monitor_output feedback */
     if (sscanf(msg, "output_set %d %127s %f", &instance, symbol, &value) == 3) {
         if (instance == PRE_FX_TUNER_INSTANCE)
