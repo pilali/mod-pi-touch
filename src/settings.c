@@ -108,6 +108,7 @@ void settings_init(mpt_settings_t *s)
     s->gate_decay     = 10.0f;
     s->gate_mode      = 3;       /* Stereo */
     s->tuner_ref_freq = 440.0f;
+    s->tuner_input    = 0;        /* both captures */
 
     /* Ensure directories exist */
     ensure_dir(s->data_dir);
@@ -182,6 +183,8 @@ void settings_init(mpt_settings_t *s)
                 if (cJSON_IsNumber(gm))  s->gate_mode      = (int)gm->valuedouble;
                 cJSON *tr = cJSON_GetObjectItem(root, "tuner_ref");
                 if (cJSON_IsNumber(tr))  s->tuner_ref_freq = (float)tr->valuedouble;
+                cJSON *ti = cJSON_GetObjectItem(root, "tuner_input");
+                if (cJSON_IsNumber(ti))  s->tuner_input    = (int)ti->valuedouble;
 
                 cJSON_Delete(root);
             }
@@ -264,6 +267,7 @@ int settings_save_prefs(const mpt_settings_t *s)
     cJSON_AddNumberToObject(root, "gate_decay",     s->gate_decay);
     cJSON_AddNumberToObject(root, "gate_mode",      s->gate_mode);
     cJSON_AddNumberToObject(root, "tuner_ref",      s->tuner_ref_freq);
+    cJSON_AddNumberToObject(root, "tuner_input",    s->tuner_input);
 
     char *str = cJSON_Print(root);
     cJSON_Delete(root);

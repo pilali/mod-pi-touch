@@ -26,6 +26,9 @@ void pre_fx_apply_gate(void);
 /* Apply current tuner reference frequency to mod-host. */
 void pre_fx_apply_tuner_ref(void);
 
+/* Reconnect tuner audio input based on settings.tuner_input (0=both,1=L,2=R). */
+void pre_fx_apply_tuner_input(void);
+
 /* Enable real-time monitoring of tuner output ports. */
 void pre_fx_tuner_start_monitoring(void);
 

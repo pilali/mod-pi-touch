@@ -71,10 +71,15 @@ static void do_load(void)
     host_connect("system:capture_1", "effect_9993:Input_1");
     host_connect("system:capture_2", "effect_9993:Input_2");
 
-    /* Connect first capture to tuner.
+    /* Connect tuner input(s) — see pre_fx_apply_tuner_input().
      * Also connect tuner's audio out to keep it active in the JACK graph. */
-    host_connect("system:capture_1", "effect_9994:in");
     host_connect("effect_9994:out",  "system:playback_1");
+    /* Apply input routing (both captures by default) */
+    mpt_settings_t *s = settings_get();
+    if (s->tuner_input != 2)
+        host_connect("system:capture_1", "effect_9994:in");
+    if (s->tuner_input != 1)
+        host_connect("system:capture_2", "effect_9994:in");
 
     g_loaded = true;
 
@@ -124,6 +129,20 @@ void pre_fx_apply_tuner_ref(void)
     mpt_settings_t *s = settings_get();
     /* LV2 port symbol per tuna.ttl index 5 */
     host_param_set(PRE_FX_TUNER_INSTANCE, "tuning", s->tuner_ref_freq);
+}
+
+void pre_fx_apply_tuner_input(void)
+{
+    if (!g_loaded) return;
+    /* Disconnect both, then reconnect according to setting */
+    host_disconnect("system:capture_1", "effect_9994:in");
+    host_disconnect("system:capture_2", "effect_9994:in");
+    mpt_settings_t *s = settings_get();
+    if (s->tuner_input != 2)
+        host_connect("system:capture_1", "effect_9994:in");
+    if (s->tuner_input != 1)
+        host_connect("system:capture_2", "effect_9994:in");
+    fprintf(stderr, "[pre_fx] tuner input → %d\n", s->tuner_input);
 }
 
 void pre_fx_tuner_start_monitoring(void)

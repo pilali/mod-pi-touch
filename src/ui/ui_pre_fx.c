@@ -43,6 +43,9 @@ static lv_obj_t *g_gate_dec_slider = NULL;
 static lv_obj_t *g_gate_dec_label  = NULL;
 static lv_obj_t *g_mode_btns[4]    = {NULL,NULL,NULL,NULL};
 
+/* Tuner input selector (0=L+R, 1=L, 2=R) */
+static lv_obj_t *g_input_btns[3] = {NULL, NULL, NULL};
+
 /* Pedalboard mute toggle */
 static lv_obj_t *g_mute_toggle = NULL;
 static bool      g_pb_muted    = false;
@@ -166,6 +169,23 @@ static void mute_toggle_cb(lv_event_t *e)
     (void)e;
     g_pb_muted = lv_obj_has_state(g_mute_toggle, LV_STATE_CHECKED);
     ui_pedalboard_chain_bypass(g_pb_muted);
+}
+
+/* ─── Input selector callback ────────────────────────────────────────────────── */
+static void input_btn_cb(lv_event_t *e)
+{
+    int input = (int)(intptr_t)lv_event_get_user_data(e);
+    mpt_settings_t *s = settings_get();
+    s->tuner_input = input;
+    /* Update button highlights — order is L(val=1), L+R(val=0), R(val=2) */
+    static const int inp_vals_cb[3] = {1, 0, 2};
+    for (int i = 0; i < 3; i++) {
+        if (!g_input_btns[i]) continue;
+        lv_obj_set_style_bg_color(g_input_btns[i],
+            (inp_vals_cb[i] == input) ? UI_COLOR_PRIMARY : UI_COLOR_SURFACE, 0);
+    }
+    pre_fx_apply_tuner_input();
+    settings_save_prefs(s);
 }
 
 /* ─── Reference frequency callbacks ──────────────────────────────────────────── */
@@ -332,6 +352,41 @@ static void build_tuner_body(lv_obj_t *parent)
     lv_obj_set_style_bg_color(g_mute_toggle, UI_COLOR_SURFACE, LV_PART_MAIN);
     lv_obj_set_style_bg_color(g_mute_toggle, UI_COLOR_PRIMARY, LV_PART_INDICATOR | LV_STATE_CHECKED);
     lv_obj_add_event_cb(g_mute_toggle, mute_toggle_cb, LV_EVENT_VALUE_CHANGED, NULL);
+
+    /* ── Input selector row ── */
+    lv_obj_t *inp_row = lv_obj_create(parent);
+    lv_obj_set_size(inp_row, LV_PCT(100), 50);
+    lv_obj_align(inp_row, LV_ALIGN_TOP_MID, 0, 300);
+    lv_obj_set_style_bg_opa(inp_row, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(inp_row, 0, 0);
+    lv_obj_set_style_pad_all(inp_row, 0, 0);
+    lv_obj_clear_flag(inp_row, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_flex_flow(inp_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(inp_row, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(inp_row, 8, 0);
+
+    lv_obj_t *inp_title = lv_label_create(inp_row);
+    lv_label_set_text(inp_title, TR(TR_PREFX_INPUT));
+    lv_obj_set_style_text_color(inp_title, UI_COLOR_TEXT, 0);
+    lv_obj_set_style_text_font(inp_title, &lv_font_montserrat_16, 0);
+
+    /* val: 0=L+R, 1=L, 2=R; button order: L, L+R, R */
+    static const char * const inp_labels[3] = {"L", "L+R", "R"};
+    static const int inp_vals[3] = {1, 0, 2};
+    for (int i = 0; i < 3; i++) {
+        lv_obj_t *btn = lv_btn_create(inp_row);
+        lv_obj_set_size(btn, 70, 40);
+        lv_obj_set_style_radius(btn, 6, 0);
+        lv_obj_set_style_bg_color(btn,
+            (s->tuner_input == inp_vals[i]) ? UI_COLOR_PRIMARY : UI_COLOR_SURFACE, 0);
+        lv_obj_t *lbl = lv_label_create(btn);
+        lv_label_set_text(lbl, inp_labels[i]);
+        lv_obj_set_style_text_color(lbl, UI_COLOR_TEXT, 0);
+        lv_obj_center(lbl);
+        lv_obj_add_event_cb(btn, input_btn_cb, LV_EVENT_CLICKED,
+                            (void *)(intptr_t)inp_vals[i]);
+        g_input_btns[i] = btn;
+    }
 }
 
 static void build_gate_body(lv_obj_t *parent)
@@ -593,6 +648,7 @@ void ui_pre_fx_close(void)
     g_gate_toggle = g_gate_thr_slider = g_gate_thr_label = NULL;
     g_gate_dec_slider = g_gate_dec_label = NULL;
     g_mute_toggle = NULL;
+    for (int i = 0; i < 3; i++) g_input_btns[i] = NULL;
     g_tab_tuner = g_tab_gate = g_body_tuner = g_body_gate = NULL;
     for (int i = 0; i < 4; i++) g_mode_btns[i] = NULL;
 
