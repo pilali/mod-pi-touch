@@ -46,8 +46,10 @@ static void do_load(void)
     host_connect("system:capture_1", "effect_9993:Input_1");
     host_connect("system:capture_2", "effect_9993:Input_2");
 
-    /* Connect first capture to tuner (parallel, monitoring only — output not used) */
+    /* Connect first capture to tuner.
+     * Also connect tuner's audio out to keep it active in the JACK graph. */
     host_connect("system:capture_1", "effect_9994:in");
+    host_connect("effect_9994:out",  "system:playback_1");
 
     g_loaded = true;
 

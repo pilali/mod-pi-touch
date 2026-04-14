@@ -462,9 +462,7 @@ int host_transport_sync(const char *mode)
 int host_monitor_output(int instance, const char *symbol)
 {
     char cmd[HOST_CMD_MAX];
-    /* Condition "> -1" means: notify whenever value changes AND value > -1.
-     * Since output control ports are always >= 0, this fires on every change. */
-    snprintf(cmd, sizeof(cmd), "monitor_output %d %s > -1", instance, symbol);
+    snprintf(cmd, sizeof(cmd), "monitor_output %d %s", instance, symbol);
     return host_comm_send_sync(cmd, NULL, 0, 2000);
 }
 
