@@ -124,9 +124,6 @@ void pre_fx_apply_tuner_ref(void)
     mpt_settings_t *s = settings_get();
     /* LV2 port symbol per tuna.ttl index 5 */
     host_param_set(PRE_FX_TUNER_INSTANCE, "tuning", s->tuner_ref_freq);
-    /* Push thresholds to minimum so tuna detects even quiet signals */
-    host_param_set(PRE_FX_TUNER_INSTANCE, "thresholdRMS", -100.0f);
-    host_param_set(PRE_FX_TUNER_INSTANCE, "thresholdFFT", -50.0f);
 }
 
 void pre_fx_tuner_start_monitoring(void)
