@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <math.h>
 #include <pthread.h>
+#include <unistd.h>
 
 /* ─── Plugin URIs ─────────────────────────────────────────────────────────────── */
 #define GATE_URI  "http://moddevices.com/plugins/mod-devel/System-NoiseGate"
@@ -18,6 +19,25 @@ static bool            g_monitoring = false;
 static pthread_mutex_t g_tuner_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pre_fx_tuner_t  g_tuner       = {0};
 
+/* Re-subscription polling thread — forces a fresh snapshot every 100 ms.
+ * This mod-host fork only sends one snapshot per monitor_output call;
+ * repeated calls force continuous updates via the feedback socket. */
+static pthread_t     g_poll_tid;
+static volatile bool g_poll_running = false;
+
+
+/* ─── Re-subscription polling thread ─────────────────────────────────────────── */
+
+static void *tuner_poll_thread(void *arg)
+{
+    (void)arg;
+    while (g_poll_running) {
+        if (g_monitoring && g_loaded)
+            host_monitor_output(PRE_FX_TUNER_INSTANCE, "freq_out");
+        usleep(100000); /* 100 ms */
+    }
+    return NULL;
+}
 
 /* ─── Internal helpers ────────────────────────────────────────────────────────── */
 
@@ -71,6 +91,8 @@ static void do_load(void)
 
 void pre_fx_init(void)
 {
+    g_poll_running = true;
+    pthread_create(&g_poll_tid, NULL, tuner_poll_thread, NULL);
     do_load();
 }
 
@@ -105,10 +127,7 @@ void pre_fx_apply_tuner_ref(void)
 void pre_fx_tuner_start_monitoring(void)
 {
     if (!g_loaded || g_monitoring) return;
-    int r = host_monitor_output(PRE_FX_TUNER_INSTANCE, "freq_out");
-    host_monitor_output(PRE_FX_TUNER_INSTANCE, "rms");
-    fprintf(stderr, "[pre_fx] monitor_output freq_out → %d\n", r);
-    if (r >= 0) g_monitoring = true;
+    g_monitoring = true; /* poll thread will call monitor_output immediately */
 }
 
 void pre_fx_tuner_stop_monitoring(void)

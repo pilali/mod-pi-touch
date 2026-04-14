@@ -123,9 +123,7 @@ static void *fb_thread_func(void *arg)
         if (r <= 0) continue;
 
         int n = recv(h->fb_fd, buf + buf_len, sizeof(buf) - buf_len - 1, 0);
-        if (n < 0) { fprintf(stderr, "[fb_thread] recv error: %s\n", strerror(errno)); break; }
-        if (n == 0) { fprintf(stderr, "[fb_thread] connection closed by peer\n"); break; }
-        fprintf(stderr, "[fb_thread] recv %d bytes\n", n);
+        if (n <= 0) break;
         buf_len += n;
         buf[buf_len] = '\0';
 
