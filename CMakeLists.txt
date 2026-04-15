@@ -21,7 +21,21 @@ find_package(PkgConfig REQUIRED)
 pkg_check_modules(LILV   REQUIRED lilv-0)
 pkg_check_modules(SERD   REQUIRED serd-0)
 pkg_check_modules(SORD   REQUIRED sord-0)
-pkg_check_modules(JACK   REQUIRED jack)
+
+# Use the system JACK (1.9.21) — same version mod-host links against.
+# The custom JACK in /usr/local is 1.9.14 and fails jack_client_open (0x11).
+find_library(JACK_SYS_LIB jack
+    PATHS /lib/aarch64-linux-gnu /usr/lib/aarch64-linux-gnu
+    NO_DEFAULT_PATH)
+if(JACK_SYS_LIB)
+    set(JACK_LIBRARIES    ${JACK_SYS_LIB})
+    set(JACK_INCLUDE_DIRS /usr/local/include)   # compatible JACK headers
+    set(JACK_CFLAGS_OTHER "")
+    message(STATUS "Using system JACK: ${JACK_SYS_LIB}")
+else()
+    pkg_check_modules(JACK REQUIRED jack)
+    message(STATUS "Using pkg-config JACK: ${JACK_LIBRARIES}")
+endif()
 
 # cJSON (bundled)
 set(CJSON_SRC ${CMAKE_SOURCE_DIR}/third_party/cjson/cJSON.c)
@@ -74,6 +88,7 @@ set(SOURCES
     src/ui/ui_settings.c
     src/ui/ui_conductor.c
     src/pre_fx.c
+    src/tuner_host.c
     src/ui/ui_pre_fx.c
     ${CJSON_SRC}
     resources/fonts/lv_font_montserrat_12.c

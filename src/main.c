@@ -36,7 +36,6 @@ static void feedback_handler(const char *msg, void *ud)
     char  symbol[128];
     float value;
 
-    fprintf(stderr, "[fb] %s\n", msg);
     /* "output_set <instance> <symbol> <value>" — monitor_output feedback */
     if (sscanf(msg, "output_set %d %127s %f", &instance, symbol, &value) == 3) {
         if (instance == PRE_FX_TUNER_INSTANCE)
@@ -188,6 +187,7 @@ int main(int argc, char *argv[])
     printf("[main] Shutting down...\n");
     pthread_join(tick_tid, NULL);
 
+    pre_fx_fini();
     host_comm_disconnect();
     pm_fini();
     lv2u_world_fini();
