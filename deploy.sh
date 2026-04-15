@@ -12,13 +12,15 @@ rsync -av --exclude=build/ --exclude=build_dbg/ \
 echo "==> Build on Pi..."
 ssh "$PI" "cd $BUILD_DIR && cmake --build build -j4"
 
-echo "==> Install sudoers rule for WiFi (nmcli)..."
+echo "==> Install sudoers rules (WiFi + power)..."
 ssh "$PI" "echo 'pistomp ALL=(ALL) NOPASSWD: /usr/bin/nmcli dev wifi rescan *
 pistomp ALL=(ALL) NOPASSWD: /usr/bin/nmcli dev wifi connect *
 pistomp ALL=(ALL) NOPASSWD: /usr/bin/nmcli dev wifi hotspot *
 pistomp ALL=(ALL) NOPASSWD: /usr/bin/nmcli con up *
 pistomp ALL=(ALL) NOPASSWD: /usr/bin/nmcli con down *
-pistomp ALL=(ALL) NOPASSWD: /usr/bin/nmcli con delete *' | sudo tee /etc/sudoers.d/mod-pi-touch-wifi > /dev/null && sudo chmod 0440 /etc/sudoers.d/mod-pi-touch-wifi"
+pistomp ALL=(ALL) NOPASSWD: /usr/bin/nmcli con delete *
+pistomp ALL=(ALL) NOPASSWD: /bin/systemctl poweroff
+pistomp ALL=(ALL) NOPASSWD: /bin/systemctl reboot' | sudo tee /etc/sudoers.d/mod-pi-touch-wifi > /dev/null && sudo chmod 0440 /etc/sudoers.d/mod-pi-touch-wifi"
 
 echo "==> Deploy..."
 ssh "$PI" "sudo systemctl stop mod-pi-touch; sudo cp $BUILD_DIR/build/mod-pi-touch /usr/local/bin/mod-pi-touch; sudo systemctl start mod-pi-touch"

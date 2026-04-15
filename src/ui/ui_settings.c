@@ -526,6 +526,148 @@ static void wifi_pw_ta_defocused_cb(lv_event_t *e)
     if (g_wifi_kbd) lv_obj_add_flag(g_wifi_kbd, LV_OBJ_FLAG_HIDDEN);
 }
 
+/* ─── Power section ──────────────────────────────────────────────────────────── */
+
+/* Generic confirmation modal: message + Confirm/Cancel buttons.
+ * confirm_cb is called with user_data when the user taps Confirm. */
+static void power_confirm_close_cb(lv_event_t *e)
+{
+    lv_obj_t *overlay = lv_event_get_user_data(e);
+    lv_obj_del(overlay);
+}
+
+typedef struct { lv_event_cb_t action_cb; void *user_data; } power_confirm_ctx_t;
+/* Max 4 concurrent confirm dialogs — unlikely but safe. */
+static power_confirm_ctx_t g_pcc[4];
+static int                 g_pcc_idx = 0;
+
+static void power_confirm_ok_cb(lv_event_t *e)
+{
+    power_confirm_ctx_t *ctx = lv_event_get_user_data(e);
+    /* Close the overlay (grandparent of the button) */
+    lv_obj_t *btn     = lv_event_get_target(e);
+    lv_obj_t *card    = lv_obj_get_parent(btn);
+    lv_obj_t *overlay = lv_obj_get_parent(card);
+    lv_obj_del(overlay);
+    /* Execute the action */
+    if (ctx->action_cb) ctx->action_cb(NULL);
+}
+
+static void show_confirm(const char *msg,
+                         lv_event_cb_t confirm_cb, void *user_data)
+{
+    power_confirm_ctx_t *ctx = &g_pcc[g_pcc_idx++ % 4];
+    ctx->action_cb  = confirm_cb;
+    ctx->user_data  = user_data;
+
+    /* Semi-transparent full-screen overlay */
+    lv_obj_t *overlay = lv_obj_create(lv_scr_act());
+    lv_obj_set_size(overlay, LV_PCT(100), LV_PCT(100));
+    lv_obj_set_pos(overlay, 0, 0);
+    lv_obj_set_style_bg_color(overlay, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(overlay, LV_OPA_60, 0);
+    lv_obj_set_style_border_width(overlay, 0, 0);
+    lv_obj_set_style_radius(overlay, 0, 0);
+    lv_obj_set_style_pad_all(overlay, 0, 0);
+    lv_obj_clear_flag(overlay, LV_OBJ_FLAG_SCROLLABLE);
+
+    /* Centered card */
+    lv_obj_t *card = lv_obj_create(overlay);
+    lv_obj_set_size(card, 480, 160);
+    lv_obj_center(card);
+    lv_obj_set_style_bg_color(card, UI_COLOR_SURFACE, 0);
+    lv_obj_set_style_border_width(card, 0, 0);
+    lv_obj_set_style_radius(card, 10, 0);
+    lv_obj_set_flex_flow(card, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(card, LV_FLEX_ALIGN_SPACE_EVENLY,
+                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_all(card, 16, 0);
+    lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+
+    /* Message */
+    lv_obj_t *lbl = lv_label_create(card);
+    lv_label_set_text(lbl, msg);
+    lv_obj_set_style_text_color(lbl, UI_COLOR_TEXT, 0);
+    lv_obj_set_style_text_font(lbl, &lv_font_montserrat_18, 0);
+    lv_obj_set_width(lbl, LV_PCT(100));
+    lv_label_set_long_mode(lbl, LV_LABEL_LONG_WRAP);
+
+    /* Button row */
+    lv_obj_t *btn_row = lv_obj_create(card);
+    lv_obj_set_size(btn_row, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(btn_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(btn_row, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_bg_opa(btn_row, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(btn_row, 0, 0);
+    lv_obj_set_style_pad_column(btn_row, 24, 0);
+    lv_obj_set_style_pad_all(btn_row, 0, 0);
+    lv_obj_clear_flag(btn_row, LV_OBJ_FLAG_SCROLLABLE);
+
+    /* Cancel */
+    lv_obj_t *btn_cancel = lv_btn_create(btn_row);
+    lv_obj_set_size(btn_cancel, 160, 44);
+    lv_obj_set_style_bg_color(btn_cancel, UI_COLOR_TEXT_DIM, 0);
+    lv_obj_add_event_cb(btn_cancel, power_confirm_close_cb, LV_EVENT_CLICKED, overlay);
+    lv_obj_t *lbl_cancel = lv_label_create(btn_cancel);
+    lv_label_set_text(lbl_cancel, TR(TR_CANCEL));
+    lv_obj_center(lbl_cancel);
+
+    /* Confirm */
+    lv_obj_t *btn_ok = lv_btn_create(btn_row);
+    lv_obj_set_size(btn_ok, 160, 44);
+    lv_obj_set_style_bg_color(btn_ok, lv_palette_main(LV_PALETTE_RED), 0);
+    lv_obj_add_event_cb(btn_ok, power_confirm_ok_cb, LV_EVENT_CLICKED, ctx);
+    lv_obj_t *lbl_ok = lv_label_create(btn_ok);
+    lv_label_set_text(lbl_ok, TR(TR_OK));
+    lv_obj_center(lbl_ok);
+}
+
+static void do_shutdown(lv_event_t *e)
+{
+    (void)e;
+    system("sudo systemctl poweroff");
+}
+
+static void do_reboot(lv_event_t *e)
+{
+    (void)e;
+    system("sudo systemctl reboot");
+}
+
+static void shutdown_btn_cb(lv_event_t *e)
+{
+    (void)e;
+    show_confirm(TR(TR_SETTINGS_CONFIRM_SHUTDOWN), do_shutdown, NULL);
+}
+
+static void reboot_btn_cb(lv_event_t *e)
+{
+    (void)e;
+    show_confirm(TR(TR_SETTINGS_CONFIRM_REBOOT), do_reboot, NULL);
+}
+
+static void build_power_section(lv_obj_t *parent)
+{
+    lv_obj_t *row = make_row(parent);
+
+    lv_obj_t *btn_shutdown = lv_btn_create(row);
+    lv_obj_set_size(btn_shutdown, 200, 44);
+    lv_obj_set_style_bg_color(btn_shutdown, lv_palette_darken(LV_PALETTE_RED, 1), 0);
+    lv_obj_add_event_cb(btn_shutdown, shutdown_btn_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *lbl_sd = lv_label_create(btn_shutdown);
+    lv_label_set_text_fmt(lbl_sd, LV_SYMBOL_POWER " %s", TR(TR_SETTINGS_SHUTDOWN));
+    lv_obj_center(lbl_sd);
+
+    lv_obj_t *btn_reboot = lv_btn_create(row);
+    lv_obj_set_size(btn_reboot, 200, 44);
+    lv_obj_set_style_bg_color(btn_reboot, lv_palette_darken(LV_PALETTE_ORANGE, 1), 0);
+    lv_obj_add_event_cb(btn_reboot, reboot_btn_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *lbl_rb = lv_label_create(btn_reboot);
+    lv_label_set_text_fmt(lbl_rb, LV_SYMBOL_REFRESH " %s", TR(TR_SETTINGS_REBOOT));
+    lv_obj_center(lbl_rb);
+}
+
 /* Save hotspot password when the textarea loses focus. */
 static void wifi_hotspot_pw_save_cb(lv_event_t *e)
 {
@@ -778,4 +920,8 @@ void ui_settings_show(lv_obj_t *parent)
     /* ── WiFi ── */
     add_section_header(parent, TR(TR_SETTINGS_WIFI));
     build_wifi_section(parent);
+
+    /* ── Power ── */
+    add_section_header(parent, TR(TR_SETTINGS_POWER));
+    build_power_section(parent);
 }

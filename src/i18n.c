@@ -151,6 +151,12 @@ static const char * const g_en[TR_COUNT] = {
     /* TR_SETTINGS_WIFI_HOTSPOT_SSID */     "SSID: " WIFI_HOTSPOT_SSID,
     /* TR_SETTINGS_WIFI_HOTSPOT_PASSWORD */ "Hotspot password",
     /* TR_SETTINGS_WIFI_HOTSPOT_PW_SAVED */ "Hotspot password saved.",
+
+    /* TR_SETTINGS_POWER */           "Power",
+    /* TR_SETTINGS_SHUTDOWN */        "Shutdown",
+    /* TR_SETTINGS_REBOOT */          "Reboot",
+    /* TR_SETTINGS_CONFIRM_SHUTDOWN */"Shut down the system?",
+    /* TR_SETTINGS_CONFIRM_REBOOT */  "Reboot the system?",
 };
 
 /* ─── French strings ─────────────────────────────────────────────────────────── */
@@ -302,6 +308,12 @@ static const char * const g_fr[TR_COUNT] = {
     /* TR_SETTINGS_WIFI_HOTSPOT_SSID */     "SSID : " WIFI_HOTSPOT_SSID,
     /* TR_SETTINGS_WIFI_HOTSPOT_PASSWORD */ "Mot de passe hotspot",
     /* TR_SETTINGS_WIFI_HOTSPOT_PW_SAVED */ "Mot de passe hotspot enregistr\xc3\xa9.",
+
+    /* TR_SETTINGS_POWER */           "Alimentation",
+    /* TR_SETTINGS_SHUTDOWN */        "\xc3\x89teindre",
+    /* TR_SETTINGS_REBOOT */          "Red\xc3\xa9marrer",
+    /* TR_SETTINGS_CONFIRM_SHUTDOWN */"\xc3\x89teindre le syst\xc3\xa8me ?",
+    /* TR_SETTINGS_CONFIRM_REBOOT */  "Red\xc3\xa9marrer le syst\xc3\xa8me ?",
 };
 
 /* ─── Runtime state ──────────────────────────────────────────────────────────── */
