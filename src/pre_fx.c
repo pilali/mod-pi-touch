@@ -19,12 +19,28 @@ static bool            g_monitoring = false;
 static pthread_mutex_t g_tuner_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pre_fx_tuner_t  g_tuner       = {0};
 
+/* Serializes concurrent do_load() calls (init vs reload) */
+static pthread_mutex_t g_load_mutex  = PTHREAD_MUTEX_INITIALIZER;
+
 /* Re-subscription polling thread — forces a fresh snapshot every 100 ms.
  * This mod-host fork only sends one snapshot per monitor_output call;
  * repeated calls force continuous updates via the feedback socket. */
 static pthread_t     g_poll_tid;
 static volatile bool g_poll_running = false;
 
+/* Async load thread — tuna takes ~26s to load; run in background so UI
+ * starts immediately. g_loaded becomes true once do_load() completes. */
+static pthread_t     g_load_tid;
+
+
+/* ─── Async load thread ───────────────────────────────────────────────────────── */
+
+static void *load_thread(void *arg)
+{
+    (void)arg;
+    do_load();
+    return NULL;
+}
 
 /* ─── Re-subscription polling thread ─────────────────────────────────────────── */
 
@@ -34,10 +50,12 @@ static void *tuner_poll_thread(void *arg)
     int tick = 0;
     while (g_poll_running) {
         if (g_monitoring && g_loaded) {
-            int r = host_monitor_output(PRE_FX_TUNER_INSTANCE, "freq_out");
+            host_monitor_output(PRE_FX_TUNER_INSTANCE, "freq_out");
+            host_monitor_output(PRE_FX_TUNER_INSTANCE, "rms");
             if ((tick++ % 10) == 0)  /* log every 1s */
-                fprintf(stderr, "[tuner_poll] monitor_output → %d  freq=%.1f\n",
-                        r, (double)pre_fx_get_tuner().freq_hz);
+                fprintf(stderr, "[tuner_poll] freq=%.1f  rms=%.1f\n",
+                        (double)pre_fx_get_tuner().freq_hz,
+                        (double)pre_fx_get_tuner().rms_db);
         }
         usleep(100000); /* 100 ms */
     }
@@ -48,6 +66,7 @@ static void *tuner_poll_thread(void *arg)
 
 static void do_load(void)
 {
+    pthread_mutex_lock(&g_load_mutex);
     g_loaded = false;
 
     /* Explicitly remove previous instances before re-adding.
@@ -95,6 +114,7 @@ static void do_load(void)
 
     fprintf(stderr, "[pre_fx] Loaded (gate=%d, tuner=%d)\n",
             PRE_FX_GATE_INSTANCE, PRE_FX_TUNER_INSTANCE);
+    pthread_mutex_unlock(&g_load_mutex);
 }
 
 /* ─── Public API ──────────────────────────────────────────────────────────────── */
@@ -103,12 +123,17 @@ void pre_fx_init(void)
 {
     g_poll_running = true;
     pthread_create(&g_poll_tid, NULL, tuner_poll_thread, NULL);
-    do_load();
+    /* Load plugins in background — tuna takes ~26s; don't block the UI */
+    pthread_create(&g_load_tid, NULL, load_thread, NULL);
 }
 
 void pre_fx_reload(void)
 {
-    do_load();
+    /* Run in background thread — do_load acquires g_load_mutex so this
+     * also safely serializes against an in-progress init load. */
+    pthread_t tid;
+    pthread_create(&tid, NULL, load_thread, NULL);
+    pthread_detach(tid);
 }
 
 void pre_fx_apply_gate(void)
@@ -129,6 +154,8 @@ void pre_fx_apply_tuner_ref(void)
     mpt_settings_t *s = settings_get();
     /* LV2 port symbol per tuna.ttl index 5 */
     host_param_set(PRE_FX_TUNER_INSTANCE, "tuning", s->tuner_ref_freq);
+    /* Lower detection threshold to -85 dBFS (default -75 misses typical guitar levels) */
+    host_param_set(PRE_FX_TUNER_INSTANCE, "thresholdRMS", -85.0f);
 }
 
 void pre_fx_apply_tuner_input(void)
@@ -159,6 +186,14 @@ void pre_fx_tuner_stop_monitoring(void)
 void pre_fx_on_feedback(int instance, const char *symbol, float value)
 {
     (void)instance;
+
+    if (strcmp(symbol, "rms") == 0) {
+        pthread_mutex_lock(&g_tuner_mutex);
+        g_tuner.rms_db = value;
+        pthread_mutex_unlock(&g_tuner_mutex);
+        return;
+    }
+
     if (strcmp(symbol, "freq_out") != 0) return;
 
     pthread_mutex_lock(&g_tuner_mutex);

@@ -48,7 +48,7 @@ SordNode *lv2u_uri(const char *uri);
 SordNode *lv2u_curie(const char *prefix_uri, const char *local);
 SordNode *lv2u_blank(const char *id);          /* blank node */
 SordNode *lv2u_string(const char *str);        /* xsd:string literal */
-SordNode *lv2u_float_node(float v);            /* xsd:float literal  */
+SordNode *lv2u_float_node(float v);            /* xsd:decimal literal (bare 2606.0) */
 SordNode *lv2u_bool_node(bool v);              /* "true"/"false" literal */
 SordNode *lv2u_int_node(int v);                /* xsd:integer literal */
 

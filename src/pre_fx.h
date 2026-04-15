@@ -12,6 +12,7 @@ typedef struct {
     float cent;      /* -50..+50 cents */
     float freq_hz;   /* detected frequency in Hz (0 = no signal) */
     int   octave;    /* octave number */
+    float rms_db;    /* signal level at tuner input in dBFS (diagnostic) */
 } pre_fx_tuner_t;
 
 /* Initialize pre-fx after host connect. */

@@ -70,9 +70,12 @@ int lv2u_save_ttl(SordModel *model, const char *path, const char *base_uri)
     FILE *f = fopen(path, "w");
     if (!f) return -1;
 
-    SerdEnv  *env    = serd_env_new(NULL);
+    /* Parse the base URI string into a SerdURI struct (required by
+     * serd_writer_new) so serd can relativize URIs against the base. */
+    SerdURI   base_parsed = SERD_URI_NULL;
     SerdNode  base   = serd_node_new_uri_from_string(
-                           (const uint8_t *)base_uri, NULL, NULL);
+                           (const uint8_t *)base_uri, NULL, &base_parsed);
+    SerdEnv  *env    = serd_env_new(&base);
     serd_env_set_base_uri(env, &base);
 
     /* Register standard prefixes */
@@ -97,7 +100,7 @@ int lv2u_save_ttl(SordModel *model, const char *path, const char *base_uri)
 
     SerdWriter *writer = serd_writer_new(
         SERD_TURTLE, SERD_STYLE_ABBREVIATED | SERD_STYLE_CURIED,
-        env, &base, file_sink, f);
+        env, &base_parsed, file_sink, f);
 
     serd_env_foreach(env, (SerdPrefixSink)serd_writer_set_prefix, writer);
 
@@ -105,10 +108,21 @@ int lv2u_save_ttl(SordModel *model, const char *path, const char *base_uri)
     while (!sord_iter_end(it)) {
         SordQuad q;
         sord_iter_get(it, q);
-        const SerdNode *s = sord_node_to_serd_node(q[SORD_SUBJECT]);
-        const SerdNode *p = sord_node_to_serd_node(q[SORD_PREDICATE]);
-        const SerdNode *o = sord_node_to_serd_node(q[SORD_OBJECT]);
-        serd_writer_write_statement(writer, 0, NULL, s, p, o, NULL, NULL);
+        const SerdNode *s  = sord_node_to_serd_node(q[SORD_SUBJECT]);
+        const SerdNode *p  = sord_node_to_serd_node(q[SORD_PREDICATE]);
+        const SerdNode *o  = sord_node_to_serd_node(q[SORD_OBJECT]);
+        /* Pass datatype and language so serd can write typed/lang literals
+         * correctly (e.g. abbreviate xsd:decimal to bare 1097.0). */
+        const SordNode *dt = sord_node_get_datatype(q[SORD_OBJECT]);
+        const char     *lg = sord_node_get_language(q[SORD_OBJECT]);
+        const SerdNode *dt_serd = dt ? sord_node_to_serd_node(dt) : NULL;
+        SerdNode lang_node;
+        const SerdNode *lang_serd = NULL;
+        if (lg && lg[0]) {
+            lang_node  = serd_node_from_string(SERD_LITERAL, (const uint8_t *)lg);
+            lang_serd  = &lang_node;
+        }
+        serd_writer_write_statement(writer, 0, NULL, s, p, o, dt_serd, lang_serd);
         sord_iter_next(it);
     }
     sord_iter_free(it);
@@ -147,9 +161,14 @@ SordNode *lv2u_string(const char *str)
 
 SordNode *lv2u_float_node(float v)
 {
+    /* Use xsd:decimal so serd abbreviates to bare literals (e.g. 2606.0),
+     * matching the format written by mod-ui. */
     char buf[64];
     snprintf(buf, sizeof(buf), "%g", (double)v);
-    SordNode *type = lv2u_uri("http://www.w3.org/2001/XMLSchema#float");
+    /* Ensure at least one decimal point so the literal round-trips as decimal */
+    if (!strchr(buf, '.') && !strchr(buf, 'e') && !strchr(buf, 'E'))
+        strncat(buf, ".0", sizeof(buf) - strlen(buf) - 1);
+    SordNode *type = lv2u_uri("http://www.w3.org/2001/XMLSchema#decimal");
     SordNode *n = sord_new_literal(g_world, type, (const uint8_t *)buf, NULL);
     sord_node_free(g_world, type);
     return n;

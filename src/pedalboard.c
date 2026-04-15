@@ -449,125 +449,134 @@ int pb_load(pedalboard_t *pb, const char *bundle_dir)
 
 /* ─── TTL generation (save) ──────────────────────────────────────────────────── */
 
+/* Return the bundle-relative path of an absolute file:// URI.
+ * E.g. bundle_base="file:///path/Test.pedalboard",
+ *      abs="file:///path/Test.pedalboard/CabinetLoader/level" → "CabinetLoader/level"
+ * Returns abs unchanged if it doesn't start with bundle_base+"/". */
+static const char *bundle_rel(const char *abs, const char *bundle_base)
+{
+    size_t blen = strlen(bundle_base);
+    if (strncmp(abs, bundle_base, blen) == 0 && abs[blen] == '/')
+        return abs + blen + 1;
+    return abs;
+}
+
+/* Write a bare Turtle literal for a float value (e.g. 2606.0) */
+static void write_float(FILE *f, float v)
+{
+    /* Use %g to strip trailing zeros, then ensure at least one decimal point
+     * so the value is unambiguously a decimal (not integer) in Turtle. */
+    char buf[64];
+    snprintf(buf, sizeof(buf), "%g", (double)v);
+    if (!strchr(buf, '.') && !strchr(buf, 'e') && !strchr(buf, 'E'))
+        strncat(buf, ".0", sizeof(buf) - strlen(buf) - 1);
+    fputs(buf, f);
+}
+
 static int pb_save_ttl(pedalboard_t *pb, const char *ttl_path)
 {
-    SordModel *m = sord_new(lv2u_world(), SORD_SPO, false);
-    SordNode *rdf_type    = lv2u_uri(NS_RDF   "type");
-    SordNode *lv2_Plugin  = lv2u_uri(NS_LV2   "Plugin");
-    SordNode *ingen_Graph = lv2u_uri(NS_INGEN  "Graph");
-    SordNode *ingen_Block = lv2u_uri(NS_INGEN  "Block");
-    SordNode *ingen_Arc   = lv2u_uri(NS_INGEN  "Arc");
-    SordNode *pedal_PB    = lv2u_uri(NS_PEDAL  "Pedalboard");
-    SordNode *ingen_prototype = lv2u_uri(NS_INGEN "prototype");
-    SordNode *lv2_prototype   = lv2u_uri(NS_LV2  "prototype");
-    SordNode *lv2_port        = lv2u_uri(NS_LV2  "port");
-    SordNode *ingen_enabled   = lv2u_uri(NS_INGEN "enabled");
-    SordNode *ingen_canvasX   = lv2u_uri(NS_INGEN "canvasX");
-    SordNode *ingen_canvasY   = lv2u_uri(NS_INGEN "canvasY");
-    SordNode *ingen_value     = lv2u_uri(NS_INGEN "value");
-    SordNode *ingen_tail      = lv2u_uri(NS_INGEN "tail");
-    SordNode *ingen_head      = lv2u_uri(NS_INGEN "head");
-    SordNode *mod_label       = lv2u_uri(NS_MOD   "label");
-    SordNode *mod_snapshotable = lv2u_uri(NS_MOD  "snapshotable");
-    SordNode *pedal_preset    = lv2u_uri(NS_PEDAL "preset");
-    SordNode *doap_name       = lv2u_uri(NS_DOAP  "name");
-    SordNode *lv2_ControlPort = lv2u_uri(NS_LV2   "ControlPort");
-    SordNode *lv2_InputPort   = lv2u_uri(NS_LV2   "InputPort");
+    FILE *f = fopen(ttl_path, "w");
+    if (!f) return -1;
 
-#define ADD(s, p, o)  sord_add(m, (SordQuad){(s),(p),(o),NULL})
+    /* bundle_base: used to compute bundle-relative URIs from absolute file:// ones */
+    char bundle_base[PB_PATH_MAX];
+    snprintf(bundle_base, sizeof(bundle_base), "file://%s", pb->path);
 
-    /* Pedalboard subject */
-    char pb_uri[PB_PATH_MAX];
-    snprintf(pb_uri, sizeof(pb_uri), "file://%s/%s.ttl", pb->path, pb->name);
-    SordNode *pb_subj = lv2u_uri(pb_uri);
+    /* ── Prefix declarations ── */
+    fputs(
+        "@prefix atom:  <http://lv2plug.in/ns/ext/atom#> .\n"
+        "@prefix doap:  <http://usefulinc.com/ns/doap#> .\n"
+        "@prefix ingen: <http://drobilla.net/ns/ingen#> .\n"
+        "@prefix lv2:   <http://lv2plug.in/ns/lv2core#> .\n"
+        "@prefix midi:  <http://lv2plug.in/ns/ext/midi#> .\n"
+        "@prefix mod:   <http://moddevices.com/ns/mod#> .\n"
+        "@prefix pedal: <http://moddevices.com/ns/modpedal#> .\n"
+        "@prefix rdfs:  <http://www.w3.org/2000/01/rdf-schema#> .\n\n",
+        f);
 
-    ADD(pb_subj, rdf_type, lv2_Plugin);
-    ADD(pb_subj, rdf_type, ingen_Graph);
-    ADD(pb_subj, rdf_type, pedal_PB);
-    ADD(pb_subj, doap_name, lv2u_string(pb->name));
-
-    /* Standard pedalboard ports */
-    const char *pb_ports[] = {
-        "capture_1", "capture_2", "playback_1", "playback_2", NULL
-    };
-    for (int pi = 0; pb_ports[pi]; pi++) {
-        char port_uri[PB_PATH_MAX];
-        snprintf(port_uri, sizeof(port_uri), "%s/%s", pb_uri, pb_ports[pi]);
-        SordNode *pn = lv2u_uri(port_uri);
-        ADD(pb_subj, lv2_port, pn);
-        sord_node_free(lv2u_world(), pn);
+    /* ── Connections as blank-node arcs ── */
+    for (int i = 0; i < pb->connection_count; i++) {
+        pb_connection_t *conn = &pb->connections[i];
+        const char *from = bundle_rel(conn->from, bundle_base);
+        const char *to   = bundle_rel(conn->to,   bundle_base);
+        fprintf(f, "_:b%d\n    ingen:tail <%s> ;\n    ingen:head <%s> .\n\n",
+                i + 1, from, to);
     }
 
-    /* Plugin blocks */
+    /* ── Plugin blocks ── */
     for (int i = 0; i < pb->plugin_count; i++) {
         pb_plugin_t *plug = &pb->plugins[i];
 
-        char block_uri[PB_PATH_MAX];
-        snprintf(block_uri, sizeof(block_uri), "%s/%s", pb_uri, plug->symbol);
-        SordNode *block = lv2u_uri(block_uri);
-
-        ADD(block, rdf_type,       ingen_Block);
-        ADD(block, lv2_prototype,  lv2u_uri(plug->uri));
-        ADD(block, ingen_canvasX,  lv2u_float_node(plug->canvas_x));
-        ADD(block, ingen_canvasY,  lv2u_float_node(plug->canvas_y));
-        ADD(block, ingen_enabled,  lv2u_bool_node(plug->enabled));
-        ADD(block, mod_label,      lv2u_string(plug->label));
-        ADD(pb_subj, lv2_port, block); /* block listed as port of pedalboard graph */
-
+        fprintf(f, "<%s>\n", plug->symbol);
+        fprintf(f, "    ingen:canvasX ");  write_float(f, plug->canvas_x);
+        fprintf(f, " ;\n    ingen:canvasY "); write_float(f, plug->canvas_y);
+        fprintf(f, " ;\n    ingen:enabled %s ;\n", plug->enabled ? "true" : "false");
+        fprintf(f, "    lv2:prototype <%s> ;\n", plug->uri);
+        fprintf(f, "    mod:label \"%s\" ;\n", plug->label);
+        fprintf(f, "    pedal:instanceNumber %d ;\n", i);
         if (plug->preset_uri[0])
-            ADD(block, pedal_preset, lv2u_uri(plug->preset_uri));
+            fprintf(f, "    pedal:preset <%s> ;\n", plug->preset_uri);
+        else
+            fprintf(f, "    pedal:preset <> ;\n");
 
-        /* Control ports */
-        for (int j = 0; j < plug->port_count; j++) {
-            pb_port_t *port = &plug->ports[j];
-            char port_uri[PB_PATH_MAX];
-            snprintf(port_uri, sizeof(port_uri), "%s/%s/%s",
-                     pb_uri, plug->symbol, port->symbol);
-            SordNode *pn = lv2u_uri(port_uri);
-
-            ADD(pn, rdf_type, lv2_ControlPort);
-            ADD(pn, rdf_type, lv2_InputPort);
-            ADD(pn, ingen_value, lv2u_float_node(port->value));
-            ADD(pn, mod_snapshotable, lv2u_bool_node(port->snapshotable));
-            ADD(block, lv2_port, pn);
-
-            sord_node_free(lv2u_world(), pn);
+        /* lv2:port list — comma-separated on a single predicate */
+        if (plug->port_count > 0) {
+            fputs("    lv2:port", f);
+            for (int j = 0; j < plug->port_count; j++)
+                fprintf(f, " %s<%s/%s>",
+                        (j == 0) ? "" : " ,\n             ",
+                        plug->symbol, plug->ports[j].symbol);
+            fputs(" ;\n", f);
         }
-
-        /* Patch parameters (file paths): store as block <param_uri> "path" */
+        /* Patch parameters (file paths stored as block property) */
         for (int j = 0; j < plug->patch_param_count; j++) {
             pb_patch_t *pp = &plug->patch_params[j];
             if (!pp->path[0]) continue;
-            SordNode *param_node = lv2u_uri(pp->uri);
-            ADD(block, param_node, lv2u_string(pp->path));
-            sord_node_free(lv2u_world(), param_node);
+            fprintf(f, "    <%s> \"%s\" ;\n", pp->uri, pp->path);
         }
 
-        sord_node_free(lv2u_world(), block);
+        fputs("    a ingen:Block .\n\n", f);
+
+        /* Port value declarations */
+        for (int j = 0; j < plug->port_count; j++) {
+            pb_port_t *port = &plug->ports[j];
+            fprintf(f, "<%s/%s>\n    ingen:value ", plug->symbol, port->symbol);
+            write_float(f, port->value);
+            fprintf(f, " ;\n    mod:snapshotable %s ;\n    a lv2:ControlPort ,\n        lv2:InputPort .\n\n",
+                    port->snapshotable ? "true" : "false");
+        }
     }
 
-    /* Connections (ingen:Arc) — each arc must be listed via ingen:arc on pb_subj */
-    SordNode *ingen_arc_pred = lv2u_uri(NS_INGEN "arc");
-    for (int i = 0; i < pb->connection_count; i++) {
-        pb_connection_t *conn = &pb->connections[i];
-        char arc_id[64];
-        snprintf(arc_id, sizeof(arc_id), "arc_%d", i);
-        SordNode *arc = lv2u_blank(arc_id);
-        ADD(pb_subj, ingen_arc_pred, arc);
-        ADD(arc, rdf_type,    ingen_Arc);
-        ADD(arc, ingen_tail,  lv2u_uri(conn->from));
-        ADD(arc, ingen_head,  lv2u_uri(conn->to));
-        sord_node_free(lv2u_world(), arc);
+    /* ── Graph subject <> ── */
+    fprintf(f, "<>\n    doap:name \"%s\" ;\n    ingen:polyphony 1 ;\n", pb->name);
+
+    /* ingen:arc list */
+    if (pb->connection_count > 0) {
+        fputs("    ingen:arc", f);
+        for (int i = 0; i < pb->connection_count; i++)
+            fprintf(f, " %s_:b%d", (i == 0) ? "" : ",\n              ", i + 1);
+        fputs(" ;\n", f);
     }
-    sord_node_free(lv2u_world(), ingen_arc_pred);
 
-#undef ADD
+    /* ingen:block list */
+    if (pb->plugin_count > 0) {
+        fputs("    ingen:block", f);
+        for (int i = 0; i < pb->plugin_count; i++)
+            fprintf(f, " %s<%s>", (i == 0) ? "" : ",\n               ", pb->plugins[i].symbol);
+        fputs(" ;\n", f);
+    }
 
-    char base[PB_PATH_MAX];
-    snprintf(base, sizeof(base), "file://%s", ttl_path);
-    int r = lv2u_save_ttl(m, ttl_path, base);
-    sord_free(m);
-    return r;
+    /* lv2:port list (system capture/playback ports) */
+    const char *sys_ports[] = { "capture_1", "capture_2", "playback_1", "playback_2", NULL };
+    fputs("    lv2:port", f);
+    for (int i = 0; sys_ports[i]; i++)
+        fprintf(f, " %s<%s>", (i == 0) ? "" : ",\n             ", sys_ports[i]);
+    fputs(" ;\n", f);
+
+    fputs("    a ingen:Graph ,\n        lv2:Plugin ,\n        pedal:Pedalboard .\n", f);
+
+    fclose(f);
+    return 0;
 }
 
 static int pb_save_manifest(pedalboard_t *pb)
@@ -577,9 +586,11 @@ static int pb_save_manifest(pedalboard_t *pb)
     FILE *f = fopen(manifest_path, "w");
     if (!f) return -1;
 
+    /* Format matches mod-ui manifest exactly:
+     *   - minimal prefixes (ingen, lv2, pedal, rdfs only)
+     *   - rdfs:seeAlso <Name.ttl>  (mod-ui uses this to find the main TTL)
+     *   - no doap: prefix (doap:name is in the main TTL, not the manifest) */
     fprintf(f,
-        "@prefix atom:  <http://lv2plug.in/ns/ext/atom#> .\n"
-        "@prefix doap:  <http://usefulinc.com/ns/doap#> .\n"
         "@prefix ingen: <http://drobilla.net/ns/ingen#> .\n"
         "@prefix lv2:   <http://lv2plug.in/ns/lv2core#> .\n"
         "@prefix pedal: <http://moddevices.com/ns/modpedal#> .\n"
@@ -587,11 +598,10 @@ static int pb_save_manifest(pedalboard_t *pb)
         "\n"
         "<%s.ttl>\n"
         "    lv2:prototype ingen:GraphPrototype ;\n"
-        "    doap:name \"%s\" ;\n"
-        "    pedal:screenshot <screenshot.png> ;\n"
-        "    pedal:thumbnail <thumbnail.png> ;\n"
-        "    ingen:polyphony 1 ;\n"
-        "    a lv2:Plugin , ingen:Graph , pedal:Pedalboard .\n",
+        "    a lv2:Plugin ,\n"
+        "        ingen:Graph ,\n"
+        "        pedal:Pedalboard ;\n"
+        "    rdfs:seeAlso <%s.ttl> .\n",
         pb->name, pb->name);
 
     fclose(f);
