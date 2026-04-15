@@ -37,7 +37,8 @@ static volatile bool       g_wifi_bg_done  = false; /* set by bg thread, cleared
 static wifi_network_t      g_wifi_nets[WIFI_MAX_NETWORKS];
 static int                 g_wifi_net_count = 0;
 
-static lv_obj_t *g_wifi_status_lbl  = NULL;
+static lv_obj_t *g_wifi_ssid_lbl    = NULL;
+static lv_obj_t *g_wifi_ip_lbl      = NULL;
 static lv_obj_t *g_wifi_scan_btn    = NULL;
 static lv_obj_t *g_wifi_dd_net      = NULL;
 static lv_obj_t *g_wifi_pw_ta       = NULL;
@@ -371,14 +372,11 @@ static void wifi_poll_cb(lv_timer_t *tmr)
             char ssid[WIFI_MAX_SSID_LEN] = "";
             char ip[32] = "";
             wifi_get_status(ssid, sizeof(ssid), ip, sizeof(ip));
-            if (g_wifi_status_lbl) {
-                char buf[128];
-                if (ip[0])
-                    snprintf(buf, sizeof(buf), "%s  (%s)", ssid, ip);
-                else
-                    snprintf(buf, sizeof(buf), "%s", ssid);
-                lv_label_set_text(g_wifi_status_lbl, buf);
-            }
+            if (g_wifi_ssid_lbl)
+                lv_label_set_text(g_wifi_ssid_lbl,
+                                  ssid[0] ? ssid : TR(TR_SETTINGS_WIFI_NO_CONNECTION));
+            if (g_wifi_ip_lbl)
+                lv_label_set_text(g_wifi_ip_lbl, ip[0] ? ip : "--");
             ui_app_show_toast(TR(TR_SETTINGS_WIFI_CONNECTED_OK));
         } else {
             ui_app_show_toast(TR(TR_SETTINGS_WIFI_CONNECT_FAIL));
@@ -685,27 +683,18 @@ static void build_wifi_section(lv_obj_t *parent)
 {
     /* ── Current network status ── */
     char ssid[WIFI_MAX_SSID_LEN] = "";
-    char ip[32]   = "";
-    bool connected = wifi_get_status(ssid, sizeof(ssid), ip, sizeof(ip));
+    char ip[32] = "";
+    wifi_get_status(ssid, sizeof(ssid), ip, sizeof(ip));
 
-    lv_obj_t *status_row = make_row(parent);
-    lv_obj_t *status_key = lv_label_create(status_row);
-    lv_label_set_text(status_key, TR(TR_SETTINGS_WIFI_CURRENT));
-    lv_obj_set_style_text_color(status_key, UI_COLOR_TEXT_DIM, 0);
-    lv_obj_set_flex_grow(status_key, 1);
+    /* SSID row */
+    g_wifi_ssid_lbl = add_info_row(parent,
+                                   TR(TR_SETTINGS_WIFI_CURRENT),
+                                   ssid[0] ? ssid : TR(TR_SETTINGS_WIFI_NO_CONNECTION));
 
-    g_wifi_status_lbl = lv_label_create(status_row);
-    if (connected) {
-        char buf[128];
-        if (ip[0])
-            snprintf(buf, sizeof(buf), "%s  (%s)", ssid, ip);
-        else
-            snprintf(buf, sizeof(buf), "%s", ssid);
-        lv_label_set_text(g_wifi_status_lbl, buf);
-    } else {
-        lv_label_set_text(g_wifi_status_lbl, TR(TR_SETTINGS_WIFI_NO_CONNECTION));
-    }
-    lv_obj_set_style_text_color(g_wifi_status_lbl, UI_COLOR_TEXT, 0);
+    /* IP row */
+    g_wifi_ip_lbl = add_info_row(parent,
+                                 TR(TR_SETTINGS_WIFI_IP),
+                                 ip[0] ? ip : "--");
 
     /* ── Scan button ── */
     lv_obj_t *scan_row = make_row(parent);
@@ -825,7 +814,8 @@ void ui_settings_show(lv_obj_t *parent)
     g_dd_device = g_dd_buffer = g_dd_bits = NULL;
 
     /* WiFi pointers — reset each time the screen is rebuilt */
-    g_wifi_status_lbl  = NULL;
+    g_wifi_ssid_lbl    = NULL;
+    g_wifi_ip_lbl      = NULL;
     g_wifi_scan_btn    = NULL;
     g_wifi_dd_net      = NULL;
     g_wifi_pw_ta       = NULL;

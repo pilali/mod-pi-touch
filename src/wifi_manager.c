@@ -133,62 +133,73 @@ int wifi_scan(wifi_network_t *networks, int max)
 bool wifi_get_status(char *ssid_out, int ssid_len,
                      char *ip_out,   int ip_len)
 {
-    /* Get the active WiFi connection name */
-    FILE *fp = popen("nmcli -t -f TYPE,STATE,CONNECTION dev | "
-                     "grep '^wifi:connected:' 2>/dev/null", "r");
-    if (!fp) return false;
+    if (ssid_out && ssid_len > 0) ssid_out[0] = '\0';
+    if (ip_out   && ip_len   > 0) ip_out[0]   = '\0';
 
-    char line[256];
-    bool connected = false;
-    if (fgets(line, sizeof(line), fp)) {
-        rtrim(line);
-        /* line: "wifi:connected:<connection-name>" */
-        char *third = NULL;
-        int colons = 0;
-        for (char *p = line; *p; p++) {
-            if (*p == ':') { colons++; if (colons == 2) { third = p + 1; break; } }
-        }
-        if (third && third[0] != '\0') {
-            connected = true;
-            /* Get SSID from the active connection */
-            if (ssid_out) {
-                char cmd[512];
-                char con_q[256];
-                shell_quote(third, con_q, sizeof(con_q));
-                snprintf(cmd, sizeof(cmd),
-                         "nmcli -t -f 802-11-wireless.ssid con show %s 2>/dev/null",
-                         con_q);
-                FILE *fp2 = popen(cmd, "r");
-                if (fp2) {
-                    char l2[256];
-                    if (fgets(l2, sizeof(l2), fp2)) {
-                        rtrim(l2);
-                        /* "802-11-wireless.ssid:<ssid>" */
-                        char *colon = strchr(l2, ':');
-                        if (colon) {
-                            char ssid_raw[256];
-                            nmcli_unescape(colon + 1, ssid_raw, sizeof(ssid_raw));
-                            snprintf(ssid_out, (size_t)ssid_len, "%s", ssid_raw);
-                        }
-                    }
-                    pclose(fp2);
-                }
+    /* Step 1 — find the active WiFi interface name (e.g. "wlan0").
+     * nmcli -t -f DEVICE,TYPE,STATE dev  →  "wlan0:wifi:connected" */
+    char iface[32] = "";
+    {
+        FILE *fp = popen("nmcli -t -f DEVICE,TYPE,STATE dev 2>/dev/null", "r");
+        if (!fp) return false;
+        char line[256];
+        while (fgets(line, sizeof(line), fp)) {
+            rtrim(line);
+            /* Split into at most 3 fields on ':' */
+            char *f[3] = { line, NULL, NULL };
+            int fi = 0;
+            for (char *p = line; *p && fi < 2; p++) {
+                if (*p == ':') { *p = '\0'; f[++fi] = p + 1; }
+            }
+            if (f[1] && strcmp(f[1], "wifi") == 0 &&
+                f[2] && strcmp(f[2], "connected") == 0) {
+                snprintf(iface, sizeof(iface), "%s", f[0]);
+                break;
             }
         }
+        pclose(fp);
     }
-    pclose(fp);
 
-    /* Get IP address if connected */
-    if (connected && ip_out) {
-        ip_out[0] = '\0';
-        FILE *fp3 = popen("nmcli -t -f IP4.ADDRESS dev show wlan0 2>/dev/null", "r");
-        if (fp3) {
-            char l3[256];
-            while (fgets(l3, sizeof(l3), fp3)) {
-                rtrim(l3);
-                /* "IP4.ADDRESS[1]:<ip>/<prefix>" */
-                if (strncmp(l3, "IP4.ADDRESS", 11) == 0) {
-                    char *colon = strchr(l3, ':');
+    if (iface[0] == '\0') return false;
+
+    /* Step 2 — SSID: get the active SSID on that interface.
+     * nmcli -t -f ACTIVE,SSID dev wifi list ifname <iface>
+     * →  "yes:<ssid>" for the connected network */
+    if (ssid_out) {
+        char cmd[256];
+        snprintf(cmd, sizeof(cmd),
+                 "nmcli -t -f ACTIVE,SSID dev wifi list ifname %s 2>/dev/null",
+                 iface);
+        FILE *fp = popen(cmd, "r");
+        if (fp) {
+            char line[256];
+            while (fgets(line, sizeof(line), fp)) {
+                rtrim(line);
+                if (strncmp(line, "yes:", 4) == 0) {
+                    char raw[256];
+                    nmcli_unescape(line + 4, raw, sizeof(raw));
+                    snprintf(ssid_out, (size_t)ssid_len, "%s", raw);
+                    break;
+                }
+            }
+            pclose(fp);
+        }
+    }
+
+    /* Step 3 — IP address on that interface.
+     * nmcli -t -f IP4.ADDRESS dev show <iface>
+     * →  "IP4.ADDRESS[1]:<ip>/<prefix>" */
+    if (ip_out) {
+        char cmd[256];
+        snprintf(cmd, sizeof(cmd),
+                 "nmcli -t -f IP4.ADDRESS dev show %s 2>/dev/null", iface);
+        FILE *fp = popen(cmd, "r");
+        if (fp) {
+            char line[256];
+            while (fgets(line, sizeof(line), fp)) {
+                rtrim(line);
+                if (strncmp(line, "IP4.ADDRESS", 11) == 0) {
+                    char *colon = strchr(line, ':');
                     if (colon) {
                         char *slash = strchr(colon + 1, '/');
                         if (slash) *slash = '\0';
@@ -197,11 +208,11 @@ bool wifi_get_status(char *ssid_out, int ssid_len,
                     }
                 }
             }
-            pclose(fp3);
+            pclose(fp);
         }
     }
 
-    return connected;
+    return true;
 }
 
 /* ─── Connect ─────────────────────────────────────────────────────────────────── */

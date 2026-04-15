@@ -135,7 +135,8 @@ static const char * const g_en[TR_COUNT] = {
     /* TR_SETTINGS_LANGUAGE_OPTS */"English\nFran\xc3\xa7" "ais",
 
     /* TR_SETTINGS_WIFI */          "WiFi",
-    /* TR_SETTINGS_WIFI_CURRENT */  "Current network",
+    /* TR_SETTINGS_WIFI_CURRENT */      "Network",
+    /* TR_SETTINGS_WIFI_IP */           "IP address",
     /* TR_SETTINGS_WIFI_NO_CONNECTION */ "Not connected",
     /* TR_SETTINGS_WIFI_SCAN */     "Scan networks",
     /* TR_SETTINGS_WIFI_SCANNING */ "Scanning...",
@@ -292,7 +293,8 @@ static const char * const g_fr[TR_COUNT] = {
     /* TR_SETTINGS_LANGUAGE_OPTS */"English\nFran\xc3\xa7" "ais",
 
     /* TR_SETTINGS_WIFI */          "WiFi",
-    /* TR_SETTINGS_WIFI_CURRENT */  "R\xc3\xa9seau actuel",
+    /* TR_SETTINGS_WIFI_CURRENT */      "R\xc3\xa9seau",
+    /* TR_SETTINGS_WIFI_IP */           "Adresse IP",
     /* TR_SETTINGS_WIFI_NO_CONNECTION */ "Non connect\xc3\xa9",
     /* TR_SETTINGS_WIFI_SCAN */     "Rechercher des r\xc3\xa9seaux",
     /* TR_SETTINGS_WIFI_SCANNING */ "Recherche en cours...",
