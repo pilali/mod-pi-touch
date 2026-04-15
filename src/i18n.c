@@ -1,4 +1,5 @@
 #include "i18n.h"
+#include "wifi_manager.h"
 #include <string.h>
 
 /* ─── English strings ────────────────────────────────────────────────────────── */
@@ -132,6 +133,22 @@ static const char * const g_en[TR_COUNT] = {
     /* TR_SETTINGS_CPU_DEFAULT */  "-- %",
     /* TR_SETTINGS_LANGUAGE */     "Language",
     /* TR_SETTINGS_LANGUAGE_OPTS */"English\nFran\xc3\xa7" "ais",
+
+    /* TR_SETTINGS_WIFI */          "WiFi",
+    /* TR_SETTINGS_WIFI_CURRENT */  "Current network",
+    /* TR_SETTINGS_WIFI_NO_CONNECTION */ "Not connected",
+    /* TR_SETTINGS_WIFI_SCAN */     "Scan networks",
+    /* TR_SETTINGS_WIFI_SCANNING */ "Scanning...",
+    /* TR_SETTINGS_WIFI_NETWORK */  "Network",
+    /* TR_SETTINGS_WIFI_PASSWORD */ "Password",
+    /* TR_SETTINGS_WIFI_CONNECT */  "Connect",
+    /* TR_SETTINGS_WIFI_CONNECTING */ "Connecting...",
+    /* TR_SETTINGS_WIFI_CONNECTED_OK */ "Connected.",
+    /* TR_SETTINGS_WIFI_CONNECT_FAIL */ "Connection failed.",
+    /* TR_SETTINGS_WIFI_HOTSPOT */  "Hotspot",
+    /* TR_SETTINGS_WIFI_HOTSPOT_ON */  "ON",
+    /* TR_SETTINGS_WIFI_HOTSPOT_OFF */ "OFF",
+    /* TR_SETTINGS_WIFI_HOTSPOT_SSID */ "SSID: " WIFI_HOTSPOT_SSID,
 };
 
 /* ─── French strings ─────────────────────────────────────────────────────────── */
@@ -265,6 +282,22 @@ static const char * const g_fr[TR_COUNT] = {
     /* TR_SETTINGS_CPU_DEFAULT */  "-- %",
     /* TR_SETTINGS_LANGUAGE */     "Langue",
     /* TR_SETTINGS_LANGUAGE_OPTS */"English\nFran\xc3\xa7" "ais",
+
+    /* TR_SETTINGS_WIFI */          "WiFi",
+    /* TR_SETTINGS_WIFI_CURRENT */  "R\xc3\xa9seau actuel",
+    /* TR_SETTINGS_WIFI_NO_CONNECTION */ "Non connect\xc3\xa9",
+    /* TR_SETTINGS_WIFI_SCAN */     "Rechercher des r\xc3\xa9seaux",
+    /* TR_SETTINGS_WIFI_SCANNING */ "Recherche en cours...",
+    /* TR_SETTINGS_WIFI_NETWORK */  "R\xc3\xa9seau",
+    /* TR_SETTINGS_WIFI_PASSWORD */ "Mot de passe",
+    /* TR_SETTINGS_WIFI_CONNECT */  "Connecter",
+    /* TR_SETTINGS_WIFI_CONNECTING */ "Connexion...",
+    /* TR_SETTINGS_WIFI_CONNECTED_OK */ "Connect\xc3\xa9.",
+    /* TR_SETTINGS_WIFI_CONNECT_FAIL */ "\xc3\x89" "chec de la connexion.",
+    /* TR_SETTINGS_WIFI_HOTSPOT */  "Point d'acc\xc3\xa8s",
+    /* TR_SETTINGS_WIFI_HOTSPOT_ON */  "ON",
+    /* TR_SETTINGS_WIFI_HOTSPOT_OFF */ "OFF",
+    /* TR_SETTINGS_WIFI_HOTSPOT_SSID */ "SSID : " WIFI_HOTSPOT_SSID,
 };
 
 /* ─── Runtime state ──────────────────────────────────────────────────────────── */

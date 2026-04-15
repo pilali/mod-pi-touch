@@ -89,6 +89,7 @@ set(SOURCES
     src/ui/ui_conductor.c
     src/pre_fx.c
     src/tuner_host.c
+    src/wifi_manager.c
     src/ui/ui_pre_fx.c
     ${CJSON_SRC}
     resources/fonts/lv_font_montserrat_12.c

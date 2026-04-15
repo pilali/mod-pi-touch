@@ -82,6 +82,9 @@ typedef struct {
     int   gate_mode;         /* 0=Off 1=In1 2=In2 3=Stereo, default 3 */
     float tuner_ref_freq;    /* 220-880 Hz, default 440 */
     int   tuner_input;       /* 0=both, 1=left (capture_1), 2=right (capture_2) */
+
+    /* WiFi */
+    bool  hotspot_enabled;   /* persist hotspot on/off preference */
 } mpt_settings_t;
 
 /* Load settings from env vars + config file. Safe to call multiple times. */

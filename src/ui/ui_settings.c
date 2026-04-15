@@ -5,9 +5,11 @@
 #include "../i18n.h"
 #include "../host_comm.h"
 #include "../hw_detect.h"
+#include "../wifi_manager.h"
 
 #include <string.h>
 #include <stdio.h>
+#include <pthread.h>
 
 /* ─── Module state ───────────────────────────────────────────────────────────── */
 static lv_obj_t *g_dd_device   = NULL;
@@ -19,6 +21,38 @@ static int                g_n_audio    = 0;
 
 typedef struct { int port_idx; } midi_ctx_t;
 static midi_ctx_t g_midi_ctx[MPT_MAX_MIDI_PORTS];
+
+/* ─── WiFi state ─────────────────────────────────────────────────────────────── */
+typedef enum {
+    WIFI_OP_NONE = 0,
+    WIFI_OP_SCAN,
+    WIFI_OP_CONNECT,
+    WIFI_OP_HOTSPOT
+} wifi_op_t;
+
+static volatile wifi_op_t  g_wifi_op       = WIFI_OP_NONE;
+static volatile int        g_wifi_result   = 0;   /* 0 = ok, -1 = fail */
+static volatile bool       g_wifi_bg_done  = false; /* set by bg thread, cleared by timer */
+
+static wifi_network_t      g_wifi_nets[WIFI_MAX_NETWORKS];
+static int                 g_wifi_net_count = 0;
+
+static lv_obj_t *g_wifi_status_lbl  = NULL;
+static lv_obj_t *g_wifi_scan_btn    = NULL;
+static lv_obj_t *g_wifi_dd_net      = NULL;
+static lv_obj_t *g_wifi_pw_ta       = NULL;
+static lv_obj_t *g_wifi_pw_row      = NULL;
+static lv_obj_t *g_wifi_connect_btn = NULL;
+static lv_obj_t *g_wifi_hotspot_sw  = NULL;
+static lv_obj_t *g_wifi_kbd         = NULL;
+static lv_timer_t *g_wifi_poll_tmr  = NULL;
+
+/* Shared state between bg thread and UI poll timer */
+typedef struct {
+    char ssid[WIFI_MAX_SSID_LEN];
+    char password[128];
+} wifi_connect_args_t;
+static wifi_connect_args_t g_wifi_connect_args;
 
 /* ─── Helpers ─────────────────────────────────────────────────────────────────── */
 
@@ -273,6 +307,315 @@ static void build_midi_section(lv_obj_t *parent)
     }
 }
 
+/* ─── WiFi section ───────────────────────────────────────────────────────────── */
+
+/* Rebuild the network dropdown from g_wifi_nets. */
+static void wifi_rebuild_dropdown(void)
+{
+    if (!g_wifi_dd_net) return;
+    if (g_wifi_net_count == 0) {
+        lv_dropdown_set_options(g_wifi_dd_net, TR(TR_SETTINGS_WIFI_NO_CONNECTION));
+        return;
+    }
+    char opts[WIFI_MAX_NETWORKS * (WIFI_MAX_SSID_LEN + 4)];
+    opts[0] = '\0';
+    for (int i = 0; i < g_wifi_net_count; i++) {
+        if (i > 0) strncat(opts, "\n", sizeof(opts) - strlen(opts) - 1);
+        char entry[WIFI_MAX_SSID_LEN + 4];
+        snprintf(entry, sizeof(entry), "%s%s",
+                 g_wifi_nets[i].ssid,
+                 g_wifi_nets[i].secured ? " *" : "");
+        strncat(opts, entry, sizeof(opts) - strlen(opts) - 1);
+    }
+    lv_dropdown_set_options(g_wifi_dd_net, opts);
+    lv_dropdown_set_selected(g_wifi_dd_net, 0);
+}
+
+/* Show/hide the password row based on whether selected network is secured. */
+static void wifi_update_pw_visibility(void)
+{
+    if (!g_wifi_pw_row || !g_wifi_dd_net) return;
+    uint16_t sel = lv_dropdown_get_selected(g_wifi_dd_net);
+    bool secured = (sel < (uint16_t)g_wifi_net_count) && g_wifi_nets[sel].secured;
+    if (secured)
+        lv_obj_clear_flag(g_wifi_pw_row, LV_OBJ_FLAG_HIDDEN);
+    else
+        lv_obj_add_flag(g_wifi_pw_row, LV_OBJ_FLAG_HIDDEN);
+}
+
+/* Poll timer — checks whether the background WiFi operation has completed. */
+static void wifi_poll_cb(lv_timer_t *tmr)
+{
+    (void)tmr;
+    if (!g_wifi_bg_done) return;  /* still running */
+
+    g_wifi_bg_done = false;
+    wifi_op_t op   = g_wifi_op;
+    g_wifi_op      = WIFI_OP_NONE;
+
+    lv_timer_del(g_wifi_poll_tmr);
+    g_wifi_poll_tmr = NULL;
+
+    switch (op) {
+    case WIFI_OP_SCAN:
+        wifi_rebuild_dropdown();
+        wifi_update_pw_visibility();
+        if (g_wifi_scan_btn)
+            lv_label_set_text(lv_obj_get_child(g_wifi_scan_btn, 0),
+                              TR(TR_SETTINGS_WIFI_SCAN));
+        break;
+
+    case WIFI_OP_CONNECT:
+        if (g_wifi_result == 0) {
+            char ssid[WIFI_MAX_SSID_LEN] = "";
+            char ip[32] = "";
+            wifi_get_status(ssid, sizeof(ssid), ip, sizeof(ip));
+            if (g_wifi_status_lbl) {
+                char buf[128];
+                if (ip[0])
+                    snprintf(buf, sizeof(buf), "%s  (%s)", ssid, ip);
+                else
+                    snprintf(buf, sizeof(buf), "%s", ssid);
+                lv_label_set_text(g_wifi_status_lbl, buf);
+            }
+            ui_app_show_toast(TR(TR_SETTINGS_WIFI_CONNECTED_OK));
+        } else {
+            ui_app_show_toast(TR(TR_SETTINGS_WIFI_CONNECT_FAIL));
+        }
+        if (g_wifi_connect_btn)
+            lv_label_set_text(lv_obj_get_child(g_wifi_connect_btn, 0),
+                              TR(TR_SETTINGS_WIFI_CONNECT));
+        break;
+
+    case WIFI_OP_HOTSPOT:
+        if (g_wifi_hotspot_sw) {
+            bool active = wifi_hotspot_is_active();
+            if (active)
+                lv_obj_add_state(g_wifi_hotspot_sw, LV_STATE_CHECKED);
+            else
+                lv_obj_clear_state(g_wifi_hotspot_sw, LV_STATE_CHECKED);
+        }
+        break;
+
+    default:
+        break;
+    }
+}
+
+static void *wifi_scan_thread(void *arg)
+{
+    (void)arg;
+    g_wifi_net_count = wifi_scan(g_wifi_nets, WIFI_MAX_NETWORKS);
+    g_wifi_bg_done   = true;   /* signal completion — poll timer picks it up */
+    return NULL;
+}
+
+static void wifi_scan_cb(lv_event_t *e)
+{
+    (void)e;
+    if (g_wifi_op != WIFI_OP_NONE) return;
+
+    g_wifi_net_count = 0;
+    g_wifi_op = WIFI_OP_SCAN;
+
+    if (g_wifi_scan_btn)
+        lv_label_set_text(lv_obj_get_child(g_wifi_scan_btn, 0),
+                          TR(TR_SETTINGS_WIFI_SCANNING));
+
+    pthread_t tid;
+    pthread_create(&tid, NULL, wifi_scan_thread, NULL);
+    pthread_detach(tid);
+
+    if (!g_wifi_poll_tmr)
+        g_wifi_poll_tmr = lv_timer_create(wifi_poll_cb, 500, NULL);
+}
+
+static void wifi_net_changed_cb(lv_event_t *e)
+{
+    (void)e;
+    wifi_update_pw_visibility();
+}
+
+static void *wifi_connect_thread(void *arg)
+{
+    (void)arg;
+    const char *pw = g_wifi_connect_args.password[0]
+                     ? g_wifi_connect_args.password : NULL;
+    g_wifi_result  = wifi_connect(g_wifi_connect_args.ssid, pw);
+    g_wifi_bg_done = true;
+    return NULL;
+}
+
+static void wifi_connect_cb(lv_event_t *e)
+{
+    (void)e;
+    if (g_wifi_op != WIFI_OP_NONE || !g_wifi_dd_net) return;
+
+    uint16_t sel = lv_dropdown_get_selected(g_wifi_dd_net);
+    if (sel >= (uint16_t)g_wifi_net_count) return;
+
+    snprintf(g_wifi_connect_args.ssid, WIFI_MAX_SSID_LEN,
+             "%s", g_wifi_nets[sel].ssid);
+    g_wifi_connect_args.password[0] = '\0';
+    if (g_wifi_pw_ta && !lv_obj_has_flag(g_wifi_pw_row, LV_OBJ_FLAG_HIDDEN))
+        snprintf(g_wifi_connect_args.password,
+                 sizeof(g_wifi_connect_args.password),
+                 "%s", lv_textarea_get_text(g_wifi_pw_ta));
+
+    g_wifi_op = WIFI_OP_CONNECT;
+    if (g_wifi_connect_btn)
+        lv_label_set_text(lv_obj_get_child(g_wifi_connect_btn, 0),
+                          TR(TR_SETTINGS_WIFI_CONNECTING));
+
+    pthread_t tid;
+    pthread_create(&tid, NULL, wifi_connect_thread, NULL);
+    pthread_detach(tid);
+
+    if (!g_wifi_poll_tmr)
+        g_wifi_poll_tmr = lv_timer_create(wifi_poll_cb, 500, NULL);
+}
+
+static void *wifi_hotspot_thread(void *arg)
+{
+    bool enable = (bool)(uintptr_t)arg;
+    wifi_hotspot_set(enable);
+
+    mpt_settings_t *s = settings_get();
+    s->hotspot_enabled = wifi_hotspot_is_active();
+    settings_save_prefs(s);
+
+    g_wifi_bg_done = true;
+    return NULL;
+}
+
+static void wifi_hotspot_sw_cb(lv_event_t *e)
+{
+    lv_obj_t *sw = lv_event_get_target(e);
+    bool enable  = lv_obj_has_state(sw, LV_STATE_CHECKED);
+    if (g_wifi_op != WIFI_OP_NONE) return;
+
+    g_wifi_op = WIFI_OP_HOTSPOT;
+    pthread_t tid;
+    pthread_create(&tid, NULL, wifi_hotspot_thread, (void *)(uintptr_t)enable);
+    pthread_detach(tid);
+
+    if (!g_wifi_poll_tmr)
+        g_wifi_poll_tmr = lv_timer_create(wifi_poll_cb, 500, NULL);
+}
+
+/* Password textarea — show an LVGL keyboard when focused. */
+static void wifi_pw_ta_focused_cb(lv_event_t *e)
+{
+    lv_obj_t *ta = lv_event_get_target(e);
+    lv_obj_t *parent = lv_obj_get_parent(lv_obj_get_parent(ta)); /* grandparent = screen */
+    if (!parent) return;
+
+    if (!g_wifi_kbd) {
+        g_wifi_kbd = lv_keyboard_create(lv_scr_act());
+        lv_obj_set_size(g_wifi_kbd, LV_PCT(100), LV_PCT(45));
+        lv_obj_align(g_wifi_kbd, LV_ALIGN_BOTTOM_MID, 0, 0);
+    }
+    lv_keyboard_set_textarea(g_wifi_kbd, ta);
+    lv_obj_clear_flag(g_wifi_kbd, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void wifi_pw_ta_defocused_cb(lv_event_t *e)
+{
+    (void)e;
+    if (g_wifi_kbd) lv_obj_add_flag(g_wifi_kbd, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void build_wifi_section(lv_obj_t *parent)
+{
+    /* ── Current network status ── */
+    char ssid[WIFI_MAX_SSID_LEN] = "";
+    char ip[32]   = "";
+    bool connected = wifi_get_status(ssid, sizeof(ssid), ip, sizeof(ip));
+
+    lv_obj_t *status_row = make_row(parent);
+    lv_obj_t *status_key = lv_label_create(status_row);
+    lv_label_set_text(status_key, TR(TR_SETTINGS_WIFI_CURRENT));
+    lv_obj_set_style_text_color(status_key, UI_COLOR_TEXT_DIM, 0);
+    lv_obj_set_flex_grow(status_key, 1);
+
+    g_wifi_status_lbl = lv_label_create(status_row);
+    if (connected) {
+        char buf[128];
+        if (ip[0])
+            snprintf(buf, sizeof(buf), "%s  (%s)", ssid, ip);
+        else
+            snprintf(buf, sizeof(buf), "%s", ssid);
+        lv_label_set_text(g_wifi_status_lbl, buf);
+    } else {
+        lv_label_set_text(g_wifi_status_lbl, TR(TR_SETTINGS_WIFI_NO_CONNECTION));
+    }
+    lv_obj_set_style_text_color(g_wifi_status_lbl, UI_COLOR_TEXT, 0);
+
+    /* ── Scan button ── */
+    lv_obj_t *scan_row = make_row(parent);
+    g_wifi_scan_btn = lv_btn_create(scan_row);
+    lv_obj_set_size(g_wifi_scan_btn, 260, 40);
+    lv_obj_set_style_bg_color(g_wifi_scan_btn, UI_COLOR_ACCENT, 0);
+    lv_obj_add_event_cb(g_wifi_scan_btn, wifi_scan_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *scan_lbl = lv_label_create(g_wifi_scan_btn);
+    lv_label_set_text(scan_lbl, TR(TR_SETTINGS_WIFI_SCAN));
+    lv_obj_center(scan_lbl);
+
+    /* ── Network dropdown ── */
+    g_wifi_dd_net = add_dropdown_row(parent, TR(TR_SETTINGS_WIFI_NETWORK),
+                                     TR(TR_SETTINGS_WIFI_NO_CONNECTION), 0);
+    lv_obj_add_event_cb(g_wifi_dd_net, wifi_net_changed_cb, LV_EVENT_VALUE_CHANGED, NULL);
+
+    /* ── Password row (hidden by default) ── */
+    g_wifi_pw_row = make_row(parent);
+    lv_obj_add_flag(g_wifi_pw_row, LV_OBJ_FLAG_HIDDEN);
+
+    lv_obj_t *pw_key = lv_label_create(g_wifi_pw_row);
+    lv_label_set_text(pw_key, TR(TR_SETTINGS_WIFI_PASSWORD));
+    lv_obj_set_style_text_color(pw_key, UI_COLOR_TEXT_DIM, 0);
+    lv_obj_set_flex_grow(pw_key, 1);
+
+    g_wifi_pw_ta = lv_textarea_create(g_wifi_pw_row);
+    lv_obj_set_width(g_wifi_pw_ta, 320);
+    lv_obj_set_height(g_wifi_pw_ta, 40);
+    lv_textarea_set_one_line(g_wifi_pw_ta, true);
+    lv_textarea_set_password_mode(g_wifi_pw_ta, true);
+    lv_textarea_set_placeholder_text(g_wifi_pw_ta, "••••••••");
+    lv_obj_set_style_bg_color(g_wifi_pw_ta, UI_COLOR_SURFACE, 0);
+    lv_obj_set_style_text_color(g_wifi_pw_ta, UI_COLOR_TEXT, 0);
+    lv_obj_set_style_border_color(g_wifi_pw_ta, UI_COLOR_TEXT_DIM, 0);
+    lv_obj_add_event_cb(g_wifi_pw_ta, wifi_pw_ta_focused_cb,   LV_EVENT_FOCUSED, NULL);
+    lv_obj_add_event_cb(g_wifi_pw_ta, wifi_pw_ta_defocused_cb, LV_EVENT_DEFOCUSED, NULL);
+
+    /* ── Connect button ── */
+    lv_obj_t *con_row = make_row(parent);
+    g_wifi_connect_btn = lv_btn_create(con_row);
+    lv_obj_set_size(g_wifi_connect_btn, 260, 40);
+    lv_obj_set_style_bg_color(g_wifi_connect_btn, UI_COLOR_PRIMARY, 0);
+    lv_obj_add_event_cb(g_wifi_connect_btn, wifi_connect_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *con_lbl = lv_label_create(g_wifi_connect_btn);
+    lv_label_set_text(con_lbl, TR(TR_SETTINGS_WIFI_CONNECT));
+    lv_obj_center(con_lbl);
+
+    /* ── Hotspot ── */
+    lv_obj_t *hs_row = make_row(parent);
+    lv_obj_t *hs_key = lv_label_create(hs_row);
+    lv_label_set_text(hs_key, TR(TR_SETTINGS_WIFI_HOTSPOT));
+    lv_obj_set_style_text_color(hs_key, UI_COLOR_TEXT_DIM, 0);
+    lv_obj_set_flex_grow(hs_key, 1);
+
+    /* SSID info */
+    lv_obj_t *hs_ssid = lv_label_create(hs_row);
+    lv_label_set_text(hs_ssid, TR(TR_SETTINGS_WIFI_HOTSPOT_SSID));
+    lv_obj_set_style_text_color(hs_ssid, UI_COLOR_TEXT_DIM, 0);
+    lv_obj_set_flex_grow(hs_ssid, 2);
+
+    g_wifi_hotspot_sw = lv_switch_create(hs_row);
+    if (wifi_hotspot_is_active())
+        lv_obj_add_state(g_wifi_hotspot_sw, LV_STATE_CHECKED);
+    lv_obj_add_event_cb(g_wifi_hotspot_sw, wifi_hotspot_sw_cb, LV_EVENT_VALUE_CHANGED, NULL);
+}
+
 /* ─── Language change ────────────────────────────────────────────────────────── */
 
 static void lang_changed_cb(lv_event_t *e)
@@ -298,6 +641,17 @@ void ui_settings_show(lv_obj_t *parent)
     mpt_settings_t *s = settings_get();
 
     g_dd_device = g_dd_buffer = g_dd_bits = NULL;
+
+    /* WiFi pointers — reset each time the screen is rebuilt */
+    g_wifi_status_lbl  = NULL;
+    g_wifi_scan_btn    = NULL;
+    g_wifi_dd_net      = NULL;
+    g_wifi_pw_ta       = NULL;
+    g_wifi_pw_row      = NULL;
+    g_wifi_connect_btn = NULL;
+    g_wifi_hotspot_sw  = NULL;
+    g_wifi_kbd         = NULL;
+    /* Do NOT reset g_wifi_poll_tmr here — a background op may still be running */
 
     lv_obj_add_flag(parent, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_scroll_dir(parent, LV_DIR_VER);
@@ -379,4 +733,8 @@ void ui_settings_show(lv_obj_t *parent)
     /* ── MIDI ── */
     add_section_header(parent, TR(TR_SETTINGS_MIDI));
     build_midi_section(parent);
+
+    /* ── WiFi ── */
+    add_section_header(parent, TR(TR_SETTINGS_WIFI));
+    build_wifi_section(parent);
 }

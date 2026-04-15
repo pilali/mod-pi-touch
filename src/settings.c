@@ -186,6 +186,10 @@ void settings_init(mpt_settings_t *s)
                 cJSON *ti = cJSON_GetObjectItem(root, "tuner_input");
                 if (cJSON_IsNumber(ti))  s->tuner_input    = (int)ti->valuedouble;
 
+                /* WiFi */
+                cJSON *hs = cJSON_GetObjectItem(root, "hotspot_enabled");
+                if (cJSON_IsBool(hs))    s->hotspot_enabled = cJSON_IsTrue(hs);
+
                 cJSON_Delete(root);
             }
             free(buf);
@@ -268,6 +272,9 @@ int settings_save_prefs(const mpt_settings_t *s)
     cJSON_AddNumberToObject(root, "gate_mode",      s->gate_mode);
     cJSON_AddNumberToObject(root, "tuner_ref",      s->tuner_ref_freq);
     cJSON_AddNumberToObject(root, "tuner_input",    s->tuner_input);
+
+    /* WiFi */
+    cJSON_AddBoolToObject(root,   "hotspot_enabled", s->hotspot_enabled);
 
     char *str = cJSON_Print(root);
     cJSON_Delete(root);

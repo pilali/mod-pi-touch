@@ -15,10 +15,13 @@ typedef struct {
     float rms_db;    /* signal level at tuner input in dBFS (diagnostic) */
 } pre_fx_tuner_t;
 
-/* Initialize pre-fx after host connect. */
+/* Initialize pre-fx after host connect (tuner_host + gate async). */
 void pre_fx_init(void);
 
-/* Re-load pre-fx after host_remove_all() (called after each pedalboard load). */
+/* Shutdown tuner_host (call before exit). */
+void pre_fx_fini(void);
+
+/* Re-load gate after host_remove_all() (called after each pedalboard load). */
 void pre_fx_reload(void);
 
 /* Apply current gate settings (enabled, threshold, decay, mode) to mod-host. */
