@@ -846,6 +846,8 @@ bool ui_pedalboard_intercept_plugin_click(int instance_id)
 /* ─── Block event handlers ───────────────────────────────────────────────────── */
 
 static void on_block_bypass(void *userdata);  /* forward declaration */
+static void pb_apply_midi_mapped(int instance_id, const char *symbol,
+                                 int ch, int cc, float min, float max); /* fwd */
 
 static void on_patch_changed(int instance_id, const char *param_uri,
                              const char *path, void *userdata)
@@ -871,6 +873,15 @@ static void on_patch_changed(int instance_id, const char *param_uri,
     }
 }
 
+static void on_midi_mapped(int instance_id, const char *symbol,
+                           int midi_ch, int midi_cc,
+                           float min, float max, void *userdata)
+{
+    (void)userdata;
+    /* Param editor already updated its own UI; just persist data model. */
+    pb_apply_midi_mapped(instance_id, symbol, midi_ch, midi_cc, min, max);
+}
+
 static void on_block_tap(void *userdata)
 {
     int instance_id = (int)(intptr_t)userdata;
@@ -887,7 +898,8 @@ static void on_block_tap(void *userdata)
                          plug->enabled,
                          on_block_bypass, (void *)(intptr_t)instance_id,
                          NULL, NULL,
-                         on_patch_changed, NULL);
+                         on_patch_changed, NULL,
+                         on_midi_mapped, NULL);
 }
 
 static void on_block_bypass(void *userdata)
@@ -1686,6 +1698,64 @@ void ui_pedalboard_update_param(int instance_id, const char *symbol, float value
             upd->val = value;
             lv_async_call(param_editor_async_cb, upd);
         }
+    }
+}
+
+/* ─── MIDI mapped ─────────────────────────────────────────────────────────────── */
+
+typedef struct {
+    int   instance_id;
+    char  symbol[PB_SYMBOL_MAX];
+    int   ch, cc;
+    float min, max;
+} midi_mapped_t;
+
+/* Update the pedalboard data model with a new MIDI mapping (thread-safe). */
+static void pb_apply_midi_mapped(int instance_id, const char *symbol,
+                                 int ch, int cc, float min, float max)
+{
+    if (!g_pb_loaded) return;
+    pthread_mutex_lock(&g_pb_mutex);
+    pb_plugin_t *plug = pb_find_plugin(&g_pedalboard, instance_id);
+    if (plug) {
+        for (int i = 0; i < plug->port_count; i++) {
+            if (strcmp(plug->ports[i].symbol, symbol) == 0) {
+                plug->ports[i].midi_channel = ch;
+                plug->ports[i].midi_cc      = cc;
+                plug->ports[i].midi_min     = min;
+                plug->ports[i].midi_max     = max;
+                break;
+            }
+        }
+        g_pedalboard.modified = true;
+    }
+    pthread_mutex_unlock(&g_pb_mutex);
+}
+
+/* Async callback: runs on LVGL main thread, updates param editor UI. */
+static void midi_mapped_async_cb(void *arg)
+{
+    midi_mapped_t *m = arg;
+    ui_param_editor_on_midi_mapped(m->instance_id, m->symbol,
+                                   m->ch, m->cc, m->min, m->max);
+    free(m);
+}
+
+/* Called from main.c feedback thread on "midi_mapped" message.
+ * Schedules pedalboard data update and param editor refresh on LVGL thread. */
+void ui_pedalboard_on_midi_mapped(int instance_id, const char *symbol,
+                                  int ch, int cc, float min, float max)
+{
+    /* Update pedalboard data (mutex-safe from any thread) */
+    pb_apply_midi_mapped(instance_id, symbol, ch, cc, min, max);
+
+    /* Schedule param editor UI update on the LVGL main thread */
+    midi_mapped_t *msg = malloc(sizeof(*msg));
+    if (msg) {
+        msg->instance_id = instance_id;
+        snprintf(msg->symbol, sizeof(msg->symbol), "%s", symbol);
+        msg->ch = ch; msg->cc = cc; msg->min = min; msg->max = max;
+        lv_async_call(midi_mapped_async_cb, msg);
     }
 }
 

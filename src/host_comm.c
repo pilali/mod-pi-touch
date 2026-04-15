@@ -450,6 +450,16 @@ int host_midi_unmap(int instance, const char *symbol)
     return host_comm_send_sync(cmd, NULL, 0, 2000);
 }
 
+int host_midi_learn(int instance, const char *symbol, float min, float max)
+{
+    char cmd[HOST_CMD_MAX];
+    snprintf(cmd, sizeof(cmd), "midi_learn %d %s %f %f",
+             instance, symbol, (double)min, (double)max);
+    /* Fire-and-forget: the result arrives as "midi_mapped" on the feedback port.
+     * Using async send avoids blocking the LVGL main thread. */
+    return host_comm_send(cmd, NULL, NULL);
+}
+
 int host_transport(bool rolling, float bpb, float bpm)
 {
     char cmd[HOST_CMD_MAX];

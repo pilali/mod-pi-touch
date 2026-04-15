@@ -105,6 +105,10 @@ typedef struct {
     bool      is_integer;     /* arc: round before sending */
     float     enum_values[16];
     int       enum_count;
+    /* MIDI CC mapping */
+    lv_obj_t *midi_lbl;       /* chip label: "—" or "CC70 ch13" */
+    int       midi_channel;   /* -1 = none */
+    int       midi_cc;        /* -1 = none */
 } ctrl_reg_t;
 
 static ctrl_reg_t g_controls[MAX_CONTROLS];
@@ -135,6 +139,16 @@ static param_change_cb_t   g_value_cb   = NULL;
 static void               *g_value_ud   = NULL;
 static patch_change_cb_t   g_patch_cb   = NULL;
 static void               *g_patch_ud   = NULL;
+static midi_map_cb_t       g_midi_cb    = NULL;
+static void               *g_midi_ud    = NULL;
+
+/* Bypass MIDI state */
+static lv_obj_t           *g_bypass_midi_lbl = NULL;
+static int                 g_bypass_midi_ch  = -1;
+static int                 g_bypass_midi_cc  = -1;
+
+/* Symbol currently in MIDI learn mode ("" = none) */
+static char g_learning_symbol[PB_SYMBOL_MAX] = {0};
 
 /* ─── Helpers ─────────────────────────────────────────────────────────────────── */
 
@@ -156,6 +170,100 @@ static ctrl_reg_t *find_ctrl(const char *sym)
         if (strcmp(g_controls[i].symbol, sym) == 0)
             return &g_controls[i];
     return NULL;
+}
+
+/* ─── MIDI chip helpers ───────────────────────────────────────────────────────── */
+
+/* Format MIDI assignment into buf. */
+static void fmt_midi(char *buf, size_t bufsz, int ch, int cc)
+{
+    if (ch < 0 || cc < 0)
+        snprintf(buf, bufsz, " — ");
+    else
+        snprintf(buf, bufsz, "CC%d ch%d", cc, ch + 1);
+}
+
+/* Create a small MIDI chip button at the bottom of a card.
+ * reg is the ctrl_reg_t* or NULL (bypass case, uses separate globals). */
+typedef struct { ctrl_reg_t *reg; bool is_bypass; } midi_chip_ud_t;
+static midi_chip_ud_t g_midi_chip_uds[MAX_CONTROLS + 1]; /* +1 for bypass */
+static int            g_midi_chip_ud_count = 0;
+
+static void midi_chip_tap_cb(lv_event_t *e)
+{
+    midi_chip_ud_t *ud = lv_event_get_user_data(e);
+    if (!ud) return;
+
+    const char *sym;
+    float  min, max;
+    int    has_mapping;
+
+    if (ud->is_bypass) {
+        sym         = ":bypass";
+        min         = 0.0f; max = 1.0f;
+        has_mapping = g_bypass_midi_cc >= 0;
+    } else {
+        ctrl_reg_t *reg = ud->reg;
+        sym         = reg->symbol;
+        min         = reg->min; max = reg->max;
+        has_mapping = reg->midi_cc >= 0;
+    }
+
+    lv_event_code_t code = lv_event_get_code(e);
+
+    if (code == LV_EVENT_LONG_PRESSED && has_mapping) {
+        /* Unmap */
+        host_midi_unmap(g_instance, sym);
+        if (ud->is_bypass) {
+            g_bypass_midi_ch = -1;
+            g_bypass_midi_cc = -1;
+            if (g_bypass_midi_lbl) lv_label_set_text(g_bypass_midi_lbl, " — ");
+        } else {
+            ud->reg->midi_channel = -1;
+            ud->reg->midi_cc      = -1;
+            if (ud->reg->midi_lbl) lv_label_set_text(ud->reg->midi_lbl, " — ");
+        }
+        g_learning_symbol[0] = '\0';
+        if (g_midi_cb)
+            g_midi_cb(g_instance, sym, -1, -1, min, max, g_midi_ud);
+    } else if (code == LV_EVENT_CLICKED) {
+        /* Enter MIDI learn */
+        snprintf(g_learning_symbol, sizeof(g_learning_symbol), "%s", sym);
+        host_midi_learn(g_instance, sym, min, max);
+        /* Show waiting indicator */
+        lv_obj_t *lbl = ud->is_bypass ? g_bypass_midi_lbl
+                                      : ud->reg->midi_lbl;
+        if (lbl) lv_label_set_text(lbl, " … ");
+    }
+}
+
+/* Build a MIDI chip and return the label inside it.
+ * ud_idx selects the pre-allocated midi_chip_ud_t slot. */
+static lv_obj_t *make_midi_chip(lv_obj_t *parent, int midi_ch, int midi_cc,
+                                int ud_idx)
+{
+    midi_chip_ud_t *ud = &g_midi_chip_uds[ud_idx];
+
+    lv_obj_t *chip = lv_btn_create(parent);
+    lv_obj_set_size(chip, LV_SIZE_CONTENT, 22);
+    lv_obj_set_style_radius(chip, 11, 0);
+    lv_obj_set_style_pad_hor(chip, 8, 0);
+    lv_obj_set_style_pad_ver(chip, 3, 0);
+    lv_obj_set_style_bg_color(chip, lv_color_hex(0x2a3040), 0);
+    lv_obj_set_style_border_color(chip, lv_color_hex(0x404860), 0);
+    lv_obj_set_style_border_width(chip, 1, 0);
+    lv_obj_add_event_cb(chip, midi_chip_tap_cb, LV_EVENT_CLICKED, ud);
+    lv_obj_add_event_cb(chip, midi_chip_tap_cb, LV_EVENT_LONG_PRESSED, ud);
+
+    char buf[24];
+    fmt_midi(buf, sizeof(buf), midi_ch, midi_cc);
+    lv_obj_t *lbl = lv_label_create(chip);
+    lv_label_set_text(lbl, buf);
+    lv_obj_center(lbl);
+    lv_obj_set_style_text_color(lbl, lv_color_hex(0x8090b0), 0);
+    lv_obj_set_style_text_font(lbl, &lv_font_montserrat_12, 0);
+
+    return lbl;
 }
 
 /* ─── Bypass toggle ──────────────────────────────────────────────────────────── */
@@ -284,10 +392,13 @@ static void close_cb(lv_event_t *e)
      * freed memory while still dispatching the event. */
     if (g_modal) {
         lv_obj_delete_async(g_modal);
-        g_modal             = NULL;
-        g_instance          = -1;
-        g_ctrl_count        = 0;
-        g_patch_param_count = 0;
+        g_modal              = NULL;
+        g_instance           = -1;
+        g_ctrl_count         = 0;
+        g_patch_param_count  = 0;
+        g_midi_chip_ud_count = 0;
+        g_bypass_midi_lbl    = NULL;
+        g_learning_symbol[0] = '\0';
     }
 }
 
@@ -331,7 +442,8 @@ void ui_param_editor_show(int instance_id,
                           bool enabled,
                           bypass_toggle_cb_t bypass_cb, void *bypass_ud,
                           param_change_cb_t value_cb, void *value_ud,
-                          patch_change_cb_t patch_cb, void *patch_ud)
+                          patch_change_cb_t patch_cb, void *patch_ud,
+                          midi_map_cb_t midi_cb, void *midi_ud)
 {
     if (g_modal) ui_param_editor_close();
 
@@ -344,8 +456,24 @@ void ui_param_editor_show(int instance_id,
     g_value_ud          = value_ud;
     g_patch_cb          = patch_cb;
     g_patch_ud          = patch_ud;
+    g_midi_cb           = midi_cb;
+    g_midi_ud           = midi_ud;
     g_ctrl_count        = 0;
     g_patch_param_count = 0;
+    g_midi_chip_ud_count = 0;
+    g_bypass_midi_lbl   = NULL;
+    g_bypass_midi_ch    = -1;
+    g_bypass_midi_cc    = -1;
+    g_learning_symbol[0] = '\0';
+
+    /* Read bypass MIDI CC from the :bypass port if present */
+    for (int i = 0; i < port_count; i++) {
+        if (strcmp(ports[i].symbol, ":bypass") == 0) {
+            g_bypass_midi_ch = ports[i].midi_channel;
+            g_bypass_midi_cc = ports[i].midi_cc;
+            break;
+        }
+    }
 
     /* Cache user_files_dir from settings (read once) */
     if (!g_user_files_dir[0]) {
@@ -415,7 +543,7 @@ void ui_param_editor_show(int instance_id,
 
     /* ── Bypass toggle — always first ── */
     {
-        lv_obj_t *card = make_card(scroll, 140, 120);
+        lv_obj_t *card = make_card(scroll, 140, 145);
         make_name_lbl(card, TR(TR_PARAM_BYPASS_LABEL));
 
         lv_obj_t *btn = lv_btn_create(card);
@@ -426,6 +554,13 @@ void ui_param_editor_show(int instance_id,
         lv_obj_center(g_bypass_lbl);
         lv_obj_set_style_text_font(g_bypass_lbl, &lv_font_montserrat_14, 0);
         lv_obj_add_event_cb(btn, bypass_btn_cb, LV_EVENT_CLICKED, NULL);
+
+        /* MIDI chip for bypass */
+        int ud_idx = g_midi_chip_ud_count++;
+        g_midi_chip_uds[ud_idx].reg       = NULL;
+        g_midi_chip_uds[ud_idx].is_bypass = true;
+        g_bypass_midi_lbl = make_midi_chip(card, g_bypass_midi_ch,
+                                           g_bypass_midi_cc, ud_idx);
     }
 
     /* ── One widget per control input port ── */
@@ -449,6 +584,8 @@ void ui_param_editor_show(int instance_id,
         ctrl_reg_t *reg = &g_controls[g_ctrl_count++];
         memset(reg, 0, sizeof(*reg));
         snprintf(reg->symbol, sizeof(reg->symbol), "%s", port->symbol);
+        reg->midi_channel = port->midi_channel;
+        reg->midi_cc      = port->midi_cc;
 
         /* Physical min/max from pm (TTL doesn't store them) */
         float p_min = pm_port ? pm_port->min : 0.0f;
@@ -462,7 +599,7 @@ void ui_param_editor_show(int instance_id,
         if (is_toggle) {
             /* ── Toggle switch ── */
             reg->type = CTRL_TOGGLE;
-            lv_obj_t *card = make_card(scroll, 140, 110);
+            lv_obj_t *card = make_card(scroll, 140, 135);
             make_name_lbl(card, disp_name);
 
             lv_obj_t *sw = lv_switch_create(card);
@@ -472,6 +609,14 @@ void ui_param_editor_show(int instance_id,
                 lv_obj_add_state(sw, LV_STATE_CHECKED);
             lv_obj_add_event_cb(sw, toggle_changed_cb, LV_EVENT_VALUE_CHANGED, reg);
             reg->widget = sw;
+
+            /* MIDI chip */
+            int ud_idx = g_midi_chip_ud_count++;
+            g_midi_chip_uds[ud_idx].reg       = reg;
+            g_midi_chip_uds[ud_idx].is_bypass = false;
+            reg->min = 0.0f; reg->max = 1.0f; /* toggles are 0/1 */
+            reg->midi_lbl = make_midi_chip(card, reg->midi_channel,
+                                           reg->midi_cc, ud_idx);
 
         } else if (is_enum) {
             /* ── Enum dropdown ── */
@@ -492,7 +637,7 @@ void ui_param_editor_show(int instance_id,
                     cur_sel = k;
             }
 
-            lv_obj_t *card = make_card(scroll, 220, 110);
+            lv_obj_t *card = make_card(scroll, 220, 135);
             make_name_lbl(card, disp_name);
 
             lv_obj_t *dd = lv_dropdown_create(card);
@@ -504,6 +649,15 @@ void ui_param_editor_show(int instance_id,
                                        LV_PART_SELECTED);
             lv_obj_add_event_cb(dd, enum_changed_cb, LV_EVENT_VALUE_CHANGED, reg);
             reg->widget = dd;
+
+            /* MIDI chip */
+            {
+                int ud_idx = g_midi_chip_ud_count++;
+                g_midi_chip_uds[ud_idx].reg       = reg;
+                g_midi_chip_uds[ud_idx].is_bypass = false;
+                reg->midi_lbl = make_midi_chip(card, reg->midi_channel,
+                                               reg->midi_cc, ud_idx);
+            }
 
         } else {
             /* ── Arc knob ── */
@@ -518,7 +672,7 @@ void ui_param_editor_show(int instance_id,
             if (arc_val < 0)   arc_val = 0;
             if (arc_val > 100) arc_val = 100;
 
-            lv_obj_t *card = make_card(scroll, 140, 170);
+            lv_obj_t *card = make_card(scroll, 140, 195);
             make_name_lbl(card, disp_name);
 
             lv_obj_t *arc = lv_arc_create(card);
@@ -540,6 +694,15 @@ void ui_param_editor_show(int instance_id,
             lv_obj_set_style_text_color(val_lbl, UI_COLOR_TEXT, 0);
             lv_obj_set_style_text_font(val_lbl, &lv_font_montserrat_12, 0);
             reg->val_lbl = val_lbl;
+
+            /* MIDI chip */
+            {
+                int ud_idx = g_midi_chip_ud_count++;
+                g_midi_chip_uds[ud_idx].reg       = reg;
+                g_midi_chip_uds[ud_idx].is_bypass = false;
+                reg->midi_lbl = make_midi_chip(card, reg->midi_channel,
+                                               reg->midi_cc, ud_idx);
+            }
         }
     }
 
@@ -616,10 +779,13 @@ void ui_param_editor_close(void)
 {
     if (g_modal) {
         lv_obj_del(g_modal);
-        g_modal             = NULL;
-        g_instance          = -1;
-        g_ctrl_count        = 0;
-        g_patch_param_count = 0;
+        g_modal              = NULL;
+        g_instance           = -1;
+        g_ctrl_count         = 0;
+        g_patch_param_count  = 0;
+        g_midi_chip_ud_count = 0;
+        g_bypass_midi_lbl    = NULL;
+        g_learning_symbol[0] = '\0';
     }
 }
 
@@ -658,4 +824,33 @@ void ui_param_editor_update(const char *symbol, float value)
                 sel = k;
         lv_dropdown_set_selected(reg->widget, (uint16_t)sel);
     }
+}
+
+void ui_param_editor_on_midi_mapped(int instance_id, const char *symbol,
+                                    int ch, int cc, float min, float max)
+{
+    if (!g_modal || g_instance != instance_id) return;
+
+    char buf[24];
+    fmt_midi(buf, sizeof(buf), ch, cc);
+
+    if (strcmp(symbol, ":bypass") == 0) {
+        g_bypass_midi_ch = ch;
+        g_bypass_midi_cc = cc;
+        if (g_bypass_midi_lbl) lv_label_set_text(g_bypass_midi_lbl, buf);
+    } else {
+        ctrl_reg_t *reg = find_ctrl(symbol);
+        if (reg) {
+            reg->midi_channel = ch;
+            reg->midi_cc      = cc;
+            if (reg->midi_lbl) lv_label_set_text(reg->midi_lbl, buf);
+        }
+    }
+
+    /* Clear learning state if this symbol was being learned */
+    if (strcmp(g_learning_symbol, symbol) == 0)
+        g_learning_symbol[0] = '\0';
+
+    if (g_midi_cb)
+        g_midi_cb(instance_id, symbol, ch, cc, min, max, g_midi_ud);
 }

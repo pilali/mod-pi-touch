@@ -40,6 +40,11 @@ void ui_pedalboard_save_last_state(void);
  * each plugin is restored to its stored enabled state. */
 void ui_pedalboard_chain_bypass(bool bypass_all);
 
+/* Called from the LVGL thread when mod-host confirms a MIDI CC assignment.
+ * Updates pedalboard data and the open param editor (if any). */
+void ui_pedalboard_on_midi_mapped(int instance_id, const char *symbol,
+                                  int ch, int cc, float min, float max);
+
 /* Accessors */
 pedalboard_t *ui_pedalboard_get(void);
 bool          ui_pedalboard_is_loaded(void);

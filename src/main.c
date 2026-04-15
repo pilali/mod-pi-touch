@@ -43,6 +43,18 @@ static void feedback_handler(const char *msg, void *ud)
         return;
     }
 
+    /* "midi_mapped <instance> <symbol> <ch> <cc> <value> <min> <max>"
+     * Sent by mod-host after a successful MIDI learn assignment. */
+    {
+        int   ch, cc;
+        float mval, mmin, mmax;
+        if (sscanf(msg, "midi_mapped %d %127s %d %d %f %f %f",
+                   &instance, symbol, &ch, &cc, &mval, &mmin, &mmax) == 7) {
+            ui_pedalboard_on_midi_mapped(instance, symbol, ch, cc, mmin, mmax);
+            return;
+        }
+    }
+
     /* "param_set <instance> <symbol> <value>" — parameter feedback */
     if (sscanf(msg, "param_set %d %127s %f", &instance, symbol, &value) == 3) {
         if (instance != PRE_FX_GATE_INSTANCE && instance != PRE_FX_TUNER_INSTANCE)

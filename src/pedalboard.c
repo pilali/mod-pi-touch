@@ -542,9 +542,25 @@ static int pb_save_ttl(pedalboard_t *pb, const char *ttl_path)
             pb_port_t *port = &plug->ports[j];
             fprintf(f, "<%s/%s>\n    ingen:value ", plug->symbol, port->symbol);
             write_float(f, port->value);
-            fprintf(f, " ;\n    mod:snapshotable %s ;\n    a lv2:ControlPort ,\n        lv2:InputPort .\n\n",
+            fputs(" ;\n", f);
+            if (port->midi_channel >= 0 && port->midi_cc >= 0) {
+                fputs("    midi:binding [\n", f);
+                fprintf(f, "        midi:channel %d ;\n", port->midi_channel);
+                fprintf(f, "        midi:controllerNumber %d ;\n", port->midi_cc);
+                if (port->midi_min != 0.0f || port->midi_max != 1.0f) {
+                    fprintf(f, "        lv2:minimum ");
+                    write_float(f, port->midi_min);
+                    fputs(" ;\n", f);
+                    fprintf(f, "        lv2:maximum ");
+                    write_float(f, port->midi_max);
+                    fputs(" ;\n", f);
+                }
+                fputs("        a midi:Controller ;\n    ] ;\n", f);
+            }
+            fprintf(f, "    mod:snapshotable %s ;\n    a lv2:ControlPort ,\n        lv2:InputPort .\n\n",
                     port->snapshotable ? "true" : "false");
         }
+
     }
 
     /* ── Graph subject <> ── */

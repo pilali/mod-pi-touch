@@ -7,12 +7,17 @@
  * plugin_uri   — LV2 URI, used to look up port metadata from plugin_manager.
  * enabled      — current bypass state (true = active, false = bypassed).
  * bypass_cb    — called when the in-editor bypass button is tapped.
- * value_cb     — called when a parameter value changes. */
+ * value_cb     — called when a parameter value changes.
+ * midi_cb      — called when a MIDI mapping changes (assign or unmap).
+ *                symbol=":bypass" for bypass mapping. */
 typedef void (*param_change_cb_t)(int instance_id, const char *symbol,
                                   float value, void *userdata);
 typedef void (*patch_change_cb_t)(int instance_id, const char *param_uri,
                                   const char *path, void *userdata);
 typedef void (*bypass_toggle_cb_t)(void *userdata);
+typedef void (*midi_map_cb_t)(int instance_id, const char *symbol,
+                              int midi_ch, int midi_cc,
+                              float min, float max, void *userdata);
 
 void ui_param_editor_show(int instance_id,
                           const char *plugin_label,
@@ -22,9 +27,16 @@ void ui_param_editor_show(int instance_id,
                           bool enabled,
                           bypass_toggle_cb_t bypass_cb, void *bypass_ud,
                           param_change_cb_t value_cb, void *value_ud,
-                          patch_change_cb_t patch_cb, void *patch_ud);
+                          patch_change_cb_t patch_cb, void *patch_ud,
+                          midi_map_cb_t midi_cb, void *midi_ud);
 
 void ui_param_editor_close(void);
 
 /* Update a displayed value from host feedback */
 void ui_param_editor_update(const char *symbol, float value);
+
+/* Called from the LVGL thread when mod-host confirms a MIDI learn assignment.
+ * Updates the MIDI chip label for the matching symbol.
+ * ch/cc == -1 signals unmap confirmation. */
+void ui_param_editor_on_midi_mapped(int instance_id, const char *symbol,
+                                    int ch, int cc, float min, float max);

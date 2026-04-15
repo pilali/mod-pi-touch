@@ -60,6 +60,9 @@ int host_preset_save(int instance, const char *name, const char *dir, const char
 int host_midi_map(int instance, const char *symbol, int channel, int cc,
                   float min, float max);
 int host_midi_unmap(int instance, const char *symbol);
+/* Enter MIDI learn mode: mod-host will send "midi_mapped" feedback on the
+ * next received MIDI CC and map it to the parameter. */
+int host_midi_learn(int instance, const char *symbol, float min, float max);
 int host_transport(bool rolling, float bpb, float bpm);
 /* Set transport sync source: "none" (internal) or "midi" (MIDI slave). */
 int host_transport_sync(const char *mode);
