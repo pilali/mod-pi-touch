@@ -214,9 +214,17 @@ static int recv_response(int fd, char *val_buf, size_t val_sz, int timeout_ms)
 int host_comm_connect(const char *addr, int cmd_port, int fb_port,
                       host_feedback_cb_t feedback_cb, void *feedback_ud)
 {
-    g_host.cmd_fd = tcp_connect(addr, cmd_port);
+    /* Retry loop — at boot, mod-host may not be listening yet even though
+     * systemd reports it as "active".  Retry for up to 10 s (20 × 500 ms). */
+    for (int attempt = 1; attempt <= 20; attempt++) {
+        g_host.cmd_fd = tcp_connect(addr, cmd_port);
+        if (g_host.cmd_fd >= 0) break;
+        fprintf(stderr, "[host_comm] Connect attempt %d/20 to %s:%d failed — retrying in 500 ms\n",
+                attempt, addr, cmd_port);
+        usleep(500000);
+    }
     if (g_host.cmd_fd < 0) {
-        fprintf(stderr, "[host_comm] Cannot connect to %s:%d: %s\n",
+        fprintf(stderr, "[host_comm] Cannot connect to %s:%d after 20 attempts: %s\n",
                 addr, cmd_port, strerror(errno));
         return -1;
     }
@@ -231,10 +239,10 @@ int host_comm_connect(const char *addr, int cmd_port, int fb_port,
     }
 
     pthread_mutex_init(&g_host.cmd_mutex, NULL);
-    g_host.feedback_cb = feedback_cb;
-    g_host.feedback_ud = feedback_ud;
-    g_host.fb_running  = true;
-    g_host.connected   = true;
+    g_host.feedback_cb  = feedback_cb;
+    g_host.feedback_ud  = feedback_ud;
+    g_host.fb_running   = true;
+    g_host.connected    = true;
     g_host.pending_head = 0;
     g_host.pending_tail = 0;
 

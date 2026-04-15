@@ -61,6 +61,64 @@ static void *tick_thread(void *arg)
     return NULL;
 }
 
+/* ─── Background connect + auto-load thread ─────────────────────────────────── */
+/* mod-host can take 10+ seconds to become ready at boot (JACK init).
+ * This thread retries the connection indefinitely, then loads pre-fx and
+ * the last pedalboard once connected.  The LVGL UI is already running. */
+static void *connect_and_load_thread(void *arg)
+{
+    (void)arg;
+    mpt_settings_t *s = settings_get();
+
+    printf("[main] Connecting to mod-host at %s:%d...\n",
+           s->host_addr, s->host_cmd_port);
+
+    if (host_comm_connect(s->host_addr, s->host_cmd_port, s->host_fb_port,
+                          feedback_handler, NULL) < 0) {
+        fprintf(stderr, "[main] Warning: cannot connect to mod-host.\n");
+        return NULL;
+    }
+
+    /* Pre-FX (noise gate via mod-host, tuner via JACK) */
+    pre_fx_init();
+
+    /* Auto-load last pedalboard + snapshot */
+    FILE *f = fopen(s->last_state_file, "r");
+    if (!f) return NULL;
+
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    rewind(f);
+    char *buf = malloc(sz + 1);
+    if (buf) {
+        fread(buf, 1, sz, f);
+        buf[sz] = '\0';
+        cJSON *root = cJSON_Parse(buf);
+        if (root) {
+            cJSON *jpath = cJSON_GetObjectItem(root, "pedalboard");
+            cJSON *jsnap = cJSON_GetObjectItem(root, "snapshot");
+            if (cJSON_IsString(jpath) && jpath->valuestring[0]) {
+                printf("[main] Auto-loading last pedalboard: %s\n",
+                       jpath->valuestring);
+                ui_pedalboard_load(jpath->valuestring);
+                if (cJSON_IsNumber(jsnap)) {
+                    int snap_idx = (int)jsnap->valuedouble;
+                    pedalboard_t *pb = ui_pedalboard_get();
+                    if (pb && snap_idx >= 0 && snap_idx < pb->snapshot_count
+                            && snap_idx != pb->current_snapshot) {
+                        printf("[main] Restoring snapshot %d\n", snap_idx);
+                        ui_pedalboard_apply_snapshot(snap_idx);
+                    }
+                }
+            }
+            cJSON_Delete(root);
+        }
+        free(buf);
+    }
+    fclose(f);
+    return NULL;
+}
+
 /* ─── Main ───────────────────────────────────────────────────────────────────── */
 int main(int argc, char *argv[])
 {
@@ -116,60 +174,15 @@ int main(int argc, char *argv[])
     }
     printf("[main] Found %d plugins\n", pm_plugin_count());
 
-    /* ── mod-host connection ── */
-    printf("[main] Connecting to mod-host at %s:%d...\n",
-           settings.host_addr, settings.host_cmd_port);
-    if (host_comm_connect(settings.host_addr,
-                          settings.host_cmd_port,
-                          settings.host_fb_port,
-                          feedback_handler, NULL) < 0) {
-        fprintf(stderr, "[main] Warning: cannot connect to mod-host. "
-                "Start mod-host first.\n");
-        /* Continue anyway — user can see disconnected status in settings */
-    }
-
-    /* ── Pre-FX (tuner + noise gate) — load after host connect ── */
-    pre_fx_init();
-
-    /* ── Build UI ── */
+    /* ── Build UI — before connecting to mod-host so the UI appears immediately ── */
     ui_app_init();
 
-    /* ── Auto-load last pedalboard + snapshot ── */
-    {
-        FILE *f = fopen(settings.last_state_file, "r");
-        if (f) {
-            fseek(f, 0, SEEK_END);
-            long sz = ftell(f);
-            rewind(f);
-            char *buf = malloc(sz + 1);
-            if (buf) {
-                fread(buf, 1, sz, f);
-                buf[sz] = '\0';
-                cJSON *root = cJSON_Parse(buf);
-                if (root) {
-                    cJSON *jpath = cJSON_GetObjectItem(root, "pedalboard");
-                    cJSON *jsnap = cJSON_GetObjectItem(root, "snapshot");
-                    if (cJSON_IsString(jpath) && jpath->valuestring[0]) {
-                        printf("[main] Auto-loading last pedalboard: %s\n",
-                               jpath->valuestring);
-                        ui_pedalboard_load(jpath->valuestring);
-                        if (cJSON_IsNumber(jsnap)) {
-                            int snap_idx = (int)jsnap->valuedouble;
-                            pedalboard_t *pb = ui_pedalboard_get();
-                            if (pb && snap_idx >= 0 && snap_idx < pb->snapshot_count
-                                    && snap_idx != pb->current_snapshot) {
-                                printf("[main] Restoring snapshot %d\n", snap_idx);
-                                ui_pedalboard_apply_snapshot(snap_idx);
-                            }
-                        }
-                    }
-                    cJSON_Delete(root);
-                }
-                free(buf);
-            }
-            fclose(f);
-        }
-    }
+    /* ── Connect to mod-host + pre-fx init + auto-load in background thread ──
+     * mod-host can take 10+ seconds to start at boot (JACK initialisation).
+     * Running in a background thread lets LVGL render the UI immediately. */
+    pthread_t connect_tid;
+    pthread_create(&connect_tid, NULL, connect_and_load_thread, NULL);
+    pthread_detach(connect_tid);
 
     /* ── LVGL tick thread ── */
     pthread_t tick_tid;
