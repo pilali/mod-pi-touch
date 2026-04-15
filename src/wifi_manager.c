@@ -259,19 +259,22 @@ bool wifi_hotspot_is_active(void)
     return active;
 }
 
-int wifi_hotspot_set(bool enabled)
+int wifi_hotspot_set(bool enabled, const char *password)
 {
     char cmd[512];
     if (enabled) {
+        const char *pw = (password && password[0]) ? password : WIFI_HOTSPOT_PASSWORD_DEF;
+        char pw_q[280];
+        shell_quote(pw, pw_q, sizeof(pw_q));
         /* Create (or re-activate) the hotspot profile */
         snprintf(cmd, sizeof(cmd),
                  "sudo nmcli con delete %s 2>/dev/null; "
                  "sudo nmcli dev wifi hotspot "
-                 "con-name %s ssid '%s' password '%s' 2>&1",
+                 "con-name %s ssid '%s' password %s 2>&1",
                  WIFI_HOTSPOT_CON_NAME,
                  WIFI_HOTSPOT_CON_NAME,
                  WIFI_HOTSPOT_SSID,
-                 WIFI_HOTSPOT_PASSWORD);
+                 pw_q);
     } else {
         snprintf(cmd, sizeof(cmd),
                  "sudo nmcli con down %s 2>&1",

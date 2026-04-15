@@ -37,14 +37,17 @@ int  wifi_connect(const char *ssid, const char *password);
 
 /* ─── Hotspot ─────────────────────────────────────────────────────────────────── */
 
-#define WIFI_HOTSPOT_CON_NAME  "MPT-Hotspot"
-#define WIFI_HOTSPOT_SSID      "ModPiTouch"
-#define WIFI_HOTSPOT_PASSWORD  "modpitouch"
+#define WIFI_HOTSPOT_CON_NAME      "MPT-Hotspot"
+#define WIFI_HOTSPOT_SSID          "ModPiTouch"
+#define WIFI_HOTSPOT_PASSWORD_DEF  "modpitouch"
+#define WIFI_HOTSPOT_PASSWORD_LEN  64
 
 /* Enable or disable the access-point hotspot — synchronous.
+ * password: the WPA2 passphrase to use (NULL → default "modpitouch").
+ *           Must be 8–63 printable ASCII characters.
  * Requires: sudo nmcli privilege.
  * Returns 0 on success, -1 on failure. */
-int  wifi_hotspot_set(bool enabled);
+int  wifi_hotspot_set(bool enabled, const char *password);
 
 /* Returns true if the hotspot connection is currently active. */
 bool wifi_hotspot_is_active(void);

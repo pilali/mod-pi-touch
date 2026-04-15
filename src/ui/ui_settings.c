@@ -42,10 +42,11 @@ static lv_obj_t *g_wifi_scan_btn    = NULL;
 static lv_obj_t *g_wifi_dd_net      = NULL;
 static lv_obj_t *g_wifi_pw_ta       = NULL;
 static lv_obj_t *g_wifi_pw_row      = NULL;
-static lv_obj_t *g_wifi_connect_btn = NULL;
-static lv_obj_t *g_wifi_hotspot_sw  = NULL;
-static lv_obj_t *g_wifi_kbd         = NULL;
-static lv_timer_t *g_wifi_poll_tmr  = NULL;
+static lv_obj_t *g_wifi_connect_btn  = NULL;
+static lv_obj_t *g_wifi_hotspot_sw   = NULL;
+static lv_obj_t *g_wifi_hotspot_pw   = NULL;  /* textarea for hotspot password */
+static lv_obj_t *g_wifi_kbd          = NULL;
+static lv_timer_t *g_wifi_poll_tmr   = NULL;
 
 /* Shared state between bg thread and UI poll timer */
 typedef struct {
@@ -478,9 +479,9 @@ static void wifi_connect_cb(lv_event_t *e)
 static void *wifi_hotspot_thread(void *arg)
 {
     bool enable = (bool)(uintptr_t)arg;
-    wifi_hotspot_set(enable);
-
     mpt_settings_t *s = settings_get();
+    wifi_hotspot_set(enable, enable ? s->hotspot_password : NULL);
+
     s->hotspot_enabled = wifi_hotspot_is_active();
     settings_save_prefs(s);
 
@@ -523,6 +524,19 @@ static void wifi_pw_ta_defocused_cb(lv_event_t *e)
 {
     (void)e;
     if (g_wifi_kbd) lv_obj_add_flag(g_wifi_kbd, LV_OBJ_FLAG_HIDDEN);
+}
+
+/* Save hotspot password when the textarea loses focus. */
+static void wifi_hotspot_pw_save_cb(lv_event_t *e)
+{
+    lv_obj_t *ta = lv_event_get_target(e);
+    const char *pw = lv_textarea_get_text(ta);
+    if (!pw || strlen(pw) < 8) return;   /* WPA2 minimum 8 chars */
+
+    mpt_settings_t *s = settings_get();
+    snprintf(s->hotspot_password, sizeof(s->hotspot_password), "%s", pw);
+    settings_save_prefs(s);
+    ui_app_show_toast(TR(TR_SETTINGS_WIFI_HOTSPOT_PW_SAVED));
 }
 
 static void build_wifi_section(lv_obj_t *parent)
@@ -614,6 +628,32 @@ static void build_wifi_section(lv_obj_t *parent)
     if (wifi_hotspot_is_active())
         lv_obj_add_state(g_wifi_hotspot_sw, LV_STATE_CHECKED);
     lv_obj_add_event_cb(g_wifi_hotspot_sw, wifi_hotspot_sw_cb, LV_EVENT_VALUE_CHANGED, NULL);
+
+    /* ── Hotspot password ── */
+    lv_obj_t *hpw_row = make_row(parent);
+    lv_obj_t *hpw_key = lv_label_create(hpw_row);
+    lv_label_set_text(hpw_key, TR(TR_SETTINGS_WIFI_HOTSPOT_PASSWORD));
+    lv_obj_set_style_text_color(hpw_key, UI_COLOR_TEXT_DIM, 0);
+    lv_obj_set_flex_grow(hpw_key, 1);
+
+    g_wifi_hotspot_pw = lv_textarea_create(hpw_row);
+    lv_obj_set_width(g_wifi_hotspot_pw, 320);
+    lv_obj_set_height(g_wifi_hotspot_pw, 40);
+    lv_textarea_set_one_line(g_wifi_hotspot_pw, true);
+    lv_textarea_set_password_mode(g_wifi_hotspot_pw, true);
+    lv_obj_set_style_bg_color(g_wifi_hotspot_pw, UI_COLOR_SURFACE, 0);
+    lv_obj_set_style_text_color(g_wifi_hotspot_pw, UI_COLOR_TEXT, 0);
+    lv_obj_set_style_border_color(g_wifi_hotspot_pw, UI_COLOR_TEXT_DIM, 0);
+
+    /* Pre-fill with saved password */
+    mpt_settings_t *hs = settings_get();
+    lv_textarea_set_text(g_wifi_hotspot_pw,
+                         hs->hotspot_password[0] ? hs->hotspot_password
+                                                  : WIFI_HOTSPOT_PASSWORD_DEF);
+
+    lv_obj_add_event_cb(g_wifi_hotspot_pw, wifi_pw_ta_focused_cb,   LV_EVENT_FOCUSED,   NULL);
+    lv_obj_add_event_cb(g_wifi_hotspot_pw, wifi_pw_ta_defocused_cb, LV_EVENT_DEFOCUSED, NULL);
+    lv_obj_add_event_cb(g_wifi_hotspot_pw, wifi_hotspot_pw_save_cb, LV_EVENT_DEFOCUSED, NULL);
 }
 
 /* ─── Language change ────────────────────────────────────────────────────────── */
@@ -648,9 +688,10 @@ void ui_settings_show(lv_obj_t *parent)
     g_wifi_dd_net      = NULL;
     g_wifi_pw_ta       = NULL;
     g_wifi_pw_row      = NULL;
-    g_wifi_connect_btn = NULL;
-    g_wifi_hotspot_sw  = NULL;
-    g_wifi_kbd         = NULL;
+    g_wifi_connect_btn  = NULL;
+    g_wifi_hotspot_sw   = NULL;
+    g_wifi_hotspot_pw   = NULL;
+    g_wifi_kbd          = NULL;
     /* Do NOT reset g_wifi_poll_tmr here — a background op may still be running */
 
     lv_obj_add_flag(parent, LV_OBJ_FLAG_SCROLLABLE);

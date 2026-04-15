@@ -84,7 +84,8 @@ typedef struct {
     int   tuner_input;       /* 0=both, 1=left (capture_1), 2=right (capture_2) */
 
     /* WiFi */
-    bool  hotspot_enabled;   /* persist hotspot on/off preference */
+    bool  hotspot_enabled;                        /* persist hotspot on/off preference */
+    char  hotspot_password[64];                   /* WPA2 passphrase (8-63 chars) */
 } mpt_settings_t;
 
 /* Load settings from env vars + config file. Safe to call multiple times. */

@@ -1,4 +1,5 @@
 #include "settings.h"
+#include "wifi_manager.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -102,6 +103,11 @@ void settings_init(mpt_settings_t *s)
     s->audio_capture_ch  = 0;   /* 0 = not yet configured, infer from TTL */
     s->audio_playback_ch = 0;
 
+    /* WiFi defaults */
+    s->hotspot_enabled = false;
+    snprintf(s->hotspot_password, sizeof(s->hotspot_password),
+             "%s", WIFI_HOTSPOT_PASSWORD_DEF);
+
     /* pre-fx defaults */
     s->gate_enabled   = false;
     s->gate_threshold = -60.0f;
@@ -189,6 +195,10 @@ void settings_init(mpt_settings_t *s)
                 /* WiFi */
                 cJSON *hs = cJSON_GetObjectItem(root, "hotspot_enabled");
                 if (cJSON_IsBool(hs))    s->hotspot_enabled = cJSON_IsTrue(hs);
+                cJSON *hp = cJSON_GetObjectItem(root, "hotspot_password");
+                if (cJSON_IsString(hp) && hp->valuestring[0])
+                    snprintf(s->hotspot_password, sizeof(s->hotspot_password),
+                             "%s", hp->valuestring);
 
                 cJSON_Delete(root);
             }
@@ -274,7 +284,8 @@ int settings_save_prefs(const mpt_settings_t *s)
     cJSON_AddNumberToObject(root, "tuner_input",    s->tuner_input);
 
     /* WiFi */
-    cJSON_AddBoolToObject(root,   "hotspot_enabled", s->hotspot_enabled);
+    cJSON_AddBoolToObject(root,   "hotspot_enabled",  s->hotspot_enabled);
+    cJSON_AddStringToObject(root, "hotspot_password", s->hotspot_password);
 
     char *str = cJSON_Print(root);
     cJSON_Delete(root);

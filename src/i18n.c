@@ -148,7 +148,9 @@ static const char * const g_en[TR_COUNT] = {
     /* TR_SETTINGS_WIFI_HOTSPOT */  "Hotspot",
     /* TR_SETTINGS_WIFI_HOTSPOT_ON */  "ON",
     /* TR_SETTINGS_WIFI_HOTSPOT_OFF */ "OFF",
-    /* TR_SETTINGS_WIFI_HOTSPOT_SSID */ "SSID: " WIFI_HOTSPOT_SSID,
+    /* TR_SETTINGS_WIFI_HOTSPOT_SSID */     "SSID: " WIFI_HOTSPOT_SSID,
+    /* TR_SETTINGS_WIFI_HOTSPOT_PASSWORD */ "Hotspot password",
+    /* TR_SETTINGS_WIFI_HOTSPOT_PW_SAVED */ "Hotspot password saved.",
 };
 
 /* ─── French strings ─────────────────────────────────────────────────────────── */
@@ -297,7 +299,9 @@ static const char * const g_fr[TR_COUNT] = {
     /* TR_SETTINGS_WIFI_HOTSPOT */  "Point d'acc\xc3\xa8s",
     /* TR_SETTINGS_WIFI_HOTSPOT_ON */  "ON",
     /* TR_SETTINGS_WIFI_HOTSPOT_OFF */ "OFF",
-    /* TR_SETTINGS_WIFI_HOTSPOT_SSID */ "SSID : " WIFI_HOTSPOT_SSID,
+    /* TR_SETTINGS_WIFI_HOTSPOT_SSID */     "SSID : " WIFI_HOTSPOT_SSID,
+    /* TR_SETTINGS_WIFI_HOTSPOT_PASSWORD */ "Mot de passe hotspot",
+    /* TR_SETTINGS_WIFI_HOTSPOT_PW_SAVED */ "Mot de passe hotspot enregistr\xc3\xa9.",
 };
 
 /* ─── Runtime state ──────────────────────────────────────────────────────────── */
