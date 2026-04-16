@@ -16,6 +16,8 @@ static const char * const g_en[TR_COUNT] = {
     /* TR_BANKS */                 "Banks",
     /* TR_NO_PEDALBOARD */         "No pedalboard",
 
+    /* TR_MENU_FILES */             "Files",
+    /* TR_MENU_NEW_PB */           "New pedalboard",
     /* TR_MENU_SAVE_PB */          "Save pedalboard",
     /* TR_MENU_SAVE_PB_AS */       "Save pedalboard as...",
     /* TR_MENU_SAVE_SNAP */        "Save snapshot",
@@ -183,6 +185,8 @@ static const char * const g_fr[TR_COUNT] = {
     /* TR_BANKS */                 "Banques",
     /* TR_NO_PEDALBOARD */         "Pas de pedalboard",
 
+    /* TR_MENU_FILES */             "Fichiers",
+    /* TR_MENU_NEW_PB */           "Nouveau pedalboard",
     /* TR_MENU_SAVE_PB */          "Enregistrer le pedalboard",
     /* TR_MENU_SAVE_PB_AS */       "Enregistrer sous...",
     /* TR_MENU_SAVE_SNAP */        "Enregistrer le snapshot",

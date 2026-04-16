@@ -24,7 +24,11 @@ typedef enum {
     TR_BANKS,
     TR_NO_PEDALBOARD,
 
-    /* Save menu — button labels */
+    /* Files menu — top bar button label */
+    TR_MENU_FILES,
+
+    /* Files menu — action labels */
+    TR_MENU_NEW_PB,
     TR_MENU_SAVE_PB,
     TR_MENU_SAVE_PB_AS,
     TR_MENU_SAVE_SNAP,

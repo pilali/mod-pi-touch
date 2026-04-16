@@ -142,6 +142,36 @@ static void confirm_save_snapshot_cb(lv_event_t *e)
     ui_app_show_confirm(TR(TR_MENU_SAVE_SNAP), msg, do_save_snapshot, NULL);
 }
 
+/* New pedalboard flow */
+static void do_new_pedalboard(const char *name, void *ud)
+{
+    (void)ud;
+    if (!name || !name[0]) return;
+
+    mpt_settings_t *s = settings_get();
+    char new_dir[PB_PATH_MAX];
+    snprintf(new_dir, sizeof(new_dir), "%s/%s.pedalboard", s->pedalboards_dir, name);
+
+    pedalboard_t new_pb;
+    pb_init(&new_pb);
+    snprintf(new_pb.name, sizeof(new_pb.name), "%s", name);
+    snprintf(new_pb.path, sizeof(new_pb.path), "%s", new_dir);
+
+    if (pb_save(&new_pb) < 0) {
+        ui_app_show_toast_error(TR(TR_MSG_PB_SAVE_ERROR));
+        return;
+    }
+    ui_app_show_screen(UI_SCREEN_PEDALBOARD);
+    ui_pedalboard_load(new_dir, NULL, NULL);
+    ui_app_show_toast(TR(TR_MSG_PB_SAVED));
+}
+static void new_pb_cb(lv_event_t *e)
+{
+    (void)e;
+    save_menu_close_async();
+    ui_app_show_input(TR(TR_MENU_NEW_PB), "", do_new_pedalboard, NULL);
+}
+
 /* Save as flow */
 static void do_save_as_input(const char *name, void *ud)
 {
@@ -240,6 +270,18 @@ static void btn_save_cb(lv_event_t *e)
     lv_obj_set_style_pad_all(panel, 6, 0);
     lv_obj_set_style_pad_row(panel, 4, 0);
     lv_obj_set_flex_flow(panel, LV_FLEX_FLOW_COLUMN);
+
+    lv_color_t new_pb_color = lv_color_hex(0x27AE60); /* green */
+
+    lv_obj_t *b0 = lv_btn_create(panel);
+    lv_obj_set_size(b0, LV_PCT(100), 48);
+    lv_obj_set_style_bg_color(b0, new_pb_color, 0);
+    lv_obj_set_style_radius(b0, 4, 0);
+    lv_obj_t *l0 = lv_label_create(b0);
+    lv_label_set_text_fmt(l0, LV_SYMBOL_PLUS " %s", TR(TR_MENU_NEW_PB));
+    lv_obj_set_style_text_color(l0, UI_COLOR_TEXT, 0);
+    lv_obj_center(l0);
+    lv_obj_add_event_cb(b0, new_pb_cb, LV_EVENT_CLICKED, NULL);
 
     lv_obj_t *b1 = lv_btn_create(panel);
     lv_obj_set_size(b1, LV_PCT(100), 48);
@@ -390,7 +432,7 @@ static void create_top_bar(void)
     lv_obj_align(btn_set, LV_ALIGN_RIGHT_MID, 0, 0);
 
     lv_obj_t *btn_save = make_top_btn(g_top_bar,
-        LV_SYMBOL_SAVE, TR(TR_MENU_SAVE_PB),
+        LV_SYMBOL_SAVE, TR(TR_MENU_FILES),
         UI_COLOR_ACCENT, btn_save_cb, NULL);
     lv_obj_align(btn_save, LV_ALIGN_RIGHT_MID, -(UI_TOP_BTN_SZ + 6), 0);
 }
