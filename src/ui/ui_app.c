@@ -152,12 +152,44 @@ static void do_new_pedalboard(const char *name, void *ud)
     char new_dir[PB_PATH_MAX];
     snprintf(new_dir, sizeof(new_dir), "%s/%s.pedalboard", s->pedalboards_dir, name);
 
-    pedalboard_t new_pb;
-    pb_init(&new_pb);
-    snprintf(new_pb.name, sizeof(new_pb.name), "%s", name);
-    snprintf(new_pb.path, sizeof(new_pb.path), "%s", new_dir);
+    pedalboard_t *new_pb = malloc(sizeof(*new_pb));
+    if (!new_pb) {
+        ui_app_show_toast_error(TR(TR_MSG_PB_SAVE_ERROR));
+        return;
+    }
+    pb_init(new_pb);
+    snprintf(new_pb->name, sizeof(new_pb->name), "%s", name);
+    snprintf(new_pb->path, sizeof(new_pb->path), "%s", new_dir);
 
-    if (pb_save(&new_pb) < 0) {
+    /* Default plugin: Volume 2x2 (stereo pass-through at full volume) */
+    pb_plugin_t *vol = pb_add_plugin(new_pb, 0, "volume",
+                                     "http://moddevices.com/plugins/mod-devel/mod-volume-2x2");
+    if (vol) {
+        vol->canvas_x = 540.0f;
+        vol->canvas_y = 100.0f;
+        /* Default connections using file:// absolute URIs (bundle-relative on save) */
+        char base[PB_PATH_MAX + 8];
+        snprintf(base, sizeof(base), "file://%s", new_dir);
+        char from[PB_URI_MAX], to[PB_URI_MAX];
+        /* system:capture_1/2 → volume inputs */
+        snprintf(from, sizeof(from), "%s/capture_1",         base);
+        snprintf(to,   sizeof(to),   "%s/volume/AudioIn1",   base);
+        pb_add_connection(new_pb, from, to);
+        snprintf(from, sizeof(from), "%s/capture_2",         base);
+        snprintf(to,   sizeof(to),   "%s/volume/AudioIn2",   base);
+        pb_add_connection(new_pb, from, to);
+        /* volume outputs → system:playback_1/2 */
+        snprintf(from, sizeof(from), "%s/volume/AudioOut1",  base);
+        snprintf(to,   sizeof(to),   "%s/playback_1",        base);
+        pb_add_connection(new_pb, from, to);
+        snprintf(from, sizeof(from), "%s/volume/AudioOut2",  base);
+        snprintf(to,   sizeof(to),   "%s/playback_2",        base);
+        pb_add_connection(new_pb, from, to);
+    }
+
+    int save_result = pb_save(new_pb);
+    free(new_pb);
+    if (save_result < 0) {
         ui_app_show_toast_error(TR(TR_MSG_PB_SAVE_ERROR));
         return;
     }
