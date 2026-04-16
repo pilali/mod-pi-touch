@@ -17,6 +17,7 @@
 #include "lv2_utils.h"
 #include "ui/ui_app.h"
 #include "ui/ui_pedalboard.h"
+#include "ui/ui_splash.h"
 #include "cJSON.h"
 
 /* ─── Signal handling ────────────────────────────────────────────────────────── */
@@ -76,27 +77,40 @@ static void *tick_thread(void *arg)
 /* ─── Background connect + auto-load thread ─────────────────────────────────── */
 /* mod-host can take 10+ seconds to become ready at boot (JACK init).
  * This thread retries the connection indefinitely, then loads pre-fx and
- * the last pedalboard once connected.  The LVGL UI is already running. */
+ * the last pedalboard once connected.  The LVGL UI is already running.
+ * Splash progress is driven via ui_splash_update() (lv_async_call). */
 static void *connect_and_load_thread(void *arg)
 {
     (void)arg;
     mpt_settings_t *s = settings_get();
 
+    ui_splash_update(55, TR(TR_SPLASH_CONNECTING));
     printf("[main] Connecting to mod-host at %s:%d...\n",
            s->host_addr, s->host_cmd_port);
 
     if (host_comm_connect(s->host_addr, s->host_cmd_port, s->host_fb_port,
                           feedback_handler, NULL) < 0) {
         fprintf(stderr, "[main] Warning: cannot connect to mod-host.\n");
+        ui_splash_update(100, "mod-host unavailable.");
+        ui_splash_hide_async();
         return NULL;
     }
+
+    ui_splash_update(70, TR(TR_SPLASH_INIT_FX));
 
     /* Pre-FX (noise gate via mod-host, tuner via JACK) */
     pre_fx_init();
 
     /* Auto-load last pedalboard + snapshot */
     FILE *f = fopen(s->last_state_file, "r");
-    if (!f) return NULL;
+    if (!f) {
+        /* No state file — done */
+        ui_splash_update(100, TR(TR_SPLASH_READY));
+        ui_splash_hide_async();
+        return NULL;
+    }
+
+    ui_splash_update(85, TR(TR_SPLASH_LOADING_PB));
 
     fseek(f, 0, SEEK_END);
     long sz = ftell(f);
@@ -128,6 +142,9 @@ static void *connect_and_load_thread(void *arg)
         free(buf);
     }
     fclose(f);
+
+    ui_splash_update(100, TR(TR_SPLASH_READY));
+    ui_splash_hide_async();
     return NULL;
 }
 
@@ -173,6 +190,11 @@ int main(int argc, char *argv[])
         lv_indev_set_long_press_time(indev, 800); /* ms — long press opens param editor */
     }
 
+    /* ── Splash screen — shown immediately after display init ── */
+    ui_splash_show();
+    ui_splash_update(5, TR(TR_SPLASH_SCANNING));
+    lv_timer_handler(); /* render first frame */
+
     /* ── LV2 world ── */
     lv2u_world_init();
 
@@ -185,8 +207,16 @@ int main(int argc, char *argv[])
         pm_init(lv2_path, settings.plugin_cache_file);
     }
     printf("[main] Found %d plugins\n", pm_plugin_count());
+    {
+        char msg[64];
+        snprintf(msg, sizeof(msg), "%d plugins found.", pm_plugin_count());
+        ui_splash_update(35, msg);
+        lv_timer_handler(); /* flush "N plugins found" message */
+    }
 
     /* ── Build UI — before connecting to mod-host so the UI appears immediately ── */
+    ui_splash_update(45, TR(TR_SPLASH_BUILDING_UI));
+    lv_timer_handler();
     ui_app_init();
 
     /* ── Connect to mod-host + pre-fx init + auto-load in background thread ──
