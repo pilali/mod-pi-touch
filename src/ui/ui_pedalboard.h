@@ -20,8 +20,16 @@ void ui_pedalboard_delete_snapshot(void);
 /* Delete the current pedalboard bundle from disk and unload it. */
 void ui_pedalboard_delete(void);
 
-/* Load a pedalboard bundle and display it. */
-void ui_pedalboard_load(const char *bundle_path);
+/* Called after each plugin is added during pedalboard load.
+ * done  = number of plugins loaded so far
+ * total = total number of plugins in the bundle
+ * Invoked from whichever thread calls ui_pedalboard_load(). */
+typedef void (*pb_progress_cb_t)(int done, int total, void *ud);
+
+/* Load a pedalboard bundle and display it.
+ * progress_cb (may be NULL) is called after each plugin is added to mod-host. */
+void ui_pedalboard_load(const char *bundle_path,
+                        pb_progress_cb_t progress_cb, void *progress_ud);
 
 /* Called by host feedback to update a port value indicator. */
 void ui_pedalboard_update_param(int instance_id, const char *symbol, float value);

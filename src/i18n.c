@@ -158,6 +158,15 @@ static const char * const g_en[TR_COUNT] = {
     /* TR_SETTINGS_REBOOT */          "Reboot",
     /* TR_SETTINGS_CONFIRM_SHUTDOWN */"Shut down the system?",
     /* TR_SETTINGS_CONFIRM_REBOOT */  "Reboot the system?",
+
+    /* TR_SPLASH_SCANNING */          "Scanning LV2 plugins...",
+    /* TR_SPLASH_BUILDING_UI */       "Building interface...",
+    /* TR_SPLASH_CONNECTING */        "Connecting to mod-host...",
+    /* TR_SPLASH_INIT_FX */           "Initialising effects...",
+    /* TR_SPLASH_LOADING_PB */        "Loading pedalboard...",
+    /* TR_SPLASH_READY */             "Ready.",
+    /* TR_SPLASH_SHUTTING_DOWN */     "Shutting down...",
+    /* TR_SPLASH_REBOOTING */         "Rebooting...",
 };
 
 /* ─── French strings ─────────────────────────────────────────────────────────── */
@@ -316,6 +325,15 @@ static const char * const g_fr[TR_COUNT] = {
     /* TR_SETTINGS_REBOOT */          "Red\xc3\xa9marrer",
     /* TR_SETTINGS_CONFIRM_SHUTDOWN */"\xc3\x89teindre le syst\xc3\xa8me ?",
     /* TR_SETTINGS_CONFIRM_REBOOT */  "Red\xc3\xa9marrer le syst\xc3\xa8me ?",
+
+    /* TR_SPLASH_SCANNING */          "Scan des plugins LV2...",
+    /* TR_SPLASH_BUILDING_UI */       "Construction de l'interface...",
+    /* TR_SPLASH_CONNECTING */        "Connexion \xc3\xa0 mod-host...",
+    /* TR_SPLASH_INIT_FX */           "Initialisation des effets...",
+    /* TR_SPLASH_LOADING_PB */        "Chargement du pedalboard...",
+    /* TR_SPLASH_READY */             "Pr\xc3\xaat.",
+    /* TR_SPLASH_SHUTTING_DOWN */     "Arr\xc3\xaat du syst\xc3\xa8me...",
+    /* TR_SPLASH_REBOOTING */         "Red\xc3\xa9marrage...",
 };
 
 /* ─── Runtime state ──────────────────────────────────────────────────────────── */

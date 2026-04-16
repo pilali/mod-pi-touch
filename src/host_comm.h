@@ -18,7 +18,13 @@ typedef void (*host_resp_cb_t)(int status, const char *value, void *userdata);
 
 /* ─── Lifecycle ─────────────────────────────────────────────────────────────── */
 
-/* Connect to mod-host on cmd_port and fb_port.
+/* Single-attempt connect — returns 0 on success, -1 if mod-host is not
+ * listening yet.  Does not retry; the caller is responsible for the retry
+ * loop so it can update UI progress between attempts. */
+int  host_comm_try_connect(const char *addr, int cmd_port, int fb_port,
+                           host_feedback_cb_t feedback_cb, void *feedback_ud);
+
+/* Connect to mod-host on cmd_port and fb_port (retries up to 20 × 500 ms).
  * feedback_cb is called on a background thread for monitoring messages.
  * Returns 0 on success, -1 on error. */
 int  host_comm_connect(const char *addr, int cmd_port, int fb_port,

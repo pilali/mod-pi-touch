@@ -91,6 +91,7 @@ set(SOURCES
     src/tuner_host.c
     src/wifi_manager.c
     src/ui/ui_pre_fx.c
+    src/ui/ui_splash.c
     ${CJSON_SRC}
     resources/fonts/lv_font_montserrat_12.c
     resources/fonts/lv_font_montserrat_14.c

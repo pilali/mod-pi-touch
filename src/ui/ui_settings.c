@@ -1,6 +1,7 @@
 #include "ui_settings.h"
 #include "ui_app.h"
 #include "ui_pedalboard.h"
+#include "ui_splash.h"
 #include "../settings.h"
 #include "../i18n.h"
 #include "../host_comm.h"
@@ -624,13 +625,15 @@ static void show_confirm(const char *msg,
 static void do_shutdown(lv_event_t *e)
 {
     (void)e;
-    system("sudo systemctl poweroff");
+    ui_splash_show_power(0);   /* show "Arrêt du système..." then flush fb */
+    system("sudo /bin/systemctl poweroff");
 }
 
 static void do_reboot(lv_event_t *e)
 {
     (void)e;
-    system("sudo systemctl reboot");
+    ui_splash_show_power(1);   /* show "Redémarrage..." then flush fb */
+    system("sudo /bin/systemctl reboot");
 }
 
 static void shutdown_btn_cb(lv_event_t *e)

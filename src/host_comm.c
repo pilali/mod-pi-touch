@@ -211,33 +211,18 @@ static int recv_response(int fd, char *val_buf, size_t val_sz, int timeout_ms)
 
 /* ─── Public API ─────────────────────────────────────────────────────────────── */
 
-int host_comm_connect(const char *addr, int cmd_port, int fb_port,
-                      host_feedback_cb_t feedback_cb, void *feedback_ud)
+/* Single attempt — no retry.  Returns 0 on success, -1 if connection fails. */
+int host_comm_try_connect(const char *addr, int cmd_port, int fb_port,
+                          host_feedback_cb_t feedback_cb, void *feedback_ud)
 {
-    /* Retry loop — at boot, mod-host may not be listening yet even though
-     * systemd reports it as "active".  Retry for up to 10 s (20 × 500 ms). */
-    for (int attempt = 1; attempt <= 20; attempt++) {
-        g_host.cmd_fd = tcp_connect(addr, cmd_port);
-        if (g_host.cmd_fd >= 0) break;
-        fprintf(stderr, "[host_comm] Connect attempt %d/20 to %s:%d failed — retrying in 500 ms\n",
-                attempt, addr, cmd_port);
-        usleep(500000);
-    }
-    if (g_host.cmd_fd < 0) {
-        fprintf(stderr, "[host_comm] Cannot connect to %s:%d after 20 attempts: %s\n",
-                addr, cmd_port, strerror(errno));
-        return -1;
-    }
+    int cmd_fd = tcp_connect(addr, cmd_port);
+    if (cmd_fd < 0) return -1;
 
-    g_host.fb_fd = tcp_connect(addr, fb_port);
-    if (g_host.fb_fd < 0) {
-        fprintf(stderr, "[host_comm] Cannot connect feedback %s:%d: %s\n",
-                addr, fb_port, strerror(errno));
-        close(g_host.cmd_fd);
-        g_host.cmd_fd = -1;
-        return -1;
-    }
+    int fb_fd = tcp_connect(addr, fb_port);
+    if (fb_fd < 0) { close(cmd_fd); return -1; }
 
+    g_host.cmd_fd = cmd_fd;
+    g_host.fb_fd  = fb_fd;
     pthread_mutex_init(&g_host.cmd_mutex, NULL);
     g_host.feedback_cb  = feedback_cb;
     g_host.feedback_ud  = feedback_ud;
@@ -249,6 +234,24 @@ int host_comm_connect(const char *addr, int cmd_port, int fb_port,
     pthread_create(&g_host.fb_thread, NULL, fb_thread_func, &g_host);
     printf("[host_comm] Connected to mod-host %s cmd:%d fb:%d\n", addr, cmd_port, fb_port);
     return 0;
+}
+
+int host_comm_connect(const char *addr, int cmd_port, int fb_port,
+                      host_feedback_cb_t feedback_cb, void *feedback_ud)
+{
+    /* Retry loop — at boot, mod-host may not be listening yet even though
+     * systemd reports it as "active".  Retry for up to 10 s (20 × 500 ms). */
+    for (int attempt = 1; attempt <= 20; attempt++) {
+        if (host_comm_try_connect(addr, cmd_port, fb_port,
+                                  feedback_cb, feedback_ud) == 0)
+            return 0;
+        fprintf(stderr, "[host_comm] Connect attempt %d/20 to %s:%d failed — retrying in 500 ms\n",
+                attempt, addr, cmd_port);
+        usleep(500000);
+    }
+    fprintf(stderr, "[host_comm] Cannot connect to %s:%d after 20 attempts\n",
+            addr, cmd_port);
+    return -1;
 }
 
 void host_comm_disconnect(void)

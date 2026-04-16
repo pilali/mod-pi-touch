@@ -845,7 +845,9 @@ bool ui_pedalboard_intercept_plugin_click(int instance_id)
 
 /* ─── Block event handlers ───────────────────────────────────────────────────── */
 
-static void on_block_bypass(void *userdata);  /* forward declaration */
+static void on_block_bypass(void *userdata);   /* forward declaration */
+static void pb_load_ui_refresh(void *arg);     /* forward declaration */
+static void pb_snapshot_ui_refresh(void *arg); /* forward declaration */
 static void pb_apply_midi_mapped(int instance_id, const char *symbol,
                                  int ch, int cc, float min, float max); /* fwd */
 
@@ -1497,11 +1499,19 @@ void ui_pedalboard_apply_snapshot(int idx)
                                sp->patch_params[j].uri,
                                sp->patch_params[j].path);
     }
+    /* Marshal LVGL call to main thread (may be called from background thread). */
+    lv_async_call(pb_snapshot_ui_refresh, NULL);
+}
+
+static void pb_snapshot_ui_refresh(void *arg)
+{
+    (void)arg;
     ui_snapshot_bar_refresh();
     last_state_save();
 }
 
-void ui_pedalboard_load(const char *bundle_path)
+void ui_pedalboard_load(const char *bundle_path,
+                        pb_progress_cb_t progress_cb, void *progress_ud)
 {
     pb_init(&g_pedalboard);
     fprintf(stderr, "[ui_pedalboard] loading bundle: %s\n", bundle_path);
@@ -1523,12 +1533,14 @@ void ui_pedalboard_load(const char *bundle_path)
     pre_fx_reload();
 
     /* 2. Add plugins, set bypass and port values */
-    for (int i = 0; i < g_pedalboard.plugin_count; i++) {
+    int total_plugins = g_pedalboard.plugin_count;
+    for (int i = 0; i < total_plugins; i++) {
         pb_plugin_t *plug = &g_pedalboard.plugins[i];
         plug->instance_id = i; /* sequential instance IDs */
 
         if (host_add_plugin(plug->instance_id, plug->uri) < 0) {
             fprintf(stderr, "[pedalboard] Failed to add plugin %s\n", plug->uri);
+            if (progress_cb) progress_cb(i + 1, total_plugins, progress_ud);
             continue;
         }
 
@@ -1559,9 +1571,12 @@ void ui_pedalboard_load(const char *bundle_path)
                               port->midi_min, port->midi_max);
             }
         }
+
+        if (progress_cb) progress_cb(i + 1, total_plugins, progress_ud);
     }
 
     /* 3. Make audio/MIDI connections */
+    if (progress_cb) progress_cb(-1, 0, progress_ud); /* phase: connections */
     for (int i = 0; i < g_pedalboard.connection_count; i++) {
         pb_connection_t *conn = &g_pedalboard.connections[i];
         char from[256], to[256];
@@ -1574,9 +1589,22 @@ void ui_pedalboard_load(const char *bundle_path)
         }
     }
 
-    /* 4. Restore LV2 plugin state (internal state beyond control ports) */
-    host_state_load(bundle_path);
+    /* Note: host_state_load() was removed.  All control port values are sent
+     * individually via host_param_set() above, and file paths via
+     * host_patch_set().  host_state_load() was redundant and consistently
+     * timed out (10 s) on Pi hardware, blocking the splash screen. */
 
+    /* Marshal LVGL calls to the main thread — ui_pedalboard_load() may be
+     * called from a background thread (boot auto-load).  Touching LVGL
+     * objects from a non-LVGL thread causes lv_inv_area assertions and
+     * potential data-structure corruption.  lv_async_call is thread-safe. */
+    lv_async_call(pb_load_ui_refresh, NULL);
+}
+
+/* Async callback — runs on the LVGL main thread after ui_pedalboard_load(). */
+static void pb_load_ui_refresh(void *arg)
+{
+    (void)arg;
     ui_app_update_title(g_pedalboard.name, false);
     ui_pedalboard_refresh();
     last_state_save();

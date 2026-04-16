@@ -17,6 +17,7 @@
 #include "lv2_utils.h"
 #include "ui/ui_app.h"
 #include "ui/ui_pedalboard.h"
+#include "ui/ui_splash.h"
 #include "cJSON.h"
 
 /* ─── Signal handling ────────────────────────────────────────────────────────── */
@@ -73,10 +74,27 @@ static void *tick_thread(void *arg)
     return NULL;
 }
 
+/* ─── Pedalboard load progress callback ──────────────────────────────────────── */
+/* Convention (total > 0):  plugin loading  — done/total plugins, pct 85-93%
+ * Convention (total == 0): phase signal    — done == -1: making connections, pct 94% */
+static void pb_load_progress(int done, int total, void *ud)
+{
+    (void)ud;
+    char msg[80];
+    if (total > 0) {
+        int pct = 85 + (done * 9) / total; /* 85–94% */
+        snprintf(msg, sizeof(msg), "%s  (%d/%d)", TR(TR_SPLASH_LOADING_PB), done, total);
+        ui_splash_update(pct, msg);
+    } else if (done == -1) {
+        ui_splash_update(95, TR(TR_SPLASH_LOADING_PB)); /* connections */
+    }
+}
+
 /* ─── Background connect + auto-load thread ─────────────────────────────────── */
 /* mod-host can take 10+ seconds to become ready at boot (JACK init).
  * This thread retries the connection indefinitely, then loads pre-fx and
- * the last pedalboard once connected.  The LVGL UI is already running. */
+ * the last pedalboard once connected.  The LVGL UI is already running.
+ * Splash progress is driven via ui_splash_update() (lv_async_call). */
 static void *connect_and_load_thread(void *arg)
 {
     (void)arg;
@@ -85,18 +103,50 @@ static void *connect_and_load_thread(void *arg)
     printf("[main] Connecting to mod-host at %s:%d...\n",
            s->host_addr, s->host_cmd_port);
 
-    if (host_comm_connect(s->host_addr, s->host_cmd_port, s->host_fb_port,
-                          feedback_handler, NULL) < 0) {
-        fprintf(stderr, "[main] Warning: cannot connect to mod-host.\n");
+    /* Retry for up to 60 s (120 × 500 ms) — JACK init on a Pi can take 30+ s.
+     * Update the splash message every second so the user knows we're alive. */
+    const int MAX_RETRIES = 120;
+    bool connected = false;
+    for (int attempt = 1; attempt <= MAX_RETRIES && g_running; attempt++) {
+        /* Update message every 2 attempts (≈ every second) */
+        if (attempt == 1 || attempt % 2 == 0) {
+            char buf[96];
+            int elapsed = (attempt - 1) / 2;
+            snprintf(buf, sizeof(buf), "%s  (%ds)", TR(TR_SPLASH_CONNECTING), elapsed);
+            ui_splash_update(55, buf);
+        }
+        if (host_comm_try_connect(s->host_addr, s->host_cmd_port, s->host_fb_port,
+                                  feedback_handler, NULL) == 0) {
+            connected = true;
+            break;
+        }
+        fprintf(stderr, "[main] mod-host not ready (attempt %d/%d)\n", attempt, MAX_RETRIES);
+        usleep(500000);
+    }
+
+    if (!connected) {
+        fprintf(stderr, "[main] Warning: cannot connect to mod-host after %ds.\n",
+                MAX_RETRIES / 2);
+        ui_splash_update(100, "mod-host unavailable.");
+        ui_splash_hide_async();
         return NULL;
     }
+
+    ui_splash_update(70, TR(TR_SPLASH_INIT_FX));
 
     /* Pre-FX (noise gate via mod-host, tuner via JACK) */
     pre_fx_init();
 
     /* Auto-load last pedalboard + snapshot */
     FILE *f = fopen(s->last_state_file, "r");
-    if (!f) return NULL;
+    if (!f) {
+        /* No state file — done */
+        ui_splash_update(100, TR(TR_SPLASH_READY));
+        ui_splash_hide_async();
+        return NULL;
+    }
+
+    ui_splash_update(85, TR(TR_SPLASH_LOADING_PB));
 
     fseek(f, 0, SEEK_END);
     long sz = ftell(f);
@@ -112,13 +162,14 @@ static void *connect_and_load_thread(void *arg)
             if (cJSON_IsString(jpath) && jpath->valuestring[0]) {
                 printf("[main] Auto-loading last pedalboard: %s\n",
                        jpath->valuestring);
-                ui_pedalboard_load(jpath->valuestring);
+                ui_pedalboard_load(jpath->valuestring, pb_load_progress, NULL);
                 if (cJSON_IsNumber(jsnap)) {
                     int snap_idx = (int)jsnap->valuedouble;
                     pedalboard_t *pb = ui_pedalboard_get();
                     if (pb && snap_idx >= 0 && snap_idx < pb->snapshot_count
                             && snap_idx != pb->current_snapshot) {
                         printf("[main] Restoring snapshot %d\n", snap_idx);
+                        ui_splash_update(97, TR(TR_SPLASH_LOADING_PB));
                         ui_pedalboard_apply_snapshot(snap_idx);
                     }
                 }
@@ -128,6 +179,9 @@ static void *connect_and_load_thread(void *arg)
         free(buf);
     }
     fclose(f);
+
+    ui_splash_update(100, TR(TR_SPLASH_READY));
+    ui_splash_hide_async();
     return NULL;
 }
 
@@ -173,6 +227,11 @@ int main(int argc, char *argv[])
         lv_indev_set_long_press_time(indev, 800); /* ms — long press opens param editor */
     }
 
+    /* ── Splash screen — shown immediately after display init ── */
+    ui_splash_show();
+    ui_splash_update(5, TR(TR_SPLASH_SCANNING));
+    lv_timer_handler(); /* render first frame */
+
     /* ── LV2 world ── */
     lv2u_world_init();
 
@@ -185,8 +244,16 @@ int main(int argc, char *argv[])
         pm_init(lv2_path, settings.plugin_cache_file);
     }
     printf("[main] Found %d plugins\n", pm_plugin_count());
+    {
+        char msg[64];
+        snprintf(msg, sizeof(msg), "%d plugins found.", pm_plugin_count());
+        ui_splash_update(35, msg);
+        lv_timer_handler(); /* flush "N plugins found" message */
+    }
 
     /* ── Build UI — before connecting to mod-host so the UI appears immediately ── */
+    ui_splash_update(45, TR(TR_SPLASH_BUILDING_UI));
+    lv_timer_handler();
     ui_app_init();
 
     /* ── Connect to mod-host + pre-fx init + auto-load in background thread ──
