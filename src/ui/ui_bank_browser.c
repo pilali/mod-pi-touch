@@ -60,7 +60,7 @@ static void do_load(bool save_first)
     if (save_first)
         ui_pedalboard_save();
     ui_app_show_screen(UI_SCREEN_PEDALBOARD);
-    ui_pedalboard_load(g_pending_bundle);
+    ui_pedalboard_load(g_pending_bundle, NULL, NULL);
 }
 
 static void save_and_load_cb(lv_event_t *e)
