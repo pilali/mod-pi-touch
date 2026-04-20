@@ -735,6 +735,47 @@ int pb_list(const char *base_dir, char **paths, int max_paths)
     return count;
 }
 
+int pb_read_name(const char *bundle_path, char *out, size_t out_size)
+{
+    /* Derive the main TTL filename from the bundle directory name */
+    const char *dir_name = strrchr(bundle_path, '/');
+    dir_name = dir_name ? dir_name + 1 : bundle_path;
+
+    char stem[PB_NAME_MAX];
+    snprintf(stem, sizeof(stem), "%s", dir_name);
+    char *dot = strrchr(stem, '.');
+    if (dot && strcmp(dot, ".pedalboard") == 0) *dot = '\0';
+
+    char ttl_path[PB_PATH_MAX + PB_NAME_MAX + 4];
+    snprintf(ttl_path, sizeof(ttl_path), "%s/%s.ttl", bundle_path, stem);
+
+    FILE *f = fopen(ttl_path, "r");
+    if (!f) {
+        snprintf(out, out_size, "%s", stem);
+        return -1;
+    }
+
+    char line[512];
+    while (fgets(line, sizeof(line), f)) {
+        char *p = strstr(line, "doap:name");
+        if (!p) continue;
+        p = strchr(p, '"');
+        if (!p) continue;
+        p++;
+        char *end = strchr(p, '"');
+        if (!end) continue;
+        size_t len = (size_t)(end - p);
+        if (len >= out_size) len = out_size - 1;
+        memcpy(out, p, len);
+        out[len] = '\0';
+        fclose(f);
+        return 0;
+    }
+    fclose(f);
+    snprintf(out, out_size, "%s", stem);
+    return -1;
+}
+
 /* ─── Snapshot wrappers ──────────────────────────────────────────────────────── */
 
 /* Capture current live state into snap (helper shared by save/overwrite) */

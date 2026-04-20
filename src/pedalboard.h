@@ -136,6 +136,10 @@ int pb_save_as(pedalboard_t *pb, const char *new_dir);
  * Returns count; fills paths array (each entry is a malloc'd string). */
 int pb_list(const char *base_dir, char **paths, int max_paths);
 
+/* Read the doap:name of a pedalboard bundle without loading the full TTL.
+ * Falls back to the filename stem on failure. Returns 0 on success. */
+int pb_read_name(const char *bundle_path, char *out, size_t out_size);
+
 /* Delete all files inside a bundle directory and the directory itself.
  * Returns 0 on success, -1 on error. */
 int pb_bundle_delete(const char *bundle_path);

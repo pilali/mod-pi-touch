@@ -6,6 +6,7 @@
 
 #include "cJSON.h"
 
+
 int bank_load(const char *path, bank_list_t *list)
 {
     memset(list, 0, sizeof(*list));
@@ -75,7 +76,7 @@ int bank_save(const char *path, const bank_list_t *list)
     for (int bi = 0; bi < list->bank_count; bi++) {
         const bank_t *bank = &list->banks[bi];
         cJSON *bank_obj = cJSON_CreateObject();
-        cJSON_AddStringToObject(bank_obj, "name", bank->name);
+        cJSON_AddStringToObject(bank_obj, "title", bank->name);
 
         cJSON *pedals = cJSON_CreateArray();
         for (int pi = 0; pi < bank->pedal_count; pi++) {
@@ -120,9 +121,10 @@ int bank_add_pedal(bank_list_t *list, const char *bank_name,
     }
 
     if (bank->pedal_count >= BANK_MAX_PEDALS) return -1;
-    bank_pedal_t *p = &bank->pedals[bank->pedal_count++];
+    bank_pedal_t *p = &bank->pedals[bank->pedal_count];
     snprintf(p->title,  sizeof(p->title),  "%s", pedal_title);
     snprintf(p->bundle, sizeof(p->bundle), "%s", bundle_path);
+    bank->pedal_count++;
     return 0;
 }
 
@@ -134,4 +136,38 @@ void bank_remove_pedal(bank_list_t *list, int bank_idx, int pedal_idx)
     memmove(&bank->pedals[pedal_idx], &bank->pedals[pedal_idx+1],
             (bank->pedal_count - pedal_idx - 1) * sizeof(bank_pedal_t));
     bank->pedal_count--;
+}
+
+int bank_create(bank_list_t *list, const char *name)
+{
+    if (list->bank_count >= BANK_MAX) return -1;
+    bank_t *bank = &list->banks[list->bank_count];
+    memset(bank, 0, sizeof(*bank));
+    snprintf(bank->name, sizeof(bank->name), "%s", name);
+    return list->bank_count++;
+}
+
+void bank_delete(bank_list_t *list, int bank_idx)
+{
+    if (bank_idx < 0 || bank_idx >= list->bank_count) return;
+    memmove(&list->banks[bank_idx], &list->banks[bank_idx + 1],
+            (list->bank_count - bank_idx - 1) * sizeof(bank_t));
+    list->bank_count--;
+}
+
+void bank_move_pedal(bank_list_t *list, int bank_idx, int from_idx, int to_idx)
+{
+    if (bank_idx < 0 || bank_idx >= list->bank_count) return;
+    bank_t *bank = &list->banks[bank_idx];
+    if (from_idx == to_idx) return;
+    if (from_idx < 0 || from_idx >= bank->pedal_count) return;
+    if (to_idx   < 0 || to_idx   >= bank->pedal_count) return;
+    bank_pedal_t tmp = bank->pedals[from_idx];
+    if (from_idx < to_idx)
+        memmove(&bank->pedals[from_idx], &bank->pedals[from_idx + 1],
+                (to_idx - from_idx) * sizeof(bank_pedal_t));
+    else
+        memmove(&bank->pedals[to_idx + 1], &bank->pedals[to_idx],
+                (from_idx - to_idx) * sizeof(bank_pedal_t));
+    bank->pedals[to_idx] = tmp;
 }
