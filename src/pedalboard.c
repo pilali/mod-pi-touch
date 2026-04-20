@@ -29,6 +29,20 @@ static const char *uri_to_path(const char *uri)
     return uri;
 }
 
+/* Derive a filesystem/URI-safe stem from a display name.
+ * Replaces any character that is not alphanumeric or '-' with '_'.
+ * Example: "Grungy test" → "Grungy_test" */
+static void make_stem(const char *name, char *stem, size_t sz)
+{
+    size_t i = 0;
+    for (const char *p = name; *p && i < sz - 1; p++, i++) {
+        unsigned char c = (unsigned char)*p;
+        stem[i] = ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                   (c >= '0' && c <= '9') || c == '-') ? (char)c : '_';
+    }
+    stem[i] = '\0';
+}
+
 /* ─── Init ───────────────────────────────────────────────────────────────────── */
 
 void pb_init(pedalboard_t *pb)
@@ -602,6 +616,11 @@ static int pb_save_manifest(pedalboard_t *pb)
     FILE *f = fopen(manifest_path, "w");
     if (!f) return -1;
 
+    /* Use a URI-safe stem (no spaces) for the TTL filename in the manifest.
+     * The display name (which may contain spaces) lives in doap:name in the TTL. */
+    char stem[PB_NAME_MAX];
+    make_stem(pb->name, stem, sizeof(stem));
+
     /* Format matches mod-ui manifest exactly:
      *   - minimal prefixes (ingen, lv2, pedal, rdfs only)
      *   - rdfs:seeAlso <Name.ttl>  (mod-ui uses this to find the main TTL)
@@ -618,7 +637,7 @@ static int pb_save_manifest(pedalboard_t *pb)
         "        ingen:Graph ,\n"
         "        pedal:Pedalboard ;\n"
         "    rdfs:seeAlso <%s.ttl> .\n",
-        pb->name, pb->name);
+        stem, stem);
 
     fclose(f);
     return 0;
@@ -632,8 +651,12 @@ int pb_save(pedalboard_t *pb)
 
     if (pb_save_manifest(pb) < 0) return -1;
 
+    /* TTL filename uses the URI-safe stem; doap:name inside the file keeps
+     * the full display name (may contain spaces). */
+    char stem[PB_NAME_MAX];
+    make_stem(pb->name, stem, sizeof(stem));
     char ttl_path[PB_PATH_MAX];
-    snprintf(ttl_path, sizeof(ttl_path), "%s/%s.ttl", pb->path, pb->name);
+    snprintf(ttl_path, sizeof(ttl_path), "%s/%s.ttl", pb->path, stem);
     if (pb_save_ttl(pb, ttl_path) < 0) return -1;
 
     char snap_path[PB_PATH_MAX];
@@ -903,5 +926,35 @@ void pb_snapshot_rename(pedalboard_t *pb, int index, const char *name)
 {
     if (index < 0 || index >= pb->snapshot_count) return;
     snprintf(pb->snapshots[index].name, sizeof(pb->snapshots[index].name), "%s", name);
+    pb->modified = true;
+}
+
+void pb_snapshot_move(pedalboard_t *pb, int from_idx, int to_idx)
+{
+    if (from_idx == to_idx) return;
+    if (from_idx < 0 || from_idx >= pb->snapshot_count) return;
+    if (to_idx   < 0 || to_idx   >= pb->snapshot_count) return;
+
+    pb_snapshot_t tmp = pb->snapshots[from_idx];
+    if (from_idx < to_idx)
+        memmove(&pb->snapshots[from_idx], &pb->snapshots[from_idx + 1],
+                (to_idx - from_idx) * sizeof(pb_snapshot_t));
+    else
+        memmove(&pb->snapshots[to_idx + 1], &pb->snapshots[to_idx],
+                (from_idx - to_idx) * sizeof(pb_snapshot_t));
+    pb->snapshots[to_idx] = tmp;
+
+    /* Adjust current_snapshot index to follow its snapshot */
+    if (pb->current_snapshot == from_idx) {
+        pb->current_snapshot = to_idx;
+    } else if (from_idx < to_idx &&
+               pb->current_snapshot > from_idx &&
+               pb->current_snapshot <= to_idx) {
+        pb->current_snapshot--;
+    } else if (from_idx > to_idx &&
+               pb->current_snapshot >= to_idx &&
+               pb->current_snapshot < from_idx) {
+        pb->current_snapshot++;
+    }
     pb->modified = true;
 }

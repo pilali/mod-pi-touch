@@ -349,6 +349,7 @@ void ui_plugin_browser_show(lv_obj_t *parent)
     lv_obj_set_size(g_keyboard, LV_PCT(100), LV_VER_RES / 3);
     lv_obj_align(g_keyboard, LV_ALIGN_BOTTOM_MID, 0, 0);
     lv_obj_add_flag(g_keyboard, LV_OBJ_FLAG_HIDDEN);
+    ui_app_keyboard_apply_lang(g_keyboard);
     lv_obj_add_event_cb(g_keyboard, keyboard_ready_cb, LV_EVENT_READY,  NULL);
     lv_obj_add_event_cb(g_keyboard, keyboard_ready_cb, LV_EVENT_CANCEL, NULL);
 

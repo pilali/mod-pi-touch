@@ -44,3 +44,6 @@ void bank_delete(bank_list_t *list, int bank_idx);
 
 /* Move a pedal within a bank (reorder). */
 void bank_move_pedal(bank_list_t *list, int bank_idx, int from_idx, int to_idx);
+
+/* Update all bundle paths that match old_path to new_path (for pedalboard rename). */
+void bank_update_bundle_path(bank_list_t *list, const char *old_path, const char *new_path);

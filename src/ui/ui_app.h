@@ -64,6 +64,10 @@ lv_obj_t *ui_app_content_area(void);
 /* Refresh persistent UI text after a language change, then rebuild current screen. */
 void ui_app_apply_language(void);
 
+/* Apply the locale-appropriate keyboard layout to an already-created keyboard.
+ * Call immediately after lv_keyboard_create(). */
+void ui_app_keyboard_apply_lang(lv_obj_t *kbd);
+
 /* Global theme colors */
 extern lv_color_t UI_COLOR_BG;
 extern lv_color_t UI_COLOR_SURFACE;

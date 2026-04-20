@@ -155,6 +155,18 @@ void bank_delete(bank_list_t *list, int bank_idx)
     list->bank_count--;
 }
 
+void bank_update_bundle_path(bank_list_t *list, const char *old_path, const char *new_path)
+{
+    for (int bi = 0; bi < list->bank_count; bi++) {
+        bank_t *bank = &list->banks[bi];
+        for (int pi = 0; pi < bank->pedal_count; pi++) {
+            if (strcmp(bank->pedals[pi].bundle, old_path) == 0)
+                snprintf(bank->pedals[pi].bundle, sizeof(bank->pedals[pi].bundle),
+                         "%s", new_path);
+        }
+    }
+}
+
 void bank_move_pedal(bank_list_t *list, int bank_idx, int from_idx, int to_idx)
 {
     if (bank_idx < 0 || bank_idx >= list->bank_count) return;

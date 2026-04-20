@@ -1589,10 +1589,28 @@ void ui_pedalboard_load(const char *bundle_path,
         }
     }
 
-    /* Note: host_state_load() was removed.  All control port values are sent
-     * individually via host_param_set() above, and file paths via
-     * host_patch_set().  host_state_load() was redundant and consistently
-     * timed out (10 s) on Pi hardware, blocking the splash screen. */
+    /* Apply the current snapshot on top of the TTL base values.
+     * This restores parameter values (including patch:set file paths) that
+     * were saved with the snapshot but may differ from the TTL base state. */
+    if (g_pedalboard.current_snapshot >= 0 &&
+        g_pedalboard.current_snapshot < g_pedalboard.snapshot_count) {
+        int sidx = g_pedalboard.current_snapshot;
+        pb_snapshot_load(&g_pedalboard, sidx);          /* update in-memory values */
+        pb_snapshot_t *snap = &g_pedalboard.snapshots[sidx];
+        for (int i = 0; i < snap->plugin_count; i++) {
+            snap_plugin_t *sp = &snap->plugins[i];
+            pb_plugin_t *plug = pb_find_plugin_by_symbol(&g_pedalboard, sp->symbol);
+            if (!plug) continue;
+            host_bypass(plug->instance_id, sp->bypassed);
+            for (int j = 0; j < sp->param_count; j++)
+                host_param_set(plug->instance_id, sp->params[j].symbol,
+                               sp->params[j].value);
+            for (int j = 0; j < sp->patch_param_count; j++)
+                if (sp->patch_params[j].path[0])
+                    host_patch_set(plug->instance_id, sp->patch_params[j].uri,
+                                   sp->patch_params[j].path);
+        }
+    }
 
     /* Marshal LVGL calls to the main thread — ui_pedalboard_load() may be
      * called from a background thread (boot auto-load).  Touching LVGL
@@ -1628,7 +1646,14 @@ void ui_pedalboard_save_snapshot(void)
 
     pb_snapshot_overwrite(&g_pedalboard, idx);
 
-    /* Save only snapshots.json (not the full TTL) */
+    /* Save full TTL so the base state matches the current live state.
+     * This mirrors mod-ui behaviour: saving a snapshot also persists
+     * parameter values (including patch:set file paths) to the bundle. */
+    if (pb_save(&g_pedalboard) < 0) {
+        ui_app_show_toast_error(TR(TR_MSG_SNAP_SAVE_FAIL));
+        return;
+    }
+
     char snap_path[1024];
     snprintf(snap_path, sizeof(snap_path), "%s/snapshots.json", g_pedalboard.path);
     if (snapshot_save(snap_path, g_pedalboard.snapshots,

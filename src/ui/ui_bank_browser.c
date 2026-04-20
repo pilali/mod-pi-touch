@@ -792,14 +792,6 @@ void ui_bank_browser_show(lv_obj_t *parent)
     lv_obj_set_style_pad_all(hdr, 6, 0);
     lv_obj_set_style_pad_column(hdr, 10, 0);
 
-    lv_obj_t *btn_back = lv_btn_create(hdr);
-    lv_obj_set_size(btn_back, 90, 34);
-    lv_obj_set_style_bg_color(btn_back, UI_COLOR_PRIMARY, 0);
-    lv_obj_t *lbl_back = lv_label_create(btn_back);
-    lv_label_set_text_fmt(lbl_back, LV_SYMBOL_LEFT " %s", TR(TR_BACK));
-    lv_obj_center(lbl_back);
-    lv_obj_add_event_cb(btn_back, back_cb, LV_EVENT_CLICKED, NULL);
-
     lv_obj_t *hdr_lbl = lv_label_create(hdr);
     lv_label_set_text(hdr_lbl, TR(TR_BANK_TITLE));
     lv_obj_set_style_text_color(hdr_lbl, UI_COLOR_TEXT, 0);

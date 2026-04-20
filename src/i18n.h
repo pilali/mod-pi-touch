@@ -34,6 +34,11 @@ typedef enum {
     TR_MENU_SAVE_SNAP,
     TR_MENU_DELETE_SNAP,
     TR_MENU_DELETE_PB,
+    TR_MENU_RENAME_PB,
+    TR_MENU_NEW_SNAP,
+    TR_MENU_REORDER_SNAPS,
+    TR_SNAP_REORDER_TITLE,
+    TR_CONFIRM_RENAME_PB,
 
     /* Confirm / message dialogs */
     TR_CONFIRM_SAVE_PB,           /* no %s */

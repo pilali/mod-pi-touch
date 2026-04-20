@@ -23,6 +23,11 @@ static const char * const g_en[TR_COUNT] = {
     /* TR_MENU_SAVE_SNAP */        "Save snapshot",
     /* TR_MENU_DELETE_SNAP */      "Delete snapshot",
     /* TR_MENU_DELETE_PB */        "Delete pedalboard",
+    /* TR_MENU_RENAME_PB */        "Rename pedalboard",
+    /* TR_MENU_NEW_SNAP */         "New snapshot",
+    /* TR_MENU_REORDER_SNAPS */    "Reorder snapshots",
+    /* TR_SNAP_REORDER_TITLE */    "Reorder snapshots",
+    /* TR_CONFIRM_RENAME_PB */     "Rename \"%s\"?",
 
     /* TR_CONFIRM_SAVE_PB */       "Overwrite the pedalboard on disk?",
     /* TR_CONFIRM_SAVE_SNAP */     "Overwrite snapshot \"%s\" with current state?",
@@ -200,6 +205,11 @@ static const char * const g_fr[TR_COUNT] = {
     /* TR_MENU_SAVE_SNAP */        "Enregistrer le snapshot",
     /* TR_MENU_DELETE_SNAP */      "Supprimer le snapshot",
     /* TR_MENU_DELETE_PB */        "Supprimer le pedalboard",
+    /* TR_MENU_RENAME_PB */        "Renommer le pedalboard",
+    /* TR_MENU_NEW_SNAP */         "Nouveau snapshot",
+    /* TR_MENU_REORDER_SNAPS */    "R\xc3\xa9organiser les snapshots",
+    /* TR_SNAP_REORDER_TITLE */    "R\xc3\xa9organiser les snapshots",
+    /* TR_CONFIRM_RENAME_PB */     "Renommer \"%s\" ?",
 
     /* TR_CONFIRM_SAVE_PB */       "\xc3\x89" "craser le pedalboard sur le disque ?",
     /* TR_CONFIRM_SAVE_SNAP */     "\xc3\x89" "craser le snapshot \"%s\" avec l'\xc3\xa9tat actuel ?",

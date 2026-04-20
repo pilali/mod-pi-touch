@@ -165,3 +165,4 @@ int  pb_snapshot_overwrite(pedalboard_t *pb, int index);   /* update slot with l
 int  pb_snapshot_load(pedalboard_t *pb, int index);
 void pb_snapshot_delete(pedalboard_t *pb, int index);
 void pb_snapshot_rename(pedalboard_t *pb, int index, const char *name);
+void pb_snapshot_move(pedalboard_t *pb, int from_idx, int to_idx);

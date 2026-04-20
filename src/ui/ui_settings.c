@@ -514,6 +514,7 @@ static void wifi_pw_ta_focused_cb(lv_event_t *e)
         g_wifi_kbd = lv_keyboard_create(lv_scr_act());
         lv_obj_set_size(g_wifi_kbd, LV_PCT(100), LV_PCT(45));
         lv_obj_align(g_wifi_kbd, LV_ALIGN_BOTTOM_MID, 0, 0);
+        ui_app_keyboard_apply_lang(g_wifi_kbd);
     }
     lv_keyboard_set_textarea(g_wifi_kbd, ta);
     lv_obj_clear_flag(g_wifi_kbd, LV_OBJ_FLAG_HIDDEN);
@@ -848,14 +849,6 @@ void ui_settings_show(lv_obj_t *parent)
     lv_obj_set_style_pad_all(hdr, 0, 0);
     lv_obj_set_style_pad_column(hdr, 8, 0);
     lv_obj_clear_flag(hdr, LV_OBJ_FLAG_SCROLLABLE);
-
-    lv_obj_t *btn_back = lv_btn_create(hdr);
-    lv_obj_set_size(btn_back, 80, 36);
-    lv_obj_set_style_bg_color(btn_back, UI_COLOR_PRIMARY, 0);
-    lv_obj_t *lbl_back = lv_label_create(btn_back);
-    lv_label_set_text_fmt(lbl_back, LV_SYMBOL_LEFT " %s", TR(TR_BACK));
-    lv_obj_center(lbl_back);
-    lv_obj_add_event_cb(btn_back, back_cb, LV_EVENT_CLICKED, NULL);
 
     lv_obj_t *hdr_lbl = lv_label_create(hdr);
     lv_label_set_text(hdr_lbl, TR(TR_SETTINGS_TITLE));
