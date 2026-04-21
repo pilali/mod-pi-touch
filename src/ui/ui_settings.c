@@ -5,6 +5,7 @@
 #include "../settings.h"
 #include "../i18n.h"
 #include "../host_comm.h"
+#include "../pre_fx.h"
 #include "../hw_detect.h"
 #include "../wifi_manager.h"
 
@@ -135,6 +136,38 @@ static lv_obj_t *add_dropdown_row(lv_obj_t *parent, const char *label,
 
 /* ─── Audio section ──────────────────────────────────────────────────────────── */
 
+/* Background thread: wait for JACK + mod-host to come back after a restart,
+ * then reconnect and reload the current pedalboard. */
+typedef struct {
+    char pb_path[512];
+    bool pb_loaded;
+} jack_restart_ctx_t;
+
+static void *jack_restart_thread(void *arg)
+{
+    jack_restart_ctx_t *ctx = arg;
+
+    /* JACK + mod-host need a few seconds to fully restart */
+    sleep(6);
+
+    if (host_comm_reconnect() != 0) {
+        fprintf(stderr, "[settings] JACK restart: mod-host reconnect timed out\n");
+        free(ctx);
+        return NULL;
+    }
+
+    pre_fx_init();
+
+    if (ctx->pb_loaded && ctx->pb_path[0]) {
+        ui_pedalboard_load(ctx->pb_path, NULL, NULL);
+    } else {
+        pre_fx_reload();
+    }
+
+    free(ctx);
+    return NULL;
+}
+
 static void apply_audio_cb(lv_event_t *e)
 {
     (void)e;
@@ -157,10 +190,24 @@ static void apply_audio_cb(lv_event_t *e)
     s->jack_bit_depth = (lv_dropdown_get_selected(g_dd_bits) == 0) ? 16 : 24;
 
     settings_save_prefs(s);
+
+    /* Capture current pedalboard path before tearing down */
+    jack_restart_ctx_t *ctx = calloc(1, sizeof(*ctx));
+    pedalboard_t *pb = ui_pedalboard_get();
+    if (pb && pb->path[0]) {
+        snprintf(ctx->pb_path, sizeof(ctx->pb_path), "%s", pb->path);
+        ctx->pb_loaded = true;
+    }
+
+    /* Cleanly close our JACK client before killing jackd */
+    pre_fx_fini();
+
     settings_apply_jack(s);
 
-    if (ui_pedalboard_is_loaded())
-        ui_pedalboard_refresh();
+    /* Reconnect in background — JACK + mod-host take several seconds to restart */
+    pthread_t tid;
+    pthread_create(&tid, NULL, jack_restart_thread, ctx);
+    pthread_detach(tid);
 
     ui_app_show_toast(TR(TR_SETTINGS_JACK_RESTARTING));
 }

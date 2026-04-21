@@ -33,6 +33,10 @@ int  host_comm_connect(const char *addr, int cmd_port, int fb_port,
 /* Disconnect and free all resources. Blocks until the feedback thread exits. */
 void host_comm_disconnect(void);
 
+/* Disconnect then reconnect using saved addr/ports/callback (up to 60 s retry).
+ * Returns 0 on success, -1 on timeout. */
+int host_comm_reconnect(void);
+
 /* True if the command socket is connected. */
 bool host_comm_is_connected(void);
 

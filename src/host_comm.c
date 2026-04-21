@@ -29,6 +29,11 @@ typedef struct {
     int    fb_fd;
     bool   connected;
 
+    /* Connection parameters — saved for reconnect */
+    char host_addr[64];
+    int  cmd_port;
+    int  fb_port;
+
     /* Command socket mutex + pending response queue */
     pthread_mutex_t cmd_mutex;
     pending_t       pending[PENDING_MAX];
@@ -289,6 +294,9 @@ int host_comm_try_connect(const char *addr, int cmd_port, int fb_port,
     g_host.connected    = true;
     g_host.pending_head = 0;
     g_host.pending_tail = 0;
+    snprintf(g_host.host_addr, sizeof(g_host.host_addr), "%s", addr);
+    g_host.cmd_port = cmd_port;
+    g_host.fb_port  = fb_port;
 
     pthread_create(&g_host.fb_thread, NULL, fb_thread_func, &g_host);
     printf("[host_comm] Connected to mod-host %s cmd:%d fb:%d\n", addr, cmd_port, fb_port);
@@ -324,6 +332,25 @@ void host_comm_disconnect(void)
 
     pthread_mutex_destroy(&g_host.cmd_mutex);
     g_host.connected = false;
+}
+
+/* Disconnect (if connected) and reconnect using saved addr/ports/callback.
+ * Retries for up to 60 s (120 × 500 ms).  Returns 0 on success. */
+int host_comm_reconnect(void)
+{
+    char addr[64];
+    int  cp = g_host.cmd_port, fp = g_host.fb_port;
+    host_feedback_cb_t cb = g_host.feedback_cb;
+    void *ud = g_host.feedback_ud;
+    snprintf(addr, sizeof(addr), "%s", g_host.host_addr);
+
+    host_comm_disconnect();
+
+    for (int i = 0; i < 120; i++) {
+        if (host_comm_try_connect(addr, cp, fp, cb, ud) == 0) return 0;
+        usleep(500000);
+    }
+    return -1;
 }
 
 bool host_comm_is_connected(void)
