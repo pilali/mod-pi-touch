@@ -105,6 +105,7 @@ static const char * const g_en[TR_COUNT] = {
     /* TR_CONDUCTOR_PLAY */        "Play",
     /* TR_CONDUCTOR_STOP */        "Stop",
     /* TR_CONDUCTOR_TAP */         "Tap",
+    /* TR_CONDUCTOR_DENOM */       "Denominator",
 
     /* TR_PREFX_TITLE */           "Pre-FX",
     /* TR_PREFX_TUNER */           "Tuner",
@@ -288,6 +289,7 @@ static const char * const g_fr[TR_COUNT] = {
     /* TR_CONDUCTOR_PLAY */        "Jouer",
     /* TR_CONDUCTOR_STOP */        "Arr\xc3\xaater",
     /* TR_CONDUCTOR_TAP */         "Tap",
+    /* TR_CONDUCTOR_DENOM */       "D\xc3\xa9nominateur",
 
     /* TR_PREFX_TITLE */           "Pr\xc3\xa9-FX",
     /* TR_PREFX_TUNER */           "Accordeur",

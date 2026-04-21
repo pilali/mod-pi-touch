@@ -228,18 +228,29 @@ int settings_apply_jack(const mpt_settings_t *s)
         return -1;
     }
 
-    /* Build a jackd command from current settings.
-     * -S forces 16-bit (shorts); without it jackd uses the device's native
-     * depth (typically 24 or 32 bit internally). */
-    const char *shortflag = (s->jack_bit_depth == 16) ? "-S " : "";
-    char cmd[512];
-    snprintf(cmd, sizeof(cmd),
-             "pkill -f jackd 2>/dev/null; sleep 1; "
-             "jackd -P 70 -d alsa -d %s -r 48000 -p %d -n 3 %s"
-             "> /tmp/jackd.log 2>&1 &",
-             s->jack_audio_device, s->jack_buffer_size, shortflag);
-    fprintf(stderr, "[settings] JACK restart: %s\n", cmd);
-    return system(cmd);
+    /* Write new /etc/jackdrc so the change survives reboots.
+     * Use a temp file to avoid partial writes, then sudo-copy. */
+    const char *shortflag = (s->jack_bit_depth == 16) ? " -S" : "";
+    FILE *f = fopen("/tmp/jackdrc_new", "w");
+    if (!f) {
+        fprintf(stderr, "[settings] Cannot write /tmp/jackdrc_new\n");
+        return -1;
+    }
+    fprintf(f,
+            "#!/bin/sh\n"
+            "exec env JACK_DRIVER_DIR=/usr/local/lib/jack "
+            "/usr/local/bin/jackd -t 2000 -R -P 95 -d alsa -d %s "
+            "-r 48000 -p %d -n 2 -X seq -s%s\n",
+            s->jack_audio_device, s->jack_buffer_size, shortflag);
+    fclose(f);
+
+    /* Install jackdrc and restart service */
+    int r = system("sudo cp /tmp/jackdrc_new /etc/jackdrc"
+                   " && sudo systemctl restart jack");
+    fprintf(stderr, "[settings] JACK restart (buf=%d dev=%s): %s\n",
+            s->jack_buffer_size, s->jack_audio_device,
+            r == 0 ? "ok" : "failed");
+    return r;
 }
 
 mpt_settings_t *settings_get(void)

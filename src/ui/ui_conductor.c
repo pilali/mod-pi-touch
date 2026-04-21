@@ -13,13 +13,16 @@
 
 /* ─── State ──────────────────────────────────────────────────────────────────── */
 
-static lv_obj_t *g_overlay    = NULL;
-static lv_obj_t *g_bpm_label  = NULL;
-static lv_obj_t *g_bpb_label  = NULL;
-static lv_obj_t *g_btn_play   = NULL;
-static lv_obj_t *g_btn_stop   = NULL;
-static lv_obj_t *g_btn_int    = NULL;   /* Internal clock toggle */
-static lv_obj_t *g_btn_midi   = NULL;   /* MIDI slave toggle */
+static lv_obj_t *g_overlay       = NULL;
+static lv_obj_t *g_bpm_label     = NULL;
+static lv_obj_t *g_bpb_label     = NULL;
+static lv_obj_t *g_bpb_denom_label = NULL;
+static lv_obj_t *g_btn_play      = NULL;
+static lv_obj_t *g_btn_stop      = NULL;
+static lv_obj_t *g_btn_int       = NULL;   /* Internal clock toggle */
+static lv_obj_t *g_btn_midi      = NULL;   /* MIDI slave toggle */
+
+static int g_bpb_denom = 4;   /* time signature denominator (2/4/8/16) */
 
 /* Tap tempo: up to 8 taps, compute average interval */
 #define TAP_MAX 8
@@ -51,8 +54,16 @@ static void refresh_bpb_label(float bpb)
 {
     if (!g_bpb_label) return;
     char buf[16];
-    snprintf(buf, sizeof(buf), "%.0f / 4", bpb);
+    snprintf(buf, sizeof(buf), "%.0f / %d", bpb, g_bpb_denom);
     lv_label_set_text(g_bpb_label, buf);
+}
+
+static void refresh_bpb_denom_label(void)
+{
+    if (!g_bpb_denom_label) return;
+    char buf[8];
+    snprintf(buf, sizeof(buf), "%d", g_bpb_denom);
+    lv_label_set_text(g_bpb_denom_label, buf);
 }
 
 /* ─── Highlight play/stop buttons depending on rolling state ─────────────────── */
@@ -183,6 +194,37 @@ static void bpb_plus_cb(lv_event_t *e)
     apply_transport();
 }
 
+static const int s_denoms[] = {2, 4, 8, 16};
+static const int s_ndenom   = 4;
+
+static void bpb_denom_minus_cb(lv_event_t *e)
+{
+    (void)e;
+    for (int i = 1; i < s_ndenom; i++) {
+        if (s_denoms[i] == g_bpb_denom) {
+            g_bpb_denom = s_denoms[i - 1];
+            break;
+        }
+    }
+    pedalboard_t *pb = ui_pedalboard_get();
+    refresh_bpb_label(pb ? pb->bpb : 4.0f);
+    refresh_bpb_denom_label();
+}
+
+static void bpb_denom_plus_cb(lv_event_t *e)
+{
+    (void)e;
+    for (int i = 0; i < s_ndenom - 1; i++) {
+        if (s_denoms[i] == g_bpb_denom) {
+            g_bpb_denom = s_denoms[i + 1];
+            break;
+        }
+    }
+    pedalboard_t *pb = ui_pedalboard_get();
+    refresh_bpb_label(pb ? pb->bpb : 4.0f);
+    refresh_bpb_denom_label();
+}
+
 static void play_cb(lv_event_t *e)
 {
     (void)e;
@@ -292,8 +334,8 @@ static lv_obj_t *make_inc_row(lv_obj_t *parent,
     lv_obj_center(l); \
 } while(0)
 
-    if (minus10) { MAKE_BTN("−10", 70, minus10); }
-    MAKE_BTN("−", 54, minus1);
+    if (minus10) { MAKE_BTN("-10", 70, minus10); }
+    MAKE_BTN("-", 54, minus1);
 
     /* Value label — flex-grow to fill center */
     lv_obj_t *val = lv_label_create(row);
@@ -406,11 +448,25 @@ void ui_conductor_open(void)
         lv_obj_t *sec = make_section(panel, TR(TR_CONDUCTOR_TIME_SIG));
 
         char bpb_str[16];
-        snprintf(bpb_str, sizeof(bpb_str), "%.0f / 4", bpb);
+        snprintf(bpb_str, sizeof(bpb_str), "%.0f / %d", bpb, g_bpb_denom);
         make_inc_row(sec,
                      NULL, bpb_minus_cb,
                      bpb_plus_cb, NULL,
                      bpb_str, &g_bpb_label);
+
+        char denom_str[8];
+        snprintf(denom_str, sizeof(denom_str), "%d", g_bpb_denom);
+        make_inc_row(sec,
+                     NULL, bpb_denom_minus_cb,
+                     bpb_denom_plus_cb, NULL,
+                     denom_str, &g_bpb_denom_label);
+
+        lv_obj_t *denom_hint = lv_label_create(sec);
+        lv_label_set_text(denom_hint, TR(TR_CONDUCTOR_DENOM));
+        lv_obj_set_style_text_color(denom_hint, UI_COLOR_TEXT_DIM, 0);
+        lv_obj_set_style_text_font(denom_hint, &lv_font_montserrat_14, 0);
+        lv_obj_set_style_text_align(denom_hint, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_width(denom_hint, LV_PCT(100));
     }
 
     /* ── Clock source section ── */
@@ -492,13 +548,14 @@ void ui_conductor_close(void)
 {
     if (!g_overlay) return;
     lv_obj_delete_async(g_overlay);
-    g_overlay   = NULL;
-    g_bpm_label = NULL;
-    g_bpb_label = NULL;
-    g_btn_play  = NULL;
-    g_btn_stop  = NULL;
-    g_btn_int   = NULL;
-    g_btn_midi  = NULL;
+    g_overlay         = NULL;
+    g_bpm_label       = NULL;
+    g_bpb_label       = NULL;
+    g_bpb_denom_label = NULL;
+    g_btn_play        = NULL;
+    g_btn_stop        = NULL;
+    g_btn_int         = NULL;
+    g_btn_midi        = NULL;
 }
 
 void ui_conductor_refresh(void)

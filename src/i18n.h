@@ -125,6 +125,7 @@ typedef enum {
     TR_CONDUCTOR_PLAY,
     TR_CONDUCTOR_STOP,
     TR_CONDUCTOR_TAP,
+    TR_CONDUCTOR_DENOM,
 
     /* Pre-FX (Tuner + Noise Gate) */
     TR_PREFX_TITLE,

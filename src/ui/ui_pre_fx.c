@@ -90,7 +90,7 @@ static void tuner_refresh_cb(lv_timer_t *t)
     } else {
         char notebuf[16];
         snprintf(notebuf, sizeof(notebuf), "%s %d",
-                 s_note_names[data.note & 11], data.octave);
+                 s_note_names[data.note % 12], data.octave);
         lv_label_set_text(g_note_label, notebuf);
 
         char freqbuf[32];
