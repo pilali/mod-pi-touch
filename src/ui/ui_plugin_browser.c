@@ -104,6 +104,16 @@ static void *add_plugin_thread(void *arg)
 {
     add_plugin_ctx_t *ctx = arg;
     ctx->result = host_add_plugin(ctx->instance_id, ctx->uri);
+    if (ctx->result >= 0) {
+        /* Subscribe to output port monitoring so VU meters update in real time */
+        const pm_plugin_info_t *info = pm_plugin_by_uri(ctx->uri);
+        if (info) {
+            for (int i = 0; i < info->port_count; i++) {
+                if (info->ports[i].type == PM_PORT_CONTROL_OUT)
+                    host_monitor_output(ctx->instance_id, info->ports[i].symbol);
+            }
+        }
+    }
     lv_async_call(add_plugin_done, ctx);
     return NULL;
 }

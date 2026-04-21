@@ -10,6 +10,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <math.h>
+#include <stdatomic.h>
 
 /* ─── File type → (user-files subdir, extensions[]) mapping ─────────────────── */
 typedef struct {
@@ -135,6 +136,8 @@ static char                g_user_files_dir[512] = {0};
 
 static lv_obj_t           *g_modal      = NULL;
 static int                 g_instance   = -1;
+/* Atomic mirror of g_instance — safe to read from the feedback thread. */
+static _Atomic int         g_active_instance = -1;
 static bool                g_enabled    = true;
 static bypass_toggle_cb_t  g_bypass_cb  = NULL;
 static void               *g_bypass_ud  = NULL;
@@ -153,6 +156,9 @@ static int                 g_bypass_midi_cc  = -1;
 
 /* Symbol currently in MIDI learn mode ("" = none) */
 static char g_learning_symbol[PB_SYMBOL_MAX] = {0};
+
+/* Timer that refreshes output port meters at ~10 Hz */
+static lv_timer_t *g_meter_timer = NULL;
 
 /* ─── Helpers ─────────────────────────────────────────────────────────────────── */
 
@@ -395,9 +401,11 @@ static void close_cb(lv_event_t *e)
      * synchronously from a child's event callback causes LVGL to access
      * freed memory while still dispatching the event. */
     if (g_modal) {
+        if (g_meter_timer) { lv_timer_pause(g_meter_timer); }
         lv_obj_delete_async(g_modal);
         g_modal              = NULL;
         g_instance           = -1;
+        atomic_store(&g_active_instance, -1);
         g_ctrl_count         = 0;
         g_patch_param_count  = 0;
         g_midi_chip_ud_count = 0;
@@ -436,6 +444,21 @@ static lv_obj_t *make_name_lbl(lv_obj_t *card, const char *name)
     return lbl;
 }
 
+/* ─── Meter refresh timer (runs on LVGL thread at ~10 Hz) ──────────────────── */
+
+static void meter_timer_cb(lv_timer_t *t)
+{
+    (void)t;
+    if (!g_modal || g_instance < 0) return;
+    for (int i = 0; i < g_ctrl_count; i++) {
+        ctrl_reg_t *reg = &g_controls[i];
+        if (reg->type != CTRL_METER || !reg->meter_bar) continue;
+        float cur = 0.0f;
+        if (ui_pedalboard_get_output(g_instance, reg->symbol, &cur))
+            ui_param_editor_update_output(reg->symbol, cur);
+    }
+}
+
 /* ─── Public API ─────────────────────────────────────────────────────────────── */
 
 void ui_param_editor_show(int instance_id,
@@ -452,6 +475,7 @@ void ui_param_editor_show(int instance_id,
     if (g_modal) ui_param_editor_close();
 
     g_instance          = instance_id;
+    atomic_store(&g_active_instance, instance_id);
     g_enabled           = enabled;
     g_bypass_cb         = bypass_cb;
     g_bypass_ud         = bypass_ud;
@@ -863,14 +887,22 @@ void ui_param_editor_show(int instance_id,
             }
         }
     }
+
+    /* Start meter refresh timer (100 ms = 10 Hz) */
+    if (!g_meter_timer)
+        g_meter_timer = lv_timer_create(meter_timer_cb, 100, NULL);
+    else
+        lv_timer_resume(g_meter_timer);
 }
 
 void ui_param_editor_close(void)
 {
     if (g_modal) {
+        if (g_meter_timer) { lv_timer_pause(g_meter_timer); }
         lv_obj_del(g_modal);
         g_modal              = NULL;
         g_instance           = -1;
+        atomic_store(&g_active_instance, -1);
         g_ctrl_count         = 0;
         g_patch_param_count  = 0;
         g_midi_chip_ud_count = 0;
@@ -918,7 +950,7 @@ void ui_param_editor_update(const char *symbol, float value)
 
 int ui_param_editor_instance(void)
 {
-    return g_modal ? g_instance : -1;
+    return atomic_load(&g_active_instance);
 }
 
 void ui_param_editor_update_output(const char *symbol, float value)

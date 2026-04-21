@@ -105,52 +105,6 @@ static int parse_response(const char *line, char *val_buf, size_t val_sz)
     return status;
 }
 
-/* ─── Feedback thread ────────────────────────────────────────────────────────── */
-
-static void *fb_thread_func(void *arg)
-{
-    host_state_t *h = (host_state_t *)arg;
-    char buf[4096];
-    int  buf_len = 0;
-
-    while (h->fb_running) {
-        fd_set rfds;
-        FD_ZERO(&rfds);
-        FD_SET(h->fb_fd, &rfds);
-        struct timeval tv = {.tv_sec = 0, .tv_usec = 100000}; /* 100ms */
-
-        int r = select(h->fb_fd + 1, &rfds, NULL, NULL, &tv);
-        if (r <= 0) continue;
-
-        int n = recv(h->fb_fd, buf + buf_len, sizeof(buf) - buf_len - 1, 0);
-        if (n <= 0) break;
-        buf_len += n;
-        buf[buf_len] = '\0';
-
-        /* Process null-terminated messages.
-         * Use strnlen to stay within received data — a message without a null
-         * terminator would otherwise make strlen scan past buf_len. */
-        char *p = buf;
-        while (p < buf + buf_len) {
-            size_t remaining = (size_t)(buf + buf_len - p);
-            size_t mlen = strnlen(p, remaining);
-            if (mlen == 0) { p++; continue; }
-            if (mlen == remaining) {
-                /* No null terminator yet — incomplete message; wait for more data */
-                break;
-            }
-            if (h->feedback_cb)
-                h->feedback_cb(p, h->feedback_ud);
-            p += mlen + 1;
-        }
-        /* Shift remaining partial data to front of buffer */
-        int leftover = (int)(buf + buf_len - p);
-        if (leftover > 0) memmove(buf, p, (size_t)leftover);
-        buf_len = leftover;
-    }
-    return NULL;
-}
-
 /* ─── Command receive (one response per command, called under cmd_mutex) ─────── */
 
 static int recv_response(int fd, char *val_buf, size_t val_sz, int timeout_ms)
@@ -209,7 +163,112 @@ static int recv_response(int fd, char *val_buf, size_t val_sz, int timeout_ms)
     }
 }
 
+/* ─── Feedback thread ────────────────────────────────────────────────────────── */
+
+static void *fb_thread_func(void *arg)
+{
+    host_state_t *h = (host_state_t *)arg;
+    char buf[4096];
+    int  buf_len = 0;
+    unsigned long msg_count = 0;
+    int idle_ticks = 0; /* 100ms ticks without data — for heartbeat */
+    while (h->fb_running) {
+        fd_set rfds;
+        FD_ZERO(&rfds);
+        FD_SET(h->fb_fd, &rfds);
+        struct timeval tv = {.tv_sec = 0, .tv_usec = 100000}; /* 100ms */
+
+        int r = select(h->fb_fd + 1, &rfds, NULL, NULL, &tv);
+        if (r < 0) {
+            if (errno == EINTR) continue;
+            fprintf(stderr, "[fb_thread] select error: %s\n", strerror(errno));
+            break;
+        }
+        if (r == 0) {
+            /* No data — periodic alive log every 30 s */
+            if (++idle_ticks == 300) {
+                fprintf(stderr, "[fb_thread] alive (msgs=%lu)\n", msg_count);
+                idle_ticks = 0;
+            }
+            continue;
+        }
+        idle_ticks = 0;
+
+        /* Guard: if the buffer is full with no null-terminated message,
+         * recv would be called with count=0 which returns 0 and exits the thread.
+         * Discard and reset instead. */
+        if (buf_len >= (int)sizeof(buf) - 1) {
+            fprintf(stderr, "[fb_thread] buffer full without null — discarding %d bytes\n", buf_len);
+            buf_len = 0;
+            continue;
+        }
+
+        int n = recv(h->fb_fd, buf + buf_len, sizeof(buf) - buf_len - 1, 0);
+        if (n <= 0) {
+            fprintf(stderr, "[fb_thread] recv returned %d (errno=%d %s) — thread exiting after %lu msgs\n",
+                    n, errno, strerror(errno), msg_count);
+            break;
+        }
+
+        buf_len += n;
+        buf[buf_len] = '\0';
+
+        /* Process null-terminated messages.
+         * Use strnlen to stay within received data — a message without a null
+         * terminator would otherwise make strlen scan past buf_len. */
+        char *p = buf;
+        while (p < buf + buf_len) {
+            size_t remaining = (size_t)(buf + buf_len - p);
+            size_t mlen = strnlen(p, remaining);
+            if (mlen == 0) { p++; continue; }
+            if (mlen == remaining) {
+                /* No null terminator yet — incomplete message; wait for more data */
+                break;
+            }
+            /* "data_finish" ends a feedback batch — send output_data_ready on
+             * the cmd socket to re-enable the next batch from mod-host. */
+            if (strcmp(p, "data_finish") == 0) {
+                const char odr[] = "output_data_ready";
+                char obuf[32];
+                memcpy(obuf, odr, sizeof(odr)); /* includes null terminator */
+                pthread_mutex_lock(&h->cmd_mutex);
+                send(h->cmd_fd, obuf, sizeof(odr), 0);
+                char resp[64];
+                recv_response(h->cmd_fd, resp, sizeof(resp), 1000);
+                pthread_mutex_unlock(&h->cmd_mutex);
+            } else if (h->feedback_cb) {
+                h->feedback_cb(p, h->feedback_ud);
+            }
+            msg_count++;
+            p += mlen + 1;
+        }
+        /* Shift remaining partial data to front of buffer */
+        int leftover = (int)(buf + buf_len - p);
+        if (leftover > 0) memmove(buf, p, (size_t)leftover);
+        buf_len = leftover;
+    }
+    fprintf(stderr, "[fb_thread] exited (total msgs dispatched: %lu)\n", msg_count);
+    return NULL;
+}
+
 /* ─── Public API ─────────────────────────────────────────────────────────────── */
+
+/* Call once after all monitor_output calls are in place to kick-start the
+ * feedback loop.  mod-host's PostPonedEventsThread only runs when
+ * g_postevents_ready==true; a previous session may have left it false. */
+int host_output_data_ready(void)
+{
+    if (!host_comm_is_connected()) return -ENOTCONN;
+    const char odr[] = "output_data_ready";
+    char buf[32];
+    memcpy(buf, odr, sizeof(odr));
+    pthread_mutex_lock(&g_host.cmd_mutex);
+    send(g_host.cmd_fd, buf, sizeof(odr), 0);
+    char resp[64];
+    int r = recv_response(g_host.cmd_fd, resp, sizeof(resp), 2000);
+    pthread_mutex_unlock(&g_host.cmd_mutex);
+    return r;
+}
 
 /* Single attempt — no retry.  Returns 0 on success, -1 if connection fails. */
 int host_comm_try_connect(const char *addr, int cmd_port, int fb_port,

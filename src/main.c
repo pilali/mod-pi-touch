@@ -142,7 +142,8 @@ static void *connect_and_load_thread(void *arg)
     /* Auto-load last pedalboard + snapshot */
     FILE *f = fopen(s->last_state_file, "r");
     if (!f) {
-        /* No state file — done */
+        /* No state file — load gate directly (no pedalboard load will do it) */
+        pre_fx_reload();
         ui_splash_update(100, TR(TR_SPLASH_READY));
         ui_splash_hide_async();
         return NULL;

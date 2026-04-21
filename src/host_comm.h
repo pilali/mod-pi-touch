@@ -78,6 +78,8 @@ int host_cpu_load(float *out);
  * mod-host sends "output_set <instance> <symbol> <value>" on port 5556 whenever
  * the port value changes. */
 int host_monitor_output(int instance, const char *symbol);
+/* Kick-start or continue the feedback loop after all monitor_output calls. */
+int host_output_data_ready(void);
 
 /* Send a patch:writable parameter (file path) to a plugin instance.
  * Sends: patch_set <instance> <param_uri> <path> */

@@ -1639,6 +1639,13 @@ void ui_pedalboard_load(const char *bundle_path,
         }
     }
 
+    /* Kick-start the mod-host feedback loop.  All monitor_output calls are now
+     * done; sending output_data_ready sets g_postevents_ready=true so the
+     * PostPonedEventsThread dispatches the initial monitored values.  The
+     * fb_thread will automatically re-send output_data_ready after each
+     * subsequent data_finish to keep the loop going. */
+    host_output_data_ready();
+
     /* Marshal LVGL calls to the main thread — ui_pedalboard_load() may be
      * called from a background thread (boot auto-load).  Touching LVGL
      * objects from a non-LVGL thread causes lv_inv_area assertions and
@@ -1753,15 +1760,6 @@ static void param_editor_async_cb(void *arg)
 
 /* ─── Output port monitoring ─────────────────────────────────────────────────── */
 
-typedef struct { char symbol[PB_SYMBOL_MAX]; float value; } output_async_t;
-
-static void output_update_async(void *arg)
-{
-    output_async_t *d = arg;
-    ui_param_editor_update_output(d->symbol, d->value);
-    free(d);
-}
-
 void ui_pedalboard_set_output(int instance, const char *symbol, float value)
 {
     pthread_mutex_lock(&g_pb_mutex);
@@ -1782,16 +1780,7 @@ void ui_pedalboard_set_output(int instance, const char *symbol, float value)
     if (slot) slot->value = value;
 
     pthread_mutex_unlock(&g_pb_mutex);
-
-    /* Notify the param editor only if it is open for this instance */
-    if (ui_param_editor_instance() == instance) {
-        output_async_t *d = malloc(sizeof(*d));
-        if (d) {
-            snprintf(d->symbol, sizeof(d->symbol), "%s", symbol);
-            d->value = value;
-            lv_async_call(output_update_async, d);
-        }
-    }
+    /* UI update is driven by the meter_timer in ui_param_editor at 10 Hz */
 }
 
 bool ui_pedalboard_get_output(int instance, const char *symbol, float *out)

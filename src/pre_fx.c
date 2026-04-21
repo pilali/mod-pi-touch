@@ -14,7 +14,6 @@
 /* ─── Internal state (noise gate only) ───────────────────────────────────────── */
 static bool            g_loaded     = false;
 static pthread_mutex_t g_load_mutex = PTHREAD_MUTEX_INITIALIZER;
-static pthread_t       g_load_tid;
 
 /* ─── Async gate load thread ─────────────────────────────────────────────────── */
 
@@ -65,8 +64,9 @@ static void *tuner_init_thread(void *arg)
 
 void pre_fx_init(void)
 {
-    /* Gate loads via mod-host in background. */
-    pthread_create(&g_load_tid, NULL, load_thread, NULL);
+    /* Tuner only — gate is loaded by pre_fx_reload() which is called from
+     * ui_pedalboard_load().  Starting the gate here would race with the
+     * pedalboard load's host_remove_all() + pre_fx_reload() sequence. */
 
     /* Tuner: direct JACK + embedded LV2 host.
      * tuna's activate() calls FFTW's planner which recurses deeply and
