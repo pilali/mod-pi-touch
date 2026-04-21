@@ -35,6 +35,13 @@ void ui_param_editor_close(void);
 /* Update a displayed value from host feedback */
 void ui_param_editor_update(const char *symbol, float value);
 
+/* Update a read-only output port meter (called via lv_async_call from
+ * ui_pedalboard_set_output). No-op if the editor is closed or symbol unknown. */
+void ui_param_editor_update_output(const char *symbol, float value);
+
+/* Returns the instance_id currently open in the editor, or -1 if closed. */
+int ui_param_editor_instance(void);
+
 /* Called from the LVGL thread when mod-host confirms a MIDI learn assignment.
  * Updates the MIDI chip label for the matching symbol.
  * ch/cc == -1 signals unmap confirmation. */

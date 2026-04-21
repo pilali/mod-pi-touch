@@ -56,3 +56,9 @@ void ui_pedalboard_on_midi_mapped(int instance_id, const char *symbol,
 /* Accessors */
 pedalboard_t *ui_pedalboard_get(void);
 bool          ui_pedalboard_is_loaded(void);
+
+/* Output port value table — updated by the feedback thread via monitor_output.
+ * set_output: thread-safe; notifies the param editor via lv_async_call if open.
+ * get_output: returns true and fills *out if a value has been received. */
+void ui_pedalboard_set_output(int instance, const char *symbol, float value);
+bool ui_pedalboard_get_output(int instance, const char *symbol, float *out);

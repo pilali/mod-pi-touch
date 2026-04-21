@@ -41,6 +41,8 @@ static void feedback_handler(const char *msg, void *ud)
     if (sscanf(msg, "output_set %d %127s %f", &instance, symbol, &value) == 3) {
         if (instance == PRE_FX_TUNER_INSTANCE)
             pre_fx_on_feedback(instance, symbol, value);
+        else
+            ui_pedalboard_set_output(instance, symbol, value);
         return;
     }
 

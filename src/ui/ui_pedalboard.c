@@ -28,6 +28,16 @@ static bool             g_pb_loaded = false;
  * (which calls ui_pedalboard_update_param) and the main LVGL thread. */
 static pthread_mutex_t  g_pb_mutex  = PTHREAD_MUTEX_INITIALIZER;
 
+/* ─── Output port value table ────────────────────────────────────────────────── */
+#define OUTPUT_VAL_MAX 256
+typedef struct {
+    int   instance;
+    char  symbol[PB_SYMBOL_MAX];
+    float value;
+} output_val_t;
+static output_val_t g_output_vals[OUTPUT_VAL_MAX];
+static int          g_output_val_count = 0;
+
 /* ─── Canvas state ───────────────────────────────────────────────────────────── */
 static lv_obj_t *g_canvas_scroll = NULL; /* scrollable container */
 static lv_obj_t *g_canvas        = NULL; /* actual canvas for connection lines */
@@ -1513,6 +1523,11 @@ static void pb_snapshot_ui_refresh(void *arg)
 void ui_pedalboard_load(const char *bundle_path,
                         pb_progress_cb_t progress_cb, void *progress_ud)
 {
+    /* Reset output value table for the new pedalboard */
+    pthread_mutex_lock(&g_pb_mutex);
+    g_output_val_count = 0;
+    pthread_mutex_unlock(&g_pb_mutex);
+
     pb_init(&g_pedalboard);
     fprintf(stderr, "[ui_pedalboard] loading bundle: %s\n", bundle_path);
     if (pb_load(&g_pedalboard, bundle_path) < 0) {
@@ -1569,6 +1584,18 @@ void ui_pedalboard_load(const char *bundle_path,
                 host_midi_map(plug->instance_id, port->symbol,
                               port->midi_channel, port->midi_cc,
                               port->midi_min, port->midi_max);
+            }
+        }
+
+        /* Subscribe to real-time output port monitoring */
+        {
+            const pm_plugin_info_t *pm_info = pm_plugin_by_uri(plug->uri);
+            if (pm_info) {
+                for (int j = 0; j < pm_info->port_count; j++) {
+                    if (pm_info->ports[j].type == PM_PORT_CONTROL_OUT)
+                        host_monitor_output(plug->instance_id,
+                                            pm_info->ports[j].symbol);
+                }
             }
         }
 
@@ -1722,6 +1749,65 @@ static void param_editor_async_cb(void *arg)
     param_upd_t *upd = arg;
     ui_param_editor_update(upd->sym, upd->val);
     free(upd);
+}
+
+/* ─── Output port monitoring ─────────────────────────────────────────────────── */
+
+typedef struct { char symbol[PB_SYMBOL_MAX]; float value; } output_async_t;
+
+static void output_update_async(void *arg)
+{
+    output_async_t *d = arg;
+    ui_param_editor_update_output(d->symbol, d->value);
+    free(d);
+}
+
+void ui_pedalboard_set_output(int instance, const char *symbol, float value)
+{
+    pthread_mutex_lock(&g_pb_mutex);
+
+    output_val_t *slot = NULL;
+    for (int i = 0; i < g_output_val_count; i++) {
+        if (g_output_vals[i].instance == instance &&
+            strcmp(g_output_vals[i].symbol, symbol) == 0) {
+            slot = &g_output_vals[i];
+            break;
+        }
+    }
+    if (!slot && g_output_val_count < OUTPUT_VAL_MAX) {
+        slot = &g_output_vals[g_output_val_count++];
+        slot->instance = instance;
+        snprintf(slot->symbol, sizeof(slot->symbol), "%s", symbol);
+    }
+    if (slot) slot->value = value;
+
+    pthread_mutex_unlock(&g_pb_mutex);
+
+    /* Notify the param editor only if it is open for this instance */
+    if (ui_param_editor_instance() == instance) {
+        output_async_t *d = malloc(sizeof(*d));
+        if (d) {
+            snprintf(d->symbol, sizeof(d->symbol), "%s", symbol);
+            d->value = value;
+            lv_async_call(output_update_async, d);
+        }
+    }
+}
+
+bool ui_pedalboard_get_output(int instance, const char *symbol, float *out)
+{
+    pthread_mutex_lock(&g_pb_mutex);
+    bool found = false;
+    for (int i = 0; i < g_output_val_count; i++) {
+        if (g_output_vals[i].instance == instance &&
+            strcmp(g_output_vals[i].symbol, symbol) == 0) {
+            if (out) *out = g_output_vals[i].value;
+            found = true;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_pb_mutex);
+    return found;
 }
 
 void ui_pedalboard_update_param(int instance_id, const char *symbol, float value)

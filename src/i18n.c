@@ -83,6 +83,7 @@ static const char * const g_en[TR_COUNT] = {
     /* TR_PARAM_NONE */            "(none)",
     /* TR_PARAM_BROWSE */          " Browse",
     /* TR_PARAM_SELECT_MODEL */    "Select model file",
+    /* TR_PARAM_OUTPUT_PORTS */    "Outputs",
 
     /* TR_FILE_SELECT_TITLE */     "Select file",
     /* TR_FILE_EMPTY */            "(empty)",
@@ -265,6 +266,7 @@ static const char * const g_fr[TR_COUNT] = {
     /* TR_PARAM_NONE */            "(aucun)",
     /* TR_PARAM_BROWSE */          " Parcourir",
     /* TR_PARAM_SELECT_MODEL */    "S\xc3\xa9lectionner un fichier mod\xc3\xa8le",
+    /* TR_PARAM_OUTPUT_PORTS */    "Sorties",
 
     /* TR_FILE_SELECT_TITLE */     "S\xc3\xa9lectionner un fichier",
     /* TR_FILE_EMPTY */            "(vide)",

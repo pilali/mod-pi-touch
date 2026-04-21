@@ -1,4 +1,5 @@
 #include "ui_param_editor.h"
+#include "ui_pedalboard.h"
 #include "ui_file_browser.h"
 #include "ui_app.h"
 #include "../host_comm.h"
@@ -93,22 +94,25 @@ static int resolve_file_types(const char *file_types,
 #define CTRL_ARC    0
 #define CTRL_TOGGLE 1
 #define CTRL_ENUM   2
+#define CTRL_METER  3  /* read-only output port bar */
 
 /* ─── Control registry — static pool, no malloc ─────────────────────────────── */
 #define MAX_CONTROLS 64
 typedef struct {
     char      symbol[PB_SYMBOL_MAX];
-    int       type;           /* CTRL_ARC / CTRL_TOGGLE / CTRL_ENUM */
-    lv_obj_t *widget;         /* arc / switch / dropdown */
-    lv_obj_t *val_lbl;        /* arc: numeric label below knob */
-    float     min, max;       /* arc: physical range */
+    int       type;           /* CTRL_ARC / CTRL_TOGGLE / CTRL_ENUM / CTRL_METER */
+    lv_obj_t *widget;         /* arc / switch / dropdown (NULL for CTRL_METER) */
+    lv_obj_t *val_lbl;        /* numeric label */
+    float     min, max;       /* physical range */
     bool      is_integer;     /* arc: round before sending */
     float     enum_values[16];
     int       enum_count;
-    /* MIDI CC mapping */
-    lv_obj_t *midi_lbl;       /* chip label: "—" or "CC70 ch13" */
-    int       midi_channel;   /* -1 = none */
-    int       midi_cc;        /* -1 = none */
+    /* MIDI CC mapping (unused for CTRL_METER) */
+    lv_obj_t *midi_lbl;
+    int       midi_channel;
+    int       midi_cc;
+    /* CTRL_METER only */
+    lv_obj_t *meter_bar;      /* lv_bar widget */
 } ctrl_reg_t;
 
 static ctrl_reg_t g_controls[MAX_CONTROLS];
@@ -773,6 +777,92 @@ void ui_param_editor_show(int instance_id,
             lv_obj_add_event_cb(browse_btn, on_browse_btn, LV_EVENT_CLICKED, preg);
         }
     }
+
+    /* ── Output port meters (read-only, real-time feedback) ── */
+    if (pm_info) {
+        bool has_out = false;
+        for (int i = 0; i < pm_info->port_count; i++)
+            if (pm_info->ports[i].type == PM_PORT_CONTROL_OUT) { has_out = true; break; }
+
+        if (has_out) {
+            /* Separator line */
+            lv_obj_t *sep = lv_obj_create(scroll);
+            lv_obj_set_size(sep, LV_PCT(95), 1);
+            lv_obj_set_style_bg_color(sep, UI_COLOR_TEXT_DIM, 0);
+            lv_obj_set_style_bg_opa(sep, LV_OPA_COVER, 0);
+            lv_obj_set_style_border_width(sep, 0, 0);
+            lv_obj_set_style_pad_all(sep, 0, 0);
+
+            /* Section title */
+            lv_obj_t *sec_lbl = lv_label_create(scroll);
+            lv_label_set_text(sec_lbl, TR(TR_PARAM_OUTPUT_PORTS));
+            lv_obj_set_style_text_color(sec_lbl, UI_COLOR_TEXT_DIM, 0);
+            lv_obj_set_style_text_font(sec_lbl, &lv_font_montserrat_14, 0);
+
+            for (int i = 0; i < pm_info->port_count && g_ctrl_count < MAX_CONTROLS; i++) {
+                const pm_port_info_t *pm_port = &pm_info->ports[i];
+                if (pm_port->type != PM_PORT_CONTROL_OUT) continue;
+
+                ctrl_reg_t *reg = &g_controls[g_ctrl_count++];
+                memset(reg, 0, sizeof(*reg));
+                snprintf(reg->symbol, sizeof(reg->symbol), "%s", pm_port->symbol);
+                reg->type      = CTRL_METER;
+                reg->min       = pm_port->min;
+                reg->max       = pm_port->max;
+                reg->midi_channel = -1;
+                reg->midi_cc      = -1;
+                if (reg->max <= reg->min) reg->max = reg->min + 1.0f;
+
+                /* Row: [Name 110px] [bar flex] [value 64px] */
+                lv_obj_t *row = lv_obj_create(scroll);
+                lv_obj_set_size(row, LV_PCT(100), 38);
+                lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
+                lv_obj_set_style_border_width(row, 0, 0);
+                lv_obj_set_style_pad_ver(row, 4, 0);
+                lv_obj_set_style_pad_hor(row, 8, 0);
+                lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+                lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START,
+                                      LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+                lv_obj_set_style_pad_column(row, 8, 0);
+                lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+
+                /* Port name */
+                lv_obj_t *name_lbl = lv_label_create(row);
+                lv_label_set_text(name_lbl,
+                    pm_port->name[0] ? pm_port->name : pm_port->symbol);
+                lv_obj_set_style_text_color(name_lbl, UI_COLOR_TEXT, 0);
+                lv_obj_set_style_text_font(name_lbl, &lv_font_montserrat_14, 0);
+                lv_obj_set_width(name_lbl, 110);
+                lv_label_set_long_mode(name_lbl, LV_LABEL_LONG_DOT);
+
+                /* Level bar */
+                lv_obj_t *bar = lv_bar_create(row);
+                lv_obj_set_height(bar, 18);
+                lv_obj_set_flex_grow(bar, 1);
+                lv_bar_set_range(bar, 0, 1000);
+                lv_bar_set_value(bar, 0, LV_ANIM_OFF);
+                lv_obj_set_style_bg_color(bar, UI_COLOR_SURFACE, 0);
+                lv_obj_set_style_bg_color(bar, UI_COLOR_ACTIVE,
+                                          LV_PART_INDICATOR | LV_STATE_DEFAULT);
+                lv_obj_clear_flag(bar, LV_OBJ_FLAG_CLICKABLE);
+                reg->meter_bar = bar;
+
+                /* Numeric value */
+                lv_obj_t *val_lbl = lv_label_create(row);
+                lv_label_set_text(val_lbl, "—");
+                lv_obj_set_style_text_color(val_lbl, UI_COLOR_TEXT_DIM, 0);
+                lv_obj_set_style_text_font(val_lbl, &lv_font_montserrat_14, 0);
+                lv_obj_set_width(val_lbl, 64);
+                lv_obj_set_style_text_align(val_lbl, LV_TEXT_ALIGN_RIGHT, 0);
+                reg->val_lbl = val_lbl;
+
+                /* Seed with value already received (monitoring started at load) */
+                float cur = 0.0f;
+                if (ui_pedalboard_get_output(instance_id, pm_port->symbol, &cur))
+                    ui_param_editor_update_output(pm_port->symbol, cur);
+            }
+        }
+    }
 }
 
 void ui_param_editor_close(void)
@@ -823,6 +913,32 @@ void ui_param_editor_update(const char *symbol, float value)
                 fabsf(reg->enum_values[sel] - value))
                 sel = k;
         lv_dropdown_set_selected(reg->widget, (uint16_t)sel);
+    }
+}
+
+int ui_param_editor_instance(void)
+{
+    return g_modal ? g_instance : -1;
+}
+
+void ui_param_editor_update_output(const char *symbol, float value)
+{
+    ctrl_reg_t *reg = find_ctrl(symbol);
+    if (!reg || reg->type != CTRL_METER || !reg->meter_bar) return;
+
+    float range = reg->max - reg->min;
+    int bar_val = 0;
+    if (range > 0.0f)
+        bar_val = (int)(((value - reg->min) / range) * 1000.0f + 0.5f);
+    if (bar_val < 0)    bar_val = 0;
+    if (bar_val > 1000) bar_val = 1000;
+
+    lv_bar_set_value(reg->meter_bar, bar_val, LV_ANIM_OFF);
+
+    if (reg->val_lbl) {
+        char buf[32];
+        snprintf(buf, sizeof(buf), "%.3g", (double)value);
+        lv_label_set_text(reg->val_lbl, buf);
     }
 }
 
