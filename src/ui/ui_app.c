@@ -9,6 +9,7 @@
 #include "ui_snapshot_bar.h"
 #include "ui_conductor.h"
 #include "ui_pre_fx.h"
+#include "ui_scene.h"
 
 #include "../bank.h"
 #include "../snapshot.h"
@@ -71,6 +72,7 @@ static lv_obj_t   *g_mod_dot      = NULL;
 static lv_obj_t   *g_banks_label  = NULL;  /* text sub-label of Banks button */
 static lv_obj_t   *g_prefx_label  = NULL;
 static lv_obj_t   *g_cond_label   = NULL;
+static lv_obj_t   *g_scene_label  = NULL;
 static lv_obj_t   *g_set_label    = NULL;
 static lv_obj_t   *g_save_label   = NULL;
 static lv_obj_t   *g_btn_add_float = NULL; /* floating + button on canvas */
@@ -114,6 +116,13 @@ static void btn_conductor_cb(lv_event_t *e)
 {
     (void)e;
     ui_conductor_open();
+}
+
+static void btn_scene_cb(lv_event_t *e)
+{
+    (void)e;
+    if (ui_scene_is_open()) ui_scene_close();
+    else                    ui_scene_open();
 }
 
 static void btn_add_cb(lv_event_t *e)
@@ -966,6 +975,11 @@ static void create_top_bar(void)
         lv_color_hex(0x6A4C9C), btn_conductor_cb, &g_cond_label);
     lv_obj_align(btn_cond, LV_ALIGN_LEFT_MID, (UI_TOP_BTN_SZ + 6) * 2, 0);
 
+    lv_obj_t *btn_scene = make_top_btn(g_top_bar,
+        LV_SYMBOL_SHUFFLE, TR(TR_SCENE_TITLE),
+        lv_color_hex(0x1A6B7A), btn_scene_cb, &g_scene_label);
+    lv_obj_align(btn_scene, LV_ALIGN_LEFT_MID, (UI_TOP_BTN_SZ + 6) * 3, 0);
+
     /* ── Center: pedalboard title ── */
     g_title_label = lv_label_create(g_top_bar);
     lv_label_set_text(g_title_label, TR(TR_NO_PEDALBOARD));
@@ -1130,6 +1144,7 @@ void ui_app_show_screen(ui_screen_t screen)
     /* Null pointers before lv_obj_clean destroys overlays. */
     ui_conductor_close();
     ui_pre_fx_close();
+    ui_scene_close();
     /* Free reorder C allocations before lv_obj_clean deletes the LVGL objects.
      * LV_EVENT_DELETE on g_reorder->overlay will free g_reorder itself. */
     if (g_reorder) reorder_free_allocations(g_reorder);
@@ -1350,6 +1365,7 @@ void ui_app_apply_language(void)
     if (g_banks_label)  lv_label_set_text(g_banks_label,  TR(TR_BANKS));
     if (g_prefx_label)  lv_label_set_text(g_prefx_label,  TR(TR_PREFX_TITLE));
     if (g_cond_label)   lv_label_set_text(g_cond_label,   TR(TR_CONDUCTOR_TITLE));
+    if (g_scene_label)  lv_label_set_text(g_scene_label,  TR(TR_SCENE_TITLE));
     if (g_set_label)    lv_label_set_text(g_set_label,    TR(TR_SETTINGS_TITLE));
     if (g_save_label)   lv_label_set_text(g_save_label,   TR(TR_MENU_FILES));
 

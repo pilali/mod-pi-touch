@@ -17,6 +17,7 @@
 #include "lv2_utils.h"
 #include "ui/ui_app.h"
 #include "ui/ui_pedalboard.h"
+#include "ui/ui_scene.h"
 #include "ui/ui_splash.h"
 #include "cJSON.h"
 
@@ -54,6 +55,7 @@ static void feedback_handler(const char *msg, void *ud)
         if (sscanf(msg, "midi_mapped %d %127s %d %d %f %f %f",
                    &instance, symbol, &ch, &cc, &mval, &mmin, &mmax) == 7) {
             ui_pedalboard_on_midi_mapped(instance, symbol, ch, cc, mmin, mmax);
+            ui_scene_on_midi_mapped(instance, symbol, ch, cc, mmin, mmax);
             return;
         }
     }
