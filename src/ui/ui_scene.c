@@ -898,15 +898,10 @@ static void build_setlist_tab(lv_obj_t *parent)
     /* Clamp g_bank_idx in case banks were removed since last save */
     if (g_bank_idx >= bank_count) g_bank_idx = -1;
 
-    fprintf(stderr, "[scene] build_setlist_tab: bank_count=%d g_bank_idx=%d\n",
-            bank_count, g_bank_idx);
-
     /* ── Bank selector button ── */
     const char *bank_btn_label = (g_bank_idx < 0)
         ? TR(TR_SCENE_ALL_BANKS)
         : (bank_count > 0 ? banks->banks[g_bank_idx].name : TR(TR_SCENE_ALL_BANKS));
-
-    fprintf(stderr, "[scene] bank_btn_label='%s'\n", bank_btn_label ? bank_btn_label : "NULL");
 
     lv_obj_t *bank_btn = lv_btn_create(left);
     lv_obj_set_size(bank_btn, LV_PCT(100), 46);
