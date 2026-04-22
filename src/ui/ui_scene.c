@@ -45,6 +45,7 @@ static lv_obj_t *g_bank_menu       = NULL;
 static void slot_apply_style(int idx);
 static void build_pedals_tab(lv_obj_t *parent);
 static void build_setlist_tab(lv_obj_t *parent);
+static void show_tab(int tab);
 static void scene_refresh(void);
 static void show_spinner(void);
 static void hide_spinner(void);
