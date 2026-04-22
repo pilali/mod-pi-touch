@@ -235,6 +235,8 @@ static void extract_plugin(const LilvPlugin *plugin, pm_plugin_info_t *pi)
             case PM_PORT_MIDI_IN:     pi->midi_in_count++;   break;
             case PM_PORT_MIDI_OUT:    pi->midi_out_count++;  break;
             case PM_PORT_CONTROL_IN:  pi->ctrl_in_count++;   break;
+            case PM_PORT_CV_IN:       pi->cv_in_count++;     break;
+            case PM_PORT_CV_OUT:      pi->cv_out_count++;    break;
             default: break;
         }
     }
@@ -243,7 +245,7 @@ static void extract_plugin(const LilvPlugin *plugin, pm_plugin_info_t *pi)
 /* ─── JSON cache ─────────────────────────────────────────────────────────────── */
 
 /* Bump this when the cache schema changes to force automatic regeneration */
-#define CACHE_VERSION 4
+#define CACHE_VERSION 6
 
 static void save_cache(const char *cache_path)
 {
@@ -408,6 +410,12 @@ static bool load_cache(const char *cache_path)
             }
         }
 
+        /* Derive CV counts from port types (not stored in cache, computed here) */
+        for (int j = 0; j < p->port_count; j++) {
+            if (p->ports[j].type == PM_PORT_CV_IN)  p->cv_in_count++;
+            if (p->ports[j].type == PM_PORT_CV_OUT) p->cv_out_count++;
+        }
+
         /* patch:writable parameters */
         cJSON *pps = cJSON_GetObjectItem(obj, "patch_params");
         if (cJSON_IsArray(pps)) {
@@ -447,18 +455,30 @@ int pm_init(const char *lv2_paths, const char *cache_path)
     g_world = lilv_world_new();
     if (!g_world) return -1;
 
-    /* Load paths */
-    if (lv2_paths) {
-        char *paths = strdup(lv2_paths);
-        if (!paths) { lilv_world_free(g_world); g_world = NULL; return -1; }
-        char *tok = strtok(paths, ":");
-        while (tok) {
-            LilvNode *path = lilv_new_file_uri(g_world, NULL, tok);
-            lilv_world_load_bundle(g_world, path);
-            lilv_node_free(path);
-            tok = strtok(NULL, ":");
+    /* Ensure system LV2 bundles are on the path.
+     * The service may set LV2_PATH to only the user plugin directory, which
+     * omits /usr/lib/lv2 where lv2core.lv2 lives.  Without lv2core the
+     * plugin class hierarchy (lv2:ReverbPlugin, etc.) is not loaded and
+     * lilv_plugin_get_class() falls back to the root "Plugin" for everything.
+     * We prepend the system path so the class definitions load before plugins. */
+    {
+        const char *env = getenv("LV2_PATH");
+        const char *sys = "/usr/lib/lv2";
+        if (!env || !strstr(env, sys)) {
+            char extended[4096];
+            if (env && env[0])
+                snprintf(extended, sizeof(extended), "%s:%s", sys, env);
+            else
+                snprintf(extended, sizeof(extended), "%s", sys);
+            setenv("LV2_PATH", extended, 1);
         }
-        free(paths);
+        /* Also include any custom paths passed in as parameter */
+        if (lv2_paths) {
+            env = getenv("LV2_PATH");
+            char extended[4096];
+            snprintf(extended, sizeof(extended), "%s:%s", env ? env : "", lv2_paths);
+            setenv("LV2_PATH", extended, 1);
+        }
     }
     lilv_world_load_all(g_world);
 

@@ -103,6 +103,7 @@ typedef struct {
     char label[64];
     char jack_port[256];
     bool is_midi;
+    bool is_cv;
 } conn_port_info_t;
 
 /* Persistent state */
@@ -192,13 +193,17 @@ static int collect_src_ports(int src_idx, conn_port_info_t *out, int max)
         if (info) {
             for (int j = 0; j < info->port_count && count < max; j++) {
                 pm_port_type_t t = info->ports[j].type;
-                if (t != PM_PORT_AUDIO_OUT && t != PM_PORT_MIDI_OUT) continue;
+                if (t != PM_PORT_AUDIO_OUT && t != PM_PORT_MIDI_OUT && t != PM_PORT_CV_OUT) continue;
                 conn_port_info_t *p = &out[count];
                 snprintf(p->symbol,    sizeof(p->symbol),    "%s", info->ports[j].symbol);
-                snprintf(p->label,     sizeof(p->label),     "%s", info->ports[j].name);
+                if (t == PM_PORT_CV_OUT)
+                    snprintf(p->label, sizeof(p->label), "%s [CV]", info->ports[j].name);
+                else
+                    snprintf(p->label, sizeof(p->label), "%s", info->ports[j].name);
                 snprintf(p->jack_port, sizeof(p->jack_port), "effect_%d:%s",
                          plug->instance_id, info->ports[j].symbol);
                 p->is_midi = (t == PM_PORT_MIDI_OUT);
+                p->is_cv   = (t == PM_PORT_CV_OUT);
                 count++;
             }
         }
@@ -206,10 +211,12 @@ static int collect_src_ports(int src_idx, conn_port_info_t *out, int max)
     return count;
 }
 
-static int collect_dst_ports(int dst_idx, conn_port_info_t *out, int max, bool want_midi)
+static int collect_dst_ports(int dst_idx, conn_port_info_t *out, int max,
+                             bool want_midi, bool want_cv)
 {
     int count = 0;
-    if (dst_idx == -2) { /* system audio/MIDI outputs */
+    if (dst_idx == -2) { /* system audio/MIDI outputs — no CV */
+        if (want_cv) return 0;
         int ai = 0, mi = 0;
         for (int i = 0; i < g_n_out_c && count < max; i++) {
             bool is_m = g_io_out_c[i].is_midi;
@@ -226,6 +233,7 @@ static int collect_dst_ports(int dst_idx, conn_port_info_t *out, int max, bool w
                 snprintf(p->jack_port, sizeof(p->jack_port), "system:playback_%d", ai);
             }
             p->is_midi = is_m;
+            p->is_cv   = false;
             count++;
         }
     } else if (dst_idx >= 0 && dst_idx < g_pedalboard.plugin_count) {
@@ -234,15 +242,17 @@ static int collect_dst_ports(int dst_idx, conn_port_info_t *out, int max, bool w
         if (info) {
             for (int j = 0; j < info->port_count && count < max; j++) {
                 pm_port_type_t t = info->ports[j].type;
-                if (t != PM_PORT_AUDIO_IN && t != PM_PORT_MIDI_IN) continue;
+                if (t != PM_PORT_AUDIO_IN && t != PM_PORT_MIDI_IN && t != PM_PORT_CV_IN) continue;
                 bool is_m = (t == PM_PORT_MIDI_IN);
-                if (is_m != want_midi) continue;
+                bool is_c = (t == PM_PORT_CV_IN);
+                if (is_m != want_midi || is_c != want_cv) continue;
                 conn_port_info_t *p = &out[count];
                 snprintf(p->symbol,    sizeof(p->symbol),    "%s", info->ports[j].symbol);
                 snprintf(p->label,     sizeof(p->label),     "%s", info->ports[j].name);
                 snprintf(p->jack_port, sizeof(p->jack_port), "effect_%d:%s",
                          plug->instance_id, info->ports[j].symbol);
                 p->is_midi = is_m;
+                p->is_cv   = is_c;
                 count++;
             }
         }
@@ -398,11 +408,15 @@ static void conn_target_selected(int dst_plugin_idx)
     }
 
     bool src_is_midi = g_src_ports[g_conn_sel_port].is_midi;
+    bool src_is_cv   = g_src_ports[g_conn_sel_port].is_cv;
     conn_port_info_t dst_ports[CONN_PORT_MAX];
-    int n_dst = collect_dst_ports(dst_plugin_idx, dst_ports, CONN_PORT_MAX, src_is_midi);
+    int n_dst = collect_dst_ports(dst_plugin_idx, dst_ports, CONN_PORT_MAX, src_is_midi, src_is_cv);
 
     if (n_dst == 0) {
-        ui_app_show_toast_error(src_is_midi ? "No MIDI input on target." : "No audio input on target.");
+        const char *err = src_is_midi ? "No MIDI input on target."
+                        : src_is_cv   ? "No CV input on target."
+                        :               "No audio input on target.";
+        ui_app_show_toast_error(err);
         conn_panel_close();
         return;
     }

@@ -61,6 +61,8 @@ typedef struct {
     int midi_in_count;
     int midi_out_count;
     int ctrl_in_count;
+    int cv_in_count;
+    int cv_out_count;
 
     pm_patch_param_t patch_params[PM_PATCH_MAX];
     int              patch_param_count;
