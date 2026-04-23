@@ -111,6 +111,113 @@ static void extract_port(LilvPlugin *plugin, LilvPort *port, pm_port_info_t *pi)
     }
 }
 
+/* ─── Direct TTL name reader (manifest.ttl → rdfs:seeAlso → doap:name) ────────
+ * More reliable than lilv_plugin_get_name() which can return the URI or an
+ * empty string for plugins whose doap:name lives only in the bundle TTL. */
+
+static bool bundle_uri_to_path(const char *uri, char *out, size_t outsz)
+{
+    const char *p = uri;
+    if (strncmp(p, "file://", 7) == 0) p += 7;
+    size_t len = strlen(p);
+    if (len > 0 && p[len-1] == '/') len--;
+    if (len == 0 || len >= outsz) return false;
+    memcpy(out, p, len);
+    out[len] = '\0';
+    return true;
+}
+
+/* Scan manifest.ttl for local .ttl <refs>, skip modgui.ttl, deduplicate. */
+static int collect_seealso_ttls(const char *bundle_path, char names[][256], int max)
+{
+    char path[1024];
+    snprintf(path, sizeof(path), "%s/manifest.ttl", bundle_path);
+    FILE *f = fopen(path, "r");
+    if (!f) return 0;
+
+    char buf[32768];
+    size_t n = fread(buf, 1, sizeof(buf)-1, f);
+    fclose(f);
+    buf[n] = '\0';
+
+    int count = 0;
+    const char *p = buf;
+    while (count < max) {
+        p = strchr(p, '<');
+        if (!p) break;
+        p++;
+        const char *end = strchr(p, '>');
+        if (!end) break;
+        size_t len = (size_t)(end - p);
+        /* Local .ttl filename: no '/' (path), no ':' (URI scheme) */
+        if (len >= 5 && len < 256 &&
+            !memchr(p, '/', len) && !memchr(p, ':', len) &&
+            memcmp(end - 4, ".ttl", 4) == 0) {
+            char name[256];
+            memcpy(name, p, len);
+            name[len] = '\0';
+            if (strcmp(name, "modgui.ttl") != 0) {
+                bool dup = false;
+                for (int i = 0; i < count; i++)
+                    if (strcmp(names[i], name) == 0) { dup = true; break; }
+                if (!dup)
+                    snprintf(names[count++], 256, "%s", name);
+            }
+        }
+        p = end + 1;
+    }
+    return count;
+}
+
+/* Return the first doap:name "..." found in a TTL file. */
+static bool ttl_read_doap_name(const char *ttl_path, char *out, size_t outsz)
+{
+    FILE *f = fopen(ttl_path, "r");
+    if (!f) return false;
+    char line[1024];
+    bool found = false;
+    while (fgets(line, sizeof(line), f)) {
+        char *p = strstr(line, "doap:name");
+        if (!p) continue;
+        p = strchr(p, '"');
+        if (!p) continue;
+        p++;
+        char *end = strchr(p, '"');
+        if (!end) continue;
+        size_t len = (size_t)(end - p);
+        if (len >= outsz) len = outsz - 1;
+        memcpy(out, p, len);
+        out[len] = '\0';
+        found = true;
+        break;
+    }
+    fclose(f);
+    return found;
+}
+
+/* Read plugin display name via manifest.ttl → rdfs:seeAlso → doap:name. */
+static bool plugin_name_from_bundle(const LilvPlugin *plugin, char *out, size_t outsz)
+{
+    const LilvNode *buri = lilv_plugin_get_bundle_uri(plugin);
+    if (!buri) return false;
+
+    char bundle_path[1024];
+    if (!bundle_uri_to_path(lilv_str(buri), bundle_path, sizeof(bundle_path)))
+        return false;
+
+    char ttl_names[8][256];
+    int n = collect_seealso_ttls(bundle_path, ttl_names, 8);
+    for (int i = 0; i < n; i++) {
+        char ttl_path[1280];
+        snprintf(ttl_path, sizeof(ttl_path), "%s/%s", bundle_path, ttl_names[i]);
+        if (ttl_read_doap_name(ttl_path, out, outsz)) {
+            lv2u_normalize_quotes(out);
+            return true;
+        }
+    }
+    return false;
+}
+
 static void extract_plugin(const LilvPlugin *plugin, pm_plugin_info_t *pi)
 {
     memset(pi, 0, sizeof(*pi));
@@ -118,10 +225,13 @@ static void extract_plugin(const LilvPlugin *plugin, pm_plugin_info_t *pi)
     snprintf(pi->uri,  sizeof(pi->uri),
              "%s", lilv_str(lilv_plugin_get_uri(plugin)));
 
-    LilvNode *name = lilv_plugin_get_name(plugin);
-    snprintf(pi->name, sizeof(pi->name), "%s", lilv_str(name));
-    lv2u_normalize_quotes(pi->name);
-    lilv_node_free(name);
+    /* Prefer doap:name from the bundle TTL; fall back to lilv if not found. */
+    if (!plugin_name_from_bundle(plugin, pi->name, sizeof(pi->name))) {
+        LilvNode *name = lilv_plugin_get_name(plugin);
+        snprintf(pi->name, sizeof(pi->name), "%s", lilv_str(name));
+        lv2u_normalize_quotes(pi->name);
+        lilv_node_free(name);
+    }
 
     /* Author */
     LilvNode *author = lilv_plugin_get_author_name(plugin);
@@ -248,7 +358,7 @@ static void extract_plugin(const LilvPlugin *plugin, pm_plugin_info_t *pi)
 /* ─── JSON cache ─────────────────────────────────────────────────────────────── */
 
 /* Bump this when the cache schema changes to force automatic regeneration */
-#define CACHE_VERSION 6
+#define CACHE_VERSION 7
 
 static void save_cache(const char *cache_path)
 {
