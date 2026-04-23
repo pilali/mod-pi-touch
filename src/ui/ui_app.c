@@ -19,36 +19,74 @@
 #include <stdio.h>
 
 /* ─── AZERTY keyboard maps (French) ─────────────────────────────────────────
- * Same row structure as the default QWERTY maps so the ctrl maps are reused.
- * Changes vs QWERTY: row-1 a/z instead of q/w; row-2 q instead of a. */
+ * Row 0 (top): digits 1-0 plus dash and underscore — direct access without
+ *              switching to special-chars mode.
+ * Row 1: mode toggle (1# / ABC) + top letter row + backspace
+ * Row 2: caps toggle         + home row          + enter
+ * Row 3: accented chars      + bottom letter row
+ * Row 4: navigation bar
+ * A custom special-chars map (azerty_map_sc) adds a fifth row of extra
+ * symbols (@ ~ ^ | \ ` { } [ ] ° €) above the usual symbol rows. */
 #define KB_BTN(w) (LV_BUTTONMATRIX_CTRL_POPOVER | (w))
 
-/* Row 3: common French accented chars replace the special chars of QWERTY.
- * Lower: é è | w x c v b n m | à ç ù
- * Upper: É È | W X C V B N M | À Ç Ù  */
 static const char * const azerty_map_lc[] = {
+    "1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "-", "_", "\n",
     "1#", "a", "z", "e", "r", "t", "y", "u", "i", "o", "p", LV_SYMBOL_BACKSPACE, "\n",
     "ABC", "q", "s", "d", "f", "g", "h", "j", "k", "l", LV_SYMBOL_NEW_LINE, "\n",
     "\xc3\xa9", "\xc3\xa8", "w", "x", "c", "v", "b", "n", "m", "\xc3\xa0", "\xc3\xa7", "\xc3\xb9", "\n",
     LV_SYMBOL_KEYBOARD, LV_SYMBOL_LEFT, " ", LV_SYMBOL_RIGHT, LV_SYMBOL_OK, ""
 };
 static const char * const azerty_map_uc[] = {
+    "1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "-", "_", "\n",
     "1#", "A", "Z", "E", "R", "T", "Y", "U", "I", "O", "P", LV_SYMBOL_BACKSPACE, "\n",
     "abc", "Q", "S", "D", "F", "G", "H", "J", "K", "L", LV_SYMBOL_NEW_LINE, "\n",
     "\xc3\x89", "\xc3\x88", "W", "X", "C", "V", "B", "N", "M", "\xc3\x80", "\xc3\x87", "\xc3\x99", "\n",
     LV_SYMBOL_CLOSE, LV_SYMBOL_LEFT, " ", LV_SYMBOL_RIGHT, LV_SYMBOL_OK, ""
 };
-/* ctrl maps: row 3 uses plain KB_BTN(1) for all keys (no "special" styling) */
 static const lv_buttonmatrix_ctrl_t azerty_ctrl_lc[] = {
-    LV_KEYBOARD_CTRL_BUTTON_FLAGS | 5, KB_BTN(4), KB_BTN(4), KB_BTN(4), KB_BTN(4), KB_BTN(4), KB_BTN(4), KB_BTN(4), KB_BTN(4), KB_BTN(4), KB_BTN(4), LV_BUTTONMATRIX_CTRL_CHECKED | 7,
-    LV_KEYBOARD_CTRL_BUTTON_FLAGS | 6, KB_BTN(3), KB_BTN(3), KB_BTN(3), KB_BTN(3), KB_BTN(3), KB_BTN(3), KB_BTN(3), KB_BTN(3), KB_BTN(3), LV_BUTTONMATRIX_CTRL_CHECKED | 7,
+    /* row 0 — 12 equal digit/punct buttons */
     KB_BTN(1), KB_BTN(1), KB_BTN(1), KB_BTN(1), KB_BTN(1), KB_BTN(1), KB_BTN(1), KB_BTN(1), KB_BTN(1), KB_BTN(1), KB_BTN(1), KB_BTN(1),
+    /* row 1 */
+    LV_KEYBOARD_CTRL_BUTTON_FLAGS | 5, KB_BTN(4), KB_BTN(4), KB_BTN(4), KB_BTN(4), KB_BTN(4), KB_BTN(4), KB_BTN(4), KB_BTN(4), KB_BTN(4), KB_BTN(4), LV_BUTTONMATRIX_CTRL_CHECKED | 7,
+    /* row 2 */
+    LV_KEYBOARD_CTRL_BUTTON_FLAGS | 6, KB_BTN(3), KB_BTN(3), KB_BTN(3), KB_BTN(3), KB_BTN(3), KB_BTN(3), KB_BTN(3), KB_BTN(3), KB_BTN(3), LV_BUTTONMATRIX_CTRL_CHECKED | 7,
+    /* row 3 */
+    KB_BTN(1), KB_BTN(1), KB_BTN(1), KB_BTN(1), KB_BTN(1), KB_BTN(1), KB_BTN(1), KB_BTN(1), KB_BTN(1), KB_BTN(1), KB_BTN(1), KB_BTN(1),
+    /* row 4 nav */
     LV_KEYBOARD_CTRL_BUTTON_FLAGS | 2, LV_BUTTONMATRIX_CTRL_CHECKED | 2, 6, LV_BUTTONMATRIX_CTRL_CHECKED | 2, LV_KEYBOARD_CTRL_BUTTON_FLAGS | 2
 };
 static const lv_buttonmatrix_ctrl_t azerty_ctrl_uc[] = {
-    LV_KEYBOARD_CTRL_BUTTON_FLAGS | 5, KB_BTN(4), KB_BTN(4), KB_BTN(4), KB_BTN(4), KB_BTN(4), KB_BTN(4), KB_BTN(4), KB_BTN(4), KB_BTN(4), KB_BTN(4), LV_BUTTONMATRIX_CTRL_CHECKED | 7,
-    LV_KEYBOARD_CTRL_BUTTON_FLAGS | 6, KB_BTN(3), KB_BTN(3), KB_BTN(3), KB_BTN(3), KB_BTN(3), KB_BTN(3), KB_BTN(3), KB_BTN(3), KB_BTN(3), LV_BUTTONMATRIX_CTRL_CHECKED | 7,
+    /* row 0 — 12 equal digit/punct buttons */
     KB_BTN(1), KB_BTN(1), KB_BTN(1), KB_BTN(1), KB_BTN(1), KB_BTN(1), KB_BTN(1), KB_BTN(1), KB_BTN(1), KB_BTN(1), KB_BTN(1), KB_BTN(1),
+    /* row 1 */
+    LV_KEYBOARD_CTRL_BUTTON_FLAGS | 5, KB_BTN(4), KB_BTN(4), KB_BTN(4), KB_BTN(4), KB_BTN(4), KB_BTN(4), KB_BTN(4), KB_BTN(4), KB_BTN(4), KB_BTN(4), LV_BUTTONMATRIX_CTRL_CHECKED | 7,
+    /* row 2 */
+    LV_KEYBOARD_CTRL_BUTTON_FLAGS | 6, KB_BTN(3), KB_BTN(3), KB_BTN(3), KB_BTN(3), KB_BTN(3), KB_BTN(3), KB_BTN(3), KB_BTN(3), KB_BTN(3), LV_BUTTONMATRIX_CTRL_CHECKED | 7,
+    /* row 3 */
+    KB_BTN(1), KB_BTN(1), KB_BTN(1), KB_BTN(1), KB_BTN(1), KB_BTN(1), KB_BTN(1), KB_BTN(1), KB_BTN(1), KB_BTN(1), KB_BTN(1), KB_BTN(1),
+    /* row 4 nav */
+    LV_KEYBOARD_CTRL_BUTTON_FLAGS | 2, LV_BUTTONMATRIX_CTRL_CHECKED | 2, 6, LV_BUTTONMATRIX_CTRL_CHECKED | 2, LV_KEYBOARD_CTRL_BUTTON_FLAGS | 2
+};
+
+/* ─── Custom special-chars view ──────────────────────────────────────────────
+ * Row 0 (extra): chars hard to reach otherwise — @ ~ ^ | \ ` { } [ ] ° €
+ * Row 1: abc (back to letters) + common symbols + backspace
+ * Row 2: additional symbols + enter
+ * Row 3: navigation bar                                                      */
+static const char * const azerty_map_sc[] = {
+    "@", "~", "^", "|", "\\", "`", "{", "}", "[", "]", "\xc2\xb0", "\xe2\x82\xac", "\n",
+    "abc", "+", "&", "/", "(", ")", "%", "'", "\"", ":", LV_SYMBOL_BACKSPACE, "\n",
+    "#", "?", "!", "*", "<", ">", ";", "=", ",", ".", LV_SYMBOL_NEW_LINE, "\n",
+    LV_SYMBOL_KEYBOARD, LV_SYMBOL_LEFT, " ", LV_SYMBOL_RIGHT, LV_SYMBOL_OK, ""
+};
+static const lv_buttonmatrix_ctrl_t azerty_ctrl_sc[] = {
+    /* row 0 — 12 equal extra-symbol buttons */
+    KB_BTN(1), KB_BTN(1), KB_BTN(1), KB_BTN(1), KB_BTN(1), KB_BTN(1), KB_BTN(1), KB_BTN(1), KB_BTN(1), KB_BTN(1), KB_BTN(1), KB_BTN(1),
+    /* row 1 — abc (wide) + 9 symbols + backspace (wide) */
+    LV_KEYBOARD_CTRL_BUTTON_FLAGS | 5, KB_BTN(4), KB_BTN(4), KB_BTN(4), KB_BTN(4), KB_BTN(4), KB_BTN(4), KB_BTN(4), KB_BTN(4), KB_BTN(4), LV_BUTTONMATRIX_CTRL_CHECKED | 7,
+    /* row 2 — 10 symbols + enter (wide) */
+    KB_BTN(2), KB_BTN(2), KB_BTN(2), KB_BTN(2), KB_BTN(2), KB_BTN(2), KB_BTN(2), KB_BTN(2), KB_BTN(2), KB_BTN(2), LV_BUTTONMATRIX_CTRL_CHECKED | 6,
+    /* row 3 nav */
     LV_KEYBOARD_CTRL_BUTTON_FLAGS | 2, LV_BUTTONMATRIX_CTRL_CHECKED | 2, 6, LV_BUTTONMATRIX_CTRL_CHECKED | 2, LV_KEYBOARD_CTRL_BUTTON_FLAGS | 2
 };
 
@@ -1381,5 +1419,6 @@ void ui_app_keyboard_apply_lang(lv_obj_t *kbd)
     if (i18n_get_lang() == LANG_FR) {
         lv_keyboard_set_map(kbd, LV_KEYBOARD_MODE_TEXT_LOWER, azerty_map_lc, azerty_ctrl_lc);
         lv_keyboard_set_map(kbd, LV_KEYBOARD_MODE_TEXT_UPPER, azerty_map_uc, azerty_ctrl_uc);
+        lv_keyboard_set_map(kbd, LV_KEYBOARD_MODE_SPECIAL,    azerty_map_sc, azerty_ctrl_sc);
     }
 }
