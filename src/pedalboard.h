@@ -76,6 +76,12 @@ typedef struct {
 
     int    bypass_midi_channel;
     int    bypass_midi_cc;
+
+    /* CV output ports currently enabled as CV sources.
+     * Populated from addressings.json (entry present = enabled).
+     * Used by ui_pedalboard to build the CV source picker list. */
+    char cv_out_enabled[PB_MAX_PORTS][PB_SYMBOL_MAX];
+    int  cv_out_enabled_count;
 } pb_plugin_t;
 
 /* ─── Port connection ─────────────────────────────────────────────────────────── */

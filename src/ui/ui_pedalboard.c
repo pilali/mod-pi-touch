@@ -901,38 +901,40 @@ static bool cv_uri_to_jack(const char *cv_uri, char *out, size_t outsz)
     return true;
 }
 
-/* Build g_cv_sources from the currently loaded pedalboard. */
+/* Build g_cv_sources from the currently loaded pedalboard.
+ * Only includes CV output ports that are explicitly enabled (present in
+ * plug->cv_out_enabled, which is populated from addressings.json). */
 static void build_cv_sources(void)
 {
     g_cv_source_count = 0;
     for (int i = 0; i < g_pedalboard.plugin_count && g_cv_source_count < CV_SOURCE_MAX; i++) {
         pb_plugin_t *plug = &g_pedalboard.plugins[i];
+        if (!plug->cv_out_enabled_count) continue;
         const pm_plugin_info_t *pm = pm_plugin_by_uri(plug->uri);
         if (!pm) continue;
-        for (int j = 0; j < pm->port_count && g_cv_source_count < CV_SOURCE_MAX; j++) {
-            if (pm->ports[j].type != PM_PORT_CV_OUT) continue;
+        for (int k = 0; k < plug->cv_out_enabled_count && g_cv_source_count < CV_SOURCE_MAX; k++) {
+            const char *port_sym = plug->cv_out_enabled[k];
+            /* Find port metadata */
+            const pm_port_info_t *pp = NULL;
+            for (int j = 0; j < pm->port_count; j++)
+                if (pm->ports[j].type == PM_PORT_CV_OUT &&
+                    strcmp(pm->ports[j].symbol, port_sym) == 0) {
+                    pp = &pm->ports[j]; break;
+                }
+            if (!pp) continue;
             pb_cv_source_t *src = &g_cv_sources[g_cv_source_count++];
-            /* URI */
             snprintf(src->uri, sizeof(src->uri), "/cv/graph/%s/%s",
-                     plug->symbol, pm->ports[j].symbol);
-            /* JACK port */
+                     plug->symbol, port_sym);
             snprintf(src->jack_port, sizeof(src->jack_port),
-                     "effect_%d:%s", plug->instance_id, pm->ports[j].symbol);
-            /* Human label */
+                     "effect_%d:%s", plug->instance_id, port_sym);
             snprintf(src->label, sizeof(src->label), "%s \xe2\x80\x94 %s",
-                     plug->label, pm->ports[j].name[0] ? pm->ports[j].name
-                                                        : pm->ports[j].symbol);
-            /* Range & op_mode */
-            src->cv_min = pm->ports[j].min;
-            src->cv_max = pm->ports[j].max;
-            if (src->cv_min >= 0.0f && src->cv_max > 0.0f)
-                src->op_mode = '+';
-            else if (src->cv_min < 0.0f && src->cv_max <= 0.0f)
-                src->op_mode = '-';
-            else if (src->cv_min < 0.0f && src->cv_max > 0.0f)
-                src->op_mode = 'b';
-            else
-                src->op_mode = '=';
+                     plug->label, pp->name[0] ? pp->name : port_sym);
+            src->cv_min = pp->min;
+            src->cv_max = pp->max;
+            if (src->cv_min >= 0.0f && src->cv_max > 0.0f)       src->op_mode = '+';
+            else if (src->cv_min < 0.0f && src->cv_max <= 0.0f)  src->op_mode = '-';
+            else if (src->cv_min < 0.0f && src->cv_max > 0.0f)   src->op_mode = 'b';
+            else                                                   src->op_mode = '=';
         }
     }
 }
@@ -2018,10 +2020,8 @@ bool ui_pedalboard_is_cv_out_enabled(int instance_id, const char *symbol)
 {
     pb_plugin_t *plug = pb_find_plugin(&g_pedalboard, instance_id);
     if (!plug) return false;
-    char uri[PB_CV_URI_MAX];
-    snprintf(uri, sizeof(uri), "/cv/graph/%s/%s", plug->symbol, symbol);
-    for (int i = 0; i < g_cv_source_count; i++)
-        if (strcmp(g_cv_sources[i].uri, uri) == 0) return true;
+    for (int i = 0; i < plug->cv_out_enabled_count; i++)
+        if (strcmp(plug->cv_out_enabled[i], symbol) == 0) return true;
     return false;
 }
 
@@ -2033,12 +2033,12 @@ void ui_pedalboard_set_cv_out_enabled(int instance_id, const char *symbol, bool 
     snprintf(uri, sizeof(uri), "/cv/graph/%s/%s", plug->symbol, symbol);
 
     if (!enabled) {
-        /* Remove from g_cv_sources */
-        for (int i = 0; i < g_cv_source_count; i++) {
-            if (strcmp(g_cv_sources[i].uri, uri) != 0) continue;
-            for (int j = i; j < g_cv_source_count - 1; j++)
-                g_cv_sources[j] = g_cv_sources[j + 1];
-            g_cv_source_count--;
+        /* Remove from plug->cv_out_enabled */
+        for (int i = 0; i < plug->cv_out_enabled_count; i++) {
+            if (strcmp(plug->cv_out_enabled[i], symbol) != 0) continue;
+            for (int j = i; j < plug->cv_out_enabled_count - 1; j++)
+                memcpy(plug->cv_out_enabled[j], plug->cv_out_enabled[j + 1], PB_SYMBOL_MAX);
+            plug->cv_out_enabled_count--;
             break;
         }
         /* Unmap every parameter that referenced this CV source */
@@ -2053,32 +2053,17 @@ void ui_pedalboard_set_cv_out_enabled(int instance_id, const char *symbol, bool 
             }
         }
     } else {
-        /* Add back if not already present */
-        for (int i = 0; i < g_cv_source_count; i++)
-            if (strcmp(g_cv_sources[i].uri, uri) == 0) return;
-        if (g_cv_source_count >= CV_SOURCE_MAX) return;
-
-        const pm_plugin_info_t *pm = pm_plugin_by_uri(plug->uri);
-        if (!pm) return;
-        for (int j = 0; j < pm->port_count; j++) {
-            if (pm->ports[j].type != PM_PORT_CV_OUT) continue;
-            if (strcmp(pm->ports[j].symbol, symbol) != 0) continue;
-            pb_cv_source_t *src = &g_cv_sources[g_cv_source_count++];
-            snprintf(src->uri,       sizeof(src->uri),       "%s", uri);
-            snprintf(src->jack_port, sizeof(src->jack_port), "effect_%d:%s", instance_id, symbol);
-            snprintf(src->label,     sizeof(src->label),     "%s \xe2\x80\x94 %s",
-                     plug->label,
-                     pm->ports[j].name[0] ? pm->ports[j].name : pm->ports[j].symbol);
-            src->cv_min = pm->ports[j].min;
-            src->cv_max = pm->ports[j].max;
-            if (src->cv_min >= 0.0f && src->cv_max > 0.0f)       src->op_mode = '+';
-            else if (src->cv_min < 0.0f && src->cv_max <= 0.0f)  src->op_mode = '-';
-            else if (src->cv_min < 0.0f && src->cv_max > 0.0f)   src->op_mode = 'b';
-            else                                                   src->op_mode = '=';
-            break;
-        }
+        /* Add to plug->cv_out_enabled if not already there */
+        bool found = false;
+        for (int i = 0; i < plug->cv_out_enabled_count; i++)
+            if (strcmp(plug->cv_out_enabled[i], symbol) == 0) { found = true; break; }
+        if (!found && plug->cv_out_enabled_count < PB_MAX_PORTS)
+            snprintf(plug->cv_out_enabled[plug->cv_out_enabled_count++],
+                     PB_SYMBOL_MAX, "%s", symbol);
     }
 
+    /* Rebuild g_cv_sources from the updated enabled list */
+    build_cv_sources();
     g_pedalboard.modified = true;
     ui_app_update_title(g_pedalboard.name, true);
 }

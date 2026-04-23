@@ -478,6 +478,31 @@ int pb_load(pedalboard_t *pb, const char *bundle_dir)
                         /* HW CV: "/cv/graph/cv_N" (no slash after prefix) */
                         bool is_hw = (strncmp(rest, "cv_", 3) == 0 &&
                                       !strchr(rest, '/'));
+
+                        /* Plugin CV ports: mark the source port as enabled.
+                         * The entry exists even with empty addrs — that's the
+                         * "enabled" flag (mod-ui compatibility). */
+                        if (!is_hw) {
+                            const char *slash = strchr(rest, '/');
+                            if (slash) {
+                                char src_sym[PB_SYMBOL_MAX];
+                                snprintf(src_sym, sizeof(src_sym),
+                                         "%.*s", (int)(slash - rest), rest);
+                                const char *port_sym = slash + 1;
+                                pb_plugin_t *src = pb_find_plugin_by_symbol(pb, src_sym);
+                                if (src && src->cv_out_enabled_count < PB_MAX_PORTS) {
+                                    /* Avoid duplicates */
+                                    bool dup = false;
+                                    for (int k = 0; k < src->cv_out_enabled_count; k++)
+                                        if (strcmp(src->cv_out_enabled[k], port_sym) == 0)
+                                            { dup = true; break; }
+                                    if (!dup)
+                                        snprintf(src->cv_out_enabled[src->cv_out_enabled_count++],
+                                                 PB_SYMBOL_MAX, "%s", port_sym);
+                                }
+                            }
+                        }
+
                         cJSON *addrs = is_hw ? entry
                                              : cJSON_GetObjectItem(entry, "addrs");
                         if (!cJSON_IsArray(addrs)) continue;
@@ -524,12 +549,52 @@ int pb_load(pedalboard_t *pb, const char *bundle_dir)
 
 /* ─── addressings.json save ──────────────────────────────────────────────────── */
 
+/* Build the LV2 port label for a CV output port from pm_info.
+ * Returns the port label, or port_sym as fallback. */
+static const char *cv_port_label(const pb_plugin_t *plug, const char *port_sym)
+{
+    const pm_plugin_info_t *pm = pm_plugin_by_uri(plug->uri);
+    if (pm) {
+        for (int j = 0; j < pm->port_count; j++)
+            if (strcmp(pm->ports[j].symbol, port_sym) == 0 && pm->ports[j].name[0])
+                return pm->ports[j].name;
+    }
+    return port_sym;
+}
+
 static void pb_save_addressings(const pedalboard_t *pb)
 {
     cJSON *root = cJSON_CreateObject();
     /* /bpm is always present (mod-ui compatibility) */
     cJSON_AddItemToObject(root, "/bpm", cJSON_CreateArray());
 
+    /* Pass 1 — plugin CV output ports that are enabled.
+     * Each gets a { "name": "...", "addrs": [] } entry regardless of assignments.
+     * This is the mod-ui "enabled" flag: presence = enabled, absence = disabled. */
+    for (int i = 0; i < pb->plugin_count; i++) {
+        const pb_plugin_t *plug = &pb->plugins[i];
+        for (int k = 0; k < plug->cv_out_enabled_count; k++) {
+            const char *port_sym = plug->cv_out_enabled[k];
+            char src_uri[PB_CV_URI_MAX];
+            snprintf(src_uri, sizeof(src_uri), "/cv/graph/%s/%s",
+                     plug->symbol, port_sym);
+            if (cJSON_GetObjectItem(root, src_uri)) continue; /* already added */
+
+            /* "Plugin Label Port Label" — matches mod-ui format */
+            char cv_name[PB_CV_LABEL_MAX];
+            snprintf(cv_name, sizeof(cv_name), "%s %s",
+                     plug->label, cv_port_label(plug, port_sym));
+
+            cJSON *obj = cJSON_CreateObject();
+            cJSON_AddStringToObject(obj, "name", cv_name);
+            cJSON_AddItemToObject(obj, "addrs", cJSON_CreateArray());
+            cJSON_AddItemToObject(root, src_uri, obj);
+        }
+    }
+
+    /* Pass 2 — CV assignments (cv_map entries) stored on target control ports.
+     * For plugin CV sources: append to the addrs array created above.
+     * For HW CV sources: create a direct array (mod-ui format for hardware CV). */
     for (int i = 0; i < pb->plugin_count; i++) {
         const pb_plugin_t *plug = &pb->plugins[i];
         for (int j = 0; j < plug->port_count; j++) {
@@ -544,10 +609,22 @@ static void pb_save_addressings(const pedalboard_t *pb)
             snprintf(inst_path, sizeof(inst_path), "/graph/%s", plug->symbol);
             char opmode_str[2] = { port->cv_op_mode ? port->cv_op_mode : '+', '\0' };
 
+            /* Label for the addr entry: display name of the target port */
+            const char *tgt_label = port->symbol;
+            const pm_plugin_info_t *tgt_pm = pm_plugin_by_uri(plug->uri);
+            if (tgt_pm) {
+                for (int k = 0; k < tgt_pm->port_count; k++)
+                    if (strcmp(tgt_pm->ports[k].symbol, port->symbol) == 0 &&
+                        tgt_pm->ports[k].name[0]) {
+                        tgt_label = tgt_pm->ports[k].name;
+                        break;
+                    }
+            }
+
             cJSON *addr_obj = cJSON_CreateObject();
             cJSON_AddStringToObject(addr_obj, "instance", inst_path);
             cJSON_AddStringToObject(addr_obj, "port",     port->symbol);
-            cJSON_AddStringToObject(addr_obj, "label",    port->symbol);
+            cJSON_AddStringToObject(addr_obj, "label",    tgt_label);
             cJSON_AddNumberToObject(addr_obj, "minimum",  (double)port->cv_min);
             cJSON_AddNumberToObject(addr_obj, "maximum",  (double)port->cv_max);
             cJSON_AddNumberToObject(addr_obj, "steps",    0);
@@ -563,10 +640,31 @@ static void pb_save_addressings(const pedalboard_t *pb)
             } else {
                 cJSON *obj = cJSON_GetObjectItem(root, src_uri);
                 if (!obj) {
+                    /* Source port was not in cv_out_enabled (e.g., old data);
+                     * create the entry gracefully. */
                     obj = cJSON_CreateObject();
-                    const char *last_slash = strrchr(src_uri, '/');
-                    cJSON_AddStringToObject(obj, "name",
-                                            last_slash ? last_slash + 1 : src_uri);
+                    const char *slash = strrchr(src_uri, '/');
+                    /* Find source plugin to build proper name */
+                    const char *src_rest = src_uri + 10;
+                    const char *src_slash = strchr(src_rest, '/');
+                    char src_name[PB_CV_LABEL_MAX];
+                    if (src_slash) {
+                        char src_sym[PB_SYMBOL_MAX];
+                        snprintf(src_sym, sizeof(src_sym), "%.*s",
+                                 (int)(src_slash - src_rest), src_rest);
+                        const pb_plugin_t *sp =
+                            pb_find_plugin_by_symbol((pedalboard_t *)pb, src_sym);
+                        if (sp)
+                            snprintf(src_name, sizeof(src_name), "%s %s",
+                                     sp->label, slash ? slash + 1 : src_uri);
+                        else
+                            snprintf(src_name, sizeof(src_name), "%s",
+                                     slash ? slash + 1 : src_uri);
+                    } else {
+                        snprintf(src_name, sizeof(src_name), "%s",
+                                 slash ? slash + 1 : src_uri);
+                    }
+                    cJSON_AddStringToObject(obj, "name", src_name);
                     cJSON_AddItemToObject(obj, "addrs", cJSON_CreateArray());
                     cJSON_AddItemToObject(root, src_uri, obj);
                 }
