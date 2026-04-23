@@ -143,6 +143,30 @@ static io_port_desc_t g_io_in_c[16];
 static io_port_desc_t g_io_out_c[16];
 static lv_obj_t      *g_parent_obj = NULL;
 
+/* JACK playback port of the ALSA Midi-Through (Virtual MIDI Loopback).
+ * Set when the loopback is enabled; empty when disabled. */
+static char        g_midi_loopback_pb_port[128] = "";
+
+/* Detect the Midi-Through JACK ports and cache the playback port name.
+ * "system:midi_capture_N" (capture = readable by software) is detected first,
+ * then the matching playback port is derived by replacing "capture" → "playback".
+ * The plugin chain WRITES to the playback port; software reads from the capture. */
+static void detect_midi_loopback_ports(void)
+{
+    g_midi_loopback_pb_port[0] = '\0';
+    char capture[128];
+    if (!hw_detect_midi_loopback(capture, sizeof(capture))) return;
+    /* "system:midi_capture_N" → "system:midi_playback_N" */
+    const char *tag = "midi_capture_";
+    char *p = strstr(capture, tag);
+    if (!p) return;
+    size_t prefix_len = (size_t)(p - capture);
+    snprintf(g_midi_loopback_pb_port, sizeof(g_midi_loopback_pb_port),
+             "%.*smidi_playback_%s", (int)prefix_len, capture, p + strlen(tag));
+    fprintf(stderr, "[loopback] detected: capture=%s playback=%s\n",
+            capture, g_midi_loopback_pb_port);
+}
+
 /* Dynamic canvas height and per-band Y offsets (set by compute_layout) */
 static int         g_canvas_h_c           = UI_CANVAS_H;
 static int         g_band_y_c[PLUG_BAND_COUNT] = {0, 0, 0};
@@ -238,10 +262,21 @@ static int collect_dst_ports(int dst_idx, conn_port_info_t *out, int max,
         int ai = 0, mi = 0;
         for (int i = 0; i < g_n_out_c && count < max; i++) {
             bool is_m = g_io_out_c[i].is_midi;
-            if (is_m) mi++; else ai++;
+            /* Detect the loopback entry (added last in collect_io_descs) */
+            bool is_lb = (is_m && strcmp(g_io_out_c[i].label, "Loopback") == 0);
+            if (!is_lb) {
+                if (is_m) mi++; else ai++;
+            }
             if (is_m != want_midi) continue;
             conn_port_info_t *p = &out[count];
-            if (is_m) {
+            if (is_lb) {
+                /* Virtual MIDI Loopback: use the actual Midi-Through playback port */
+                if (!g_midi_loopback_pb_port[0]) continue;
+                snprintf(p->symbol,    sizeof(p->symbol),    "midi_loopback");
+                snprintf(p->label,     sizeof(p->label),     "MIDI Loopback");
+                snprintf(p->jack_port, sizeof(p->jack_port), "%s",
+                         g_midi_loopback_pb_port);
+            } else if (is_m) {
                 snprintf(p->symbol,    sizeof(p->symbol),    "midi_playback_%d", mi);
                 snprintf(p->label,     sizeof(p->label),     "%s", g_io_out_c[i].label);
                 snprintf(p->jack_port, sizeof(p->jack_port), "system:midi_playback_%d", mi);
@@ -1147,6 +1182,14 @@ static int collect_io_descs(bool want_inputs, io_port_desc_t *descs, int max)
         count++;
     }
 
+    /* ── Virtual MIDI Loopback (output side only) ── */
+    if (!want_inputs && g_pedalboard.midi_loopback && g_midi_loopback_pb_port[0]
+            && count < max) {
+        snprintf(descs[count].label, sizeof(descs[0].label), "Loopback");
+        descs[count].is_midi = true;
+        count++;
+    }
+
     return count;
 }
 
@@ -1634,6 +1677,12 @@ static bool uri_to_jack_port(const char *uri, const pedalboard_t *pb,
     /* rel is now "plugin_sym/port_sym" or "hardware_port" */
     const char *slash = strchr(rel, '/');
     if (!slash) {
+        /* Virtual MIDI Loopback: map to the actual Midi-Through JACK playback port */
+        if (strcmp(rel, "midi_loopback") == 0) {
+            if (!g_midi_loopback_pb_port[0]) return false;
+            snprintf(out, outsz, "%s", g_midi_loopback_pb_port);
+            return true;
+        }
         /* Single component — hardware port: capture_N, playback_N, midi_* */
         snprintf(out, outsz, "system:%s", rel);
         /* Redirect audio captures through the pre-fx noise gate when loaded.
@@ -1753,10 +1802,13 @@ void ui_pedalboard_load(const char *bundle_path,
     pre_fx_reload();
 
     /* Apply Virtual MIDI Loopback state from pedalboard TTL */
-    if (g_pedalboard.midi_loopback)
+    if (g_pedalboard.midi_loopback) {
+        detect_midi_loopback_ports();
         host_add_hw_port("midi_loopback", 1, "MIDI_Loopback", 42);
-    else
+    } else {
+        g_midi_loopback_pb_port[0] = '\0';
         host_remove_hw_port("midi_loopback");
+    }
 
     /* 2. Add plugins, set bypass and port values */
     int total_plugins = g_pedalboard.plugin_count;
@@ -2117,10 +2169,13 @@ void ui_pedalboard_set_midi_loopback(bool enabled)
     if (!g_pb_loaded) return;
     g_pedalboard.midi_loopback = enabled;
     g_pedalboard.modified = true;
-    if (enabled)
+    if (enabled) {
+        detect_midi_loopback_ports();
         host_add_hw_port("midi_loopback", 1, "MIDI_Loopback", 42);
-    else
+    } else {
+        g_midi_loopback_pb_port[0] = '\0';
         host_remove_hw_port("midi_loopback");
+    }
 }
 
 /* Accessor for other modules */
