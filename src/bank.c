@@ -100,11 +100,17 @@ int bank_save(const char *path, const bank_list_t *list)
     cJSON_Delete(root);
     if (!str) return -1;
 
-    FILE *f = fopen(path, "w");
+    /* Write to a temp file then rename so a crash/kill never leaves an empty
+     * or half-written banks.json (rename(2) is atomic on POSIX). */
+    char tmp[1024];
+    snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+    FILE *f = fopen(tmp, "w");
     if (!f) { free(str); return -1; }
-    fputs(str, f);
+    int ok = fputs(str, f) >= 0;
     fclose(f);
     free(str);
+    if (!ok) { remove(tmp); return -1; }
+    if (rename(tmp, path) != 0) { remove(tmp); return -1; }
     return 0;
 }
 
