@@ -10,6 +10,7 @@
 #include <lv2/midi/midi.h>
 #include <lv2/patch/patch.h>
 #include "cJSON.h"
+#include "lv2_utils.h"
 
 /* ─── Internal state ─────────────────────────────────────────────────────────── */
 
@@ -36,6 +37,7 @@ static void extract_port(LilvPlugin *plugin, LilvPort *port, pm_port_info_t *pi)
     /* Name */
     LilvNode *name_n = lilv_port_get_name(plugin, port);
     snprintf(pi->name, sizeof(pi->name), "%s", lilv_str(name_n));
+    lv2u_normalize_quotes(pi->name);
     lilv_node_free(name_n);
 
     /* Type */
@@ -118,6 +120,7 @@ static void extract_plugin(const LilvPlugin *plugin, pm_plugin_info_t *pi)
 
     LilvNode *name = lilv_plugin_get_name(plugin);
     snprintf(pi->name, sizeof(pi->name), "%s", lilv_str(name));
+    lv2u_normalize_quotes(pi->name);
     lilv_node_free(name);
 
     /* Author */

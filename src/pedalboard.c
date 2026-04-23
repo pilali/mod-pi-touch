@@ -183,6 +183,7 @@ static int pb_load_ttl(pedalboard_t *pb, const char *ttl_path)
             SordQuad q; sord_iter_get(it, q);
             pb_subj = q[SORD_SUBJECT]; /* owned by model, valid until sord_free */
             lv2u_get_string(m, pb_subj, doap_name, pb->name, sizeof(pb->name));
+            lv2u_normalize_quotes(pb->name);
         }
         if (it) sord_iter_free(it);
     }
@@ -219,6 +220,7 @@ static int pb_load_ttl(pedalboard_t *pb, const char *ttl_path)
             lv2u_get_float(m, subj, ingen_canvasY, &plug->canvas_y);
             lv2u_get_bool(m,  subj, ingen_enabled, &plug->enabled);
             lv2u_get_string(m, subj, mod_label, plug->label, sizeof(plug->label));
+            lv2u_normalize_quotes(plug->label);
 
             SordNode *preset_n = lv2u_get_object(m, subj, pedal_preset);
             if (preset_n)
@@ -1018,6 +1020,7 @@ int pb_read_name(const char *bundle_path, char *out, size_t out_size)
         if (len >= out_size) len = out_size - 1;
         memcpy(out, p, len);
         out[len] = '\0';
+        lv2u_normalize_quotes(out);
         fclose(f);
         return 0;
     }

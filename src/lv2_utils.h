@@ -71,3 +71,11 @@ bool lv2u_get_string(SordModel *m, SordNode *subject, SordNode *predicate,
 
 /* Iterate all subjects with a given rdf:type. Caller iterates with sord_iter_next(). */
 SordIter *lv2u_iter_type(SordModel *m, SordNode *type_node);
+
+/* ─── String utilities ──────────────────────────────────────────────────────── */
+
+/* Replace typographic quotes with ASCII equivalents in-place:
+ *   U+2018/2019 (curly single quotes) → '
+ *   U+201C/201D (curly double quotes) → "
+ * Safe to call on any UTF-8 string; the result is always <= the input length. */
+void lv2u_normalize_quotes(char *s);
