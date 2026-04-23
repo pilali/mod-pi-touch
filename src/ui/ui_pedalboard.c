@@ -146,6 +146,9 @@ static lv_obj_t      *g_parent_obj = NULL;
 /* JACK playback port of the ALSA Midi-Through (Virtual MIDI Loopback).
  * Set when the loopback is enabled; empty when disabled. */
 static char        g_midi_loopback_pb_port[128] = "";
+/* True only when add_hw_port("midi_loopback") has actually been issued to mod-host.
+ * Guards against calling remove_hw_port when the port was never registered. */
+static bool        g_midi_loopback_active = false;
 
 /* Detect the Midi-Through JACK ports and cache the playback port name.
  * "system:midi_capture_N" (capture = readable by software) is detected first,
@@ -1801,13 +1804,18 @@ void ui_pedalboard_load(const char *bundle_path,
     /* Reload pre-fx instances (host_remove_all removes them too) */
     pre_fx_reload();
 
-    /* Apply Virtual MIDI Loopback state from pedalboard TTL */
+    /* Apply Virtual MIDI Loopback state from pedalboard TTL.
+     * Never call remove_hw_port unless we previously called add_hw_port
+     * (the command blocks ~2 s when the port doesn't exist in mod-host). */
+    if (g_midi_loopback_active) {
+        host_remove_hw_port("midi_loopback");
+        g_midi_loopback_active = false;
+    }
+    g_midi_loopback_pb_port[0] = '\0';
     if (g_pedalboard.midi_loopback) {
         detect_midi_loopback_ports();
         host_add_hw_port("midi_loopback", 1, "MIDI_Loopback", 42);
-    } else {
-        g_midi_loopback_pb_port[0] = '\0';
-        host_remove_hw_port("midi_loopback");
+        g_midi_loopback_active = true;
     }
 
     /* 2. Add plugins, set bypass and port values */
@@ -2171,10 +2179,16 @@ void ui_pedalboard_set_midi_loopback(bool enabled)
     g_pedalboard.modified = true;
     if (enabled) {
         detect_midi_loopback_ports();
-        host_add_hw_port("midi_loopback", 1, "MIDI_Loopback", 42);
+        if (!g_midi_loopback_active) {
+            host_add_hw_port("midi_loopback", 1, "MIDI_Loopback", 42);
+            g_midi_loopback_active = true;
+        }
     } else {
         g_midi_loopback_pb_port[0] = '\0';
-        host_remove_hw_port("midi_loopback");
+        if (g_midi_loopback_active) {
+            host_remove_hw_port("midi_loopback");
+            g_midi_loopback_active = false;
+        }
     }
 }
 
