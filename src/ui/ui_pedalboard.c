@@ -81,6 +81,15 @@ typedef struct {
 #define LAYOUT_MAX_COLS  32
 #define LAYOUT_MAX_ADJ   16
 
+/* Band-layout geometry */
+#define LAYOUT_MARGIN_TOP   40   /* top margin before first plugin row */
+#define LAYOUT_MARGIN_BOT   30   /* bottom margin after last plugin row */
+#define BAND_SEPARATOR_H    70   /* vertical gap between audio/MIDI/CV bands */
+
+/* Plugin type bands (audio on top, MIDI in middle, CV at bottom) */
+typedef enum { PLUG_AUDIO = 0, PLUG_MIDI = 1, PLUG_CV = 2 } plug_band_t;
+#define PLUG_BAND_COUNT 3
+
 /* Forward declarations — these functions are defined later in the file */
 static bool        uri_to_jack_port(const char *uri, const pedalboard_t *pb,
                                     char *out, size_t outsz);
@@ -134,6 +143,11 @@ static io_port_desc_t g_io_in_c[16];
 static io_port_desc_t g_io_out_c[16];
 static lv_obj_t      *g_parent_obj = NULL;
 
+/* Dynamic canvas height and per-band Y offsets (set by compute_layout) */
+static int         g_canvas_h_c           = UI_CANVAS_H;
+static int         g_band_y_c[PLUG_BAND_COUNT] = {0, 0, 0};
+static plug_band_t g_plug_band[PB_MAX_PLUGINS];
+
 /* Choose-input popup state */
 static conn_port_info_t s_choose_ports[CONN_PORT_MAX];
 static int              s_choose_count = 0;
@@ -149,7 +163,7 @@ static void elem_right_center(int idx, lv_coord_t *cx, lv_coord_t *cy)
 {
     if (idx == -1) { /* system input column */
         *cx = (lv_coord_t)(IO_LINE_X + IO_LINE_W);
-        *cy = (lv_coord_t)(UI_CANVAS_H / 2);
+        *cy = (lv_coord_t)(g_canvas_h_c / 2);
     } else if (idx >= 0 && idx < g_pedalboard.plugin_count) {
         *cx = g_layout_x[idx] + LAYOUT_BLOCK_W;
         *cy = g_layout_y[idx] + LAYOUT_BLOCK_H / 2;
@@ -160,7 +174,7 @@ static void elem_left_center(int idx, lv_coord_t *cx, lv_coord_t *cy)
 {
     if (idx == -2) { /* system output column */
         *cx = (lv_coord_t)(g_right_col_x_c + IO_LINE_X);
-        *cy = (lv_coord_t)(UI_CANVAS_H / 2);
+        *cy = (lv_coord_t)(g_canvas_h_c / 2);
     } else if (idx >= 0 && idx < g_pedalboard.plugin_count) {
         *cx = g_layout_x[idx];
         *cy = g_layout_y[idx] + LAYOUT_BLOCK_H / 2;
@@ -684,7 +698,7 @@ static lv_coord_t sysport_y(const char *port_sym, bool is_input)
 {
     io_port_desc_t *descs = is_input ? g_io_in_c : g_io_out_c;
     int n              = is_input ? g_n_in_c  : g_n_out_c;
-    if (n == 0) return (lv_coord_t)(UI_CANVAS_H / 2);
+    if (n == 0) return (lv_coord_t)(g_canvas_h_c / 2);
 
     bool is_midi = (strncmp(port_sym, "midi", 4) == 0);
     const char *p = strrchr(port_sym, '_');
@@ -701,7 +715,7 @@ static lv_coord_t sysport_y(const char *port_sym, bool is_input)
     if (idx < 0 || idx >= n) idx = 0;
 
     int total_h = n * IO_ROW_H - (IO_ROW_H - IO_DOT);
-    int start_y = (UI_CANVAS_H - total_h) / 2;
+    int start_y = (g_canvas_h_c - total_h) / 2;
     return (lv_coord_t)(start_y + idx * IO_ROW_H + IO_DOT / 2);
 }
 
@@ -1223,15 +1237,32 @@ static int uri_to_plugin_idx(const char *uri, const pedalboard_t *pb)
     return -1;
 }
 
+/* Classify a plugin into its band based on LV2 port types. */
+static plug_band_t classify_plugin(const pb_plugin_t *plug)
+{
+    const pm_plugin_info_t *info = pm_plugin_by_uri(plug->uri);
+    if (!info) return PLUG_AUDIO;
+    bool has_midi = false, has_cv = false;
+    for (int i = 0; i < info->port_count; i++) {
+        pm_port_type_t t = info->ports[i].type;
+        if (t == PM_PORT_MIDI_IN || t == PM_PORT_MIDI_OUT) has_midi = true;
+        if (t == PM_PORT_CV_IN   || t == PM_PORT_CV_OUT)   has_cv   = true;
+    }
+    if (has_midi) return PLUG_MIDI;
+    if (has_cv)   return PLUG_CV;
+    return PLUG_AUDIO;
+}
+
 /* Compute display positions for each plugin in pb->plugins[].
- * out_x / out_y arrays must have at least pb->plugin_count entries.
- * canvas_h is the visible height to center into. */
-static void compute_layout(const pedalboard_t *pb,
-                            lv_coord_t *out_x, lv_coord_t *out_y,
-                            int canvas_h)
+ * Plugins are placed in three horizontal bands: Audio (top), MIDI (middle),
+ * CV (bottom). Within each band the signal-flow column layout is preserved.
+ * Returns the total required canvas height and writes g_band_y_c[]. */
+static int compute_layout(const pedalboard_t *pb,
+                           const plug_band_t *band,
+                           lv_coord_t *out_x, lv_coord_t *out_y)
 {
     int n = pb->plugin_count;
-    if (n == 0) return;
+    if (n == 0) return UI_CANVAS_H;
 
     /* ── Build directed adjacency lists ── */
     int adj_out[PB_MAX_PLUGINS][LAYOUT_MAX_ADJ], deg_out[PB_MAX_PLUGINS];
@@ -1243,7 +1274,6 @@ static void compute_layout(const pedalboard_t *pb,
         int f = uri_to_plugin_idx(pb->connections[c].from, pb);
         int t = uri_to_plugin_idx(pb->connections[c].to,   pb);
         if (f < 0 || t < 0 || f == t) continue;
-        /* Deduplicate */
         bool dup = false;
         for (int k = 0; k < deg_out[f]; k++) if (adj_out[f][k] == t) { dup = true; break; }
         if (!dup && deg_out[f] < LAYOUT_MAX_ADJ) adj_out[f][deg_out[f]++] = t;
@@ -1272,7 +1302,6 @@ static void compute_layout(const pedalboard_t *pb,
         }
     }
 
-    /* Remaining nodes (cycles / disconnected) placed in last column + 1 */
     int max_col = 0;
     for (int i = 0; i < n; i++) if (col[i] > max_col) max_col = col[i];
     for (int i = 0; i < n; i++) {
@@ -1283,78 +1312,101 @@ static void compute_layout(const pedalboard_t *pb,
     max_col = 0;
     for (int i = 0; i < n; i++) if (col[i] > max_col) max_col = col[i];
 
-    /* ── Group nodes by column in topological order → initial row assignment ── */
-    int  col_nodes[LAYOUT_MAX_COLS][PB_MAX_PLUGINS];
-    int  col_sz   [LAYOUT_MAX_COLS];
-    memset(col_sz, 0, sizeof(col_sz));
-    for (int ti = 0; ti < topo_n; ti++) {
-        int u = topo[ti], c = col[u];
-        if (c < LAYOUT_MAX_COLS) col_nodes[c][col_sz[c]++] = u;
-    }
-
-    /* row[] is floating-point: initially integer slots within each column */
+    /* ── Per-band row assignment with centering and de-collision ──
+     * For each band we run an independent centering + de-collide pass so
+     * plugins of different types never compete for the same row slot.
+     * row[i] is normalised to start at 0 after each band's pass. */
     float row[PB_MAX_PLUGINS];
-    for (int c = 0; c <= max_col; c++)
-        for (int j = 0; j < col_sz[c]; j++)
-            row[col_nodes[c][j]] = (float)j;
+    int   band_px_h[PLUG_BAND_COUNT];
+    memset(row,       0, n * sizeof(float));
+    memset(band_px_h, 0, sizeof(band_px_h));
 
-    /* ── Center each parent between its immediate successors (right to left) ── */
-    for (int c = max_col - 1; c >= 0; c--) {
-        for (int j = 0; j < col_sz[c]; j++) {
-            int u = col_nodes[c][j];
-            float sum = 0.0f; int cnt = 0;
-            for (int k = 0; k < deg_out[u]; k++) {
-                int v = adj_out[u][k];
-                if (col[v] == c + 1) { sum += row[v]; cnt++; }
+    for (int b = 0; b < PLUG_BAND_COUNT; b++) {
+        /* Per-column node lists for this band, in topological order */
+        int bcol_nodes[LAYOUT_MAX_COLS][PB_MAX_PLUGINS];
+        int bcol_sz   [LAYOUT_MAX_COLS];
+        memset(bcol_sz, 0, sizeof(bcol_sz));
+        for (int ti = 0; ti < topo_n; ti++) {
+            int u = topo[ti];
+            if ((int)band[u] != b) continue;
+            int c = col[u];
+            if (c < LAYOUT_MAX_COLS) bcol_nodes[c][bcol_sz[c]++] = u;
+        }
+
+        /* Initialise row: sequential integers within each column */
+        for (int c = 0; c <= max_col; c++)
+            for (int j = 0; j < bcol_sz[c]; j++)
+                row[bcol_nodes[c][j]] = (float)j;
+
+        /* Center parent between same-band successors (right to left) */
+        for (int c = max_col - 1; c >= 0; c--) {
+            for (int j = 0; j < bcol_sz[c]; j++) {
+                int u = bcol_nodes[c][j];
+                float sum = 0.0f; int cnt = 0;
+                for (int k = 0; k < deg_out[u]; k++) {
+                    int v = adj_out[u][k];
+                    if ((int)band[v] == b && col[v] == c + 1) { sum += row[v]; cnt++; }
+                }
+                if (cnt > 0) row[u] = sum / (float)cnt;
             }
-            if (cnt > 0) row[u] = sum / (float)cnt;
         }
-    }
 
-    /* ── De-collide: within each column sort by row then enforce 1-unit gaps ── */
-    for (int c = 0; c <= max_col; c++) {
-        if (col_sz[c] <= 1) continue;
-
-        /* Insertion sort col_nodes[c] by row value */
-        for (int a = 1; a < col_sz[c]; a++) {
-            int ua = col_nodes[c][a];
-            float ra = row[ua];
-            int b = a - 1;
-            while (b >= 0 && row[col_nodes[c][b]] > ra) {
-                col_nodes[c][b + 1] = col_nodes[c][b];
-                b--;
+        /* De-collide: sort by row, enforce ≥ 1-unit gap */
+        for (int c = 0; c <= max_col; c++) {
+            if (bcol_sz[c] <= 1) continue;
+            for (int a = 1; a < bcol_sz[c]; a++) {
+                int ua = bcol_nodes[c][a];
+                float ra = row[ua];
+                int bi = a - 1;
+                while (bi >= 0 && row[bcol_nodes[c][bi]] > ra) {
+                    bcol_nodes[c][bi + 1] = bcol_nodes[c][bi]; bi--;
+                }
+                bcol_nodes[c][bi + 1] = ua;
             }
-            col_nodes[c][b + 1] = ua;
+            for (int j = 1; j < bcol_sz[c]; j++) {
+                float needed = row[bcol_nodes[c][j - 1]] + 1.0f;
+                if (row[bcol_nodes[c][j]] < needed)
+                    row[bcol_nodes[c][j]] = needed;
+            }
         }
 
-        /* Push each node down so no two share the same row */
-        for (int j = 1; j < col_sz[c]; j++) {
-            float needed = row[col_nodes[c][j - 1]] + 1.0f;
-            if (row[col_nodes[c][j]] < needed)
-                row[col_nodes[c][j]] = needed;
+        /* Normalise row[] to [0..] and compute band pixel height */
+        float rmin = 0.0f, rmax = 0.0f;
+        bool  has  = false;
+        for (int i = 0; i < n; i++) {
+            if ((int)band[i] != b) continue;
+            if (!has || row[i] < rmin) rmin = row[i];
+            if (!has || row[i] > rmax) rmax = row[i];
+            has = true;
         }
-    }
-
-    /* ── Convert to pixel coordinates, centering each column independently ── */
-    for (int c = 0; c <= max_col; c++) {
-        if (col_sz[c] == 0) continue;
-
-        /* Find min/max row value in this column */
-        float rmin = row[col_nodes[c][0]], rmax = rmin;
-        for (int j = 1; j < col_sz[c]; j++) {
-            float r = row[col_nodes[c][j]];
-            if (r < rmin) rmin = r;
-            if (r > rmax) rmax = r;
-        }
-        float col_span_px = (rmax - rmin) * LAYOUT_STEP_Y;
-        int   start_y     = (canvas_h - LAYOUT_BLOCK_H - (int)col_span_px) / 2;
-
-        for (int j = 0; j < col_sz[c]; j++) {
-            int u = col_nodes[c][j];
-            out_x[u] = (lv_coord_t)(c * LAYOUT_STEP_X + 20);
-            out_y[u] = (lv_coord_t)(start_y + (int)((row[u] - rmin) * LAYOUT_STEP_Y));
+        if (has) {
+            for (int i = 0; i < n; i++)
+                if ((int)band[i] == b) row[i] -= rmin;
+            band_px_h[b] = (int)((rmax - rmin) * (float)LAYOUT_STEP_Y) + LAYOUT_BLOCK_H;
         }
     }
+
+    /* ── Stack bands vertically, compute Y offsets ── */
+    int cur_y = LAYOUT_MARGIN_TOP;
+    bool first_band = true;
+    for (int b = 0; b < PLUG_BAND_COUNT; b++) {
+        if (band_px_h[b] == 0) { g_band_y_c[b] = cur_y; continue; }
+        if (!first_band) cur_y += BAND_SEPARATOR_H;
+        g_band_y_c[b] = cur_y;
+        cur_y += band_px_h[b];
+        first_band = false;
+    }
+    int total_h = cur_y + LAYOUT_MARGIN_BOT;
+    if (total_h < UI_CANVAS_H) total_h = UI_CANVAS_H;
+
+    /* ── Convert to pixel coordinates ── */
+    for (int i = 0; i < n; i++) {
+        out_x[i] = (lv_coord_t)(col[i] * LAYOUT_STEP_X + 20);
+        out_y[i] = (lv_coord_t)(g_band_y_c[(int)band[i]] +
+                                (int)(row[i] * (float)LAYOUT_STEP_Y));
+    }
+
+    return total_h;
 }
 
 /* ─── Refresh (rebuild UI from state) ───────────────────────────────────────── */
@@ -1375,10 +1427,12 @@ void ui_pedalboard_refresh(void)
 
     g_left_offset_c = (g_n_in_c > 0) ? IO_COL_W : 16;
 
-    /* ── Compute plugin layout into global arrays ── */
+    /* ── Classify plugins into bands and compute layout ── */
     memset(g_layout_x, 0, sizeof(g_layout_x));
     memset(g_layout_y, 0, sizeof(g_layout_y));
-    compute_layout(&g_pedalboard, g_layout_x, g_layout_y, UI_CANVAS_H);
+    for (int i = 0; i < g_pedalboard.plugin_count; i++)
+        g_plug_band[i] = classify_plugin(&g_pedalboard.plugins[i]);
+    g_canvas_h_c = compute_layout(&g_pedalboard, g_plug_band, g_layout_x, g_layout_y);
 
     lv_coord_t max_right = 0;
     for (int i = 0; i < g_pedalboard.plugin_count; i++) {
@@ -1397,12 +1451,12 @@ void ui_pedalboard_refresh(void)
     redraw_connections();
 
     /* ── Draw left I/O column (inputs) ── */
-    draw_io_column(g_canvas_scroll, g_io_in_c, g_n_in_c, 0, UI_CANVAS_H, false);
+    draw_io_column(g_canvas_scroll, g_io_in_c, g_n_in_c, 0, g_canvas_h_c, false);
 
     /* Transparent tap zone over the left IO column — opens connection panel */
     if (g_n_in_c > 0) {
         lv_obj_t *io_tap = lv_obj_create(g_canvas_scroll);
-        lv_obj_set_size(io_tap, g_left_offset_c, UI_CANVAS_H);
+        lv_obj_set_size(io_tap, g_left_offset_c, g_canvas_h_c);
         lv_obj_set_pos(io_tap, 0, 0);
         lv_obj_set_style_bg_opa(io_tap, LV_OPA_TRANSP, 0);
         lv_obj_set_style_border_width(io_tap, 0, 0);
@@ -1425,12 +1479,12 @@ void ui_pedalboard_refresh(void)
 
     /* ── Draw right I/O column (outputs) ── */
     draw_io_column(g_canvas_scroll, g_io_out_c, g_n_out_c,
-                   g_right_col_x_c, UI_CANVAS_H, true);
+                   g_right_col_x_c, g_canvas_h_c, true);
 
     /* Transparent tap zone over the right IO column — selects system output as target */
     if (g_n_out_c > 0) {
         lv_obj_t *io_out_tap = lv_obj_create(g_canvas_scroll);
-        lv_obj_set_size(io_out_tap, IO_COL_W, UI_CANVAS_H);
+        lv_obj_set_size(io_out_tap, IO_COL_W, g_canvas_h_c);
         lv_obj_set_pos(io_out_tap, g_right_col_x_c, 0);
         lv_obj_set_style_bg_opa(io_out_tap, LV_OPA_TRANSP, 0);
         lv_obj_set_style_border_width(io_out_tap, 0, 0);
@@ -1445,15 +1499,51 @@ void ui_pedalboard_refresh(void)
 
     /* ── Dynamic content dimensions ── */
     int content_w = g_right_col_x_c + IO_COL_W + 20;
-    int content_h = UI_CANVAS_H;
-    for (int i = 0; i < g_pedalboard.plugin_count; i++) {
-        int bot = (int)g_layout_y[i] + LAYOUT_BLOCK_H + 20;
-        if (bot > content_h) content_h = bot;
+    int content_h = g_canvas_h_c;
+
+    /* ── Band separator lines and labels (only when multiple bands present) ── */
+    {
+        bool bands_present[PLUG_BAND_COUNT] = {false, false, false};
+        for (int i = 0; i < g_pedalboard.plugin_count; i++)
+            bands_present[(int)g_plug_band[i]] = true;
+        int n_bands = 0;
+        for (int b = 0; b < PLUG_BAND_COUNT; b++) if (bands_present[b]) n_bands++;
+
+        if (n_bands > 1) {
+            static const char * const band_names[PLUG_BAND_COUNT] = { "Audio", "MIDI", "CV" };
+            for (int b = 0; b < PLUG_BAND_COUNT; b++) {
+                if (!bands_present[b]) continue;
+
+                /* Horizontal separator above every non-first band */
+                if (b > 0) {
+                    int sep_y = g_band_y_c[b] - BAND_SEPARATOR_H / 2;
+                    lv_obj_t *sep = lv_obj_create(g_canvas_scroll);
+                    lv_obj_set_size(sep, content_w, 1);
+                    lv_obj_set_pos(sep, 0, sep_y);
+                    lv_obj_set_style_bg_color(sep, lv_color_hex(0x2a3848), 0);
+                    lv_obj_set_style_bg_opa(sep, LV_OPA_COVER, 0);
+                    lv_obj_set_style_border_width(sep, 0, 0);
+                    lv_obj_clear_flag(sep, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+                }
+
+                /* Band label (above the Audio section, or just below the separator) */
+                int lbl_y = (b == 0)
+                    ? (g_band_y_c[0] - 22)
+                    : (g_band_y_c[b] - BAND_SEPARATOR_H / 2 + 6);
+                lv_obj_t *lbl = lv_label_create(g_canvas_scroll);
+                lv_label_set_text(lbl, band_names[b]);
+                lv_obj_set_pos(lbl, g_left_offset_c + 8, lbl_y);
+                lv_obj_set_style_text_color(lbl, lv_color_hex(0x405870), 0);
+                lv_obj_set_style_text_font(lbl, &lv_font_montserrat_14, 0);
+                lv_obj_clear_flag(lbl, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+            }
+        }
     }
 
+    /* Spacer at bottom-right so LVGL knows the full scrollable extent */
     lv_obj_t *spacer = lv_obj_create(g_canvas_scroll);
     lv_obj_set_size(spacer, 1, 1);
-    lv_obj_set_pos(spacer, content_w - 1, content_h / 2);
+    lv_obj_set_pos(spacer, content_w - 1, content_h - 1);
     lv_obj_set_style_bg_opa(spacer, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(spacer, 0, 0);
     lv_obj_clear_flag(spacer, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
