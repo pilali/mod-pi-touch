@@ -605,3 +605,23 @@ int host_patch_set(int instance, const char *param_uri, const char *path)
     fprintf(stderr, "[host] patch_set %d %s \"%s\" → %d\n", instance, param_uri, path, r);
     return r;
 }
+
+int host_add_hw_port(const char *symbol, int is_output,
+                     const char *title, int index)
+{
+    char cmd[HOST_CMD_MAX];
+    snprintf(cmd, sizeof(cmd), "add_hw_port /graph/%s midi %d %s %d",
+             symbol, is_output, title, index);
+    int r = host_comm_send_sync(cmd, NULL, 0, 2000);
+    fprintf(stderr, "[host] add_hw_port %s → %d\n", symbol, r);
+    return r;
+}
+
+int host_remove_hw_port(const char *symbol)
+{
+    char cmd[HOST_CMD_MAX];
+    snprintf(cmd, sizeof(cmd), "remove_hw_port /graph/%s", symbol);
+    int r = host_comm_send_sync(cmd, NULL, 0, 2000);
+    fprintf(stderr, "[host] remove_hw_port %s → %d\n", symbol, r);
+    return r;
+}

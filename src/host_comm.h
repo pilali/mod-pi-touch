@@ -94,3 +94,13 @@ int host_output_data_ready(void);
 /* Send a patch:writable parameter (file path) to a plugin instance.
  * Sends: patch_set <instance> <param_uri> <path> */
 int host_patch_set(int instance, const char *param_uri, const char *path);
+
+/* Expose or hide a hardware-like JACK port in the mod-host graph.
+ * symbol: short name used in the graph (e.g. "midi_loopback")
+ * is_output: 1 = MIDI output (sends into graph), 0 = MIDI input
+ * title:  display name (spaces → underscores for mod-host)
+ * index:  port index for ordering (42 for the MIDI loopback)
+ * Sends: add_hw_port /graph/<symbol> midi <is_output> <title> <index> */
+int host_add_hw_port(const char *symbol, int is_output,
+                     const char *title, int index);
+int host_remove_hw_port(const char *symbol);

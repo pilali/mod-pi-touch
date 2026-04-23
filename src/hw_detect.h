@@ -1,5 +1,6 @@
 #pragma once
 #include <stdbool.h>
+#include <stddef.h>
 
 #define HW_MAX_AUDIO_DEVICES 8
 #define HW_MAX_MIDI_PORTS    16
@@ -22,9 +23,15 @@ typedef struct {
  * Returns count written to out[] (≤ max). */
 int hw_detect_audio(hw_audio_device_t *out, int max);
 
-/* Enumerate ALSA raw-MIDI ports via `amidi -l`.
+/* Enumerate MIDI ports: physical ALSA ports (amidi -l) + JACK software clients
+ * (a2jmidid, TouchOSC, etc.). The Midi-Through loopback port is excluded.
  * Returns count written to out[] (≤ max). */
 int hw_detect_midi(hw_midi_port_t *out, int max);
+
+/* Detect the ALSA Midi-Through port in JACK (Virtual MIDI Loopback).
+ * Fills out_jack_port with the JACK port name (e.g. "system:midi_capture_3").
+ * Returns 1 if found, 0 otherwise. */
+int hw_detect_midi_loopback(char *out_jack_port, size_t sz);
 
 /* ── JACK port query ─────────────────────────────────────────────────────── */
 

@@ -322,7 +322,9 @@ static int pb_load_ttl(pedalboard_t *pb, const char *ttl_path)
         sord_node_free(lv2u_world(), ingen_arc_pred);
     }
 
-    /* Transport ports: iterate lv2:port of pb_subj, look for :bpm, :bpb, :rolling */
+    /* Special pedalboard ports: transport (:bpm, :bpb, :rolling) and
+     * Virtual MIDI Loopback (midi_loopback).  All stored as lv2:port of
+     * pb_subj with ingen:value; identified by the final URI path segment. */
     if (pb_subj) {
         SordQuad tpat = { pb_subj, lv2_port, NULL, NULL };
         SordIter *tit = sord_find(m, tpat);
@@ -331,20 +333,23 @@ static int pb_load_ttl(pedalboard_t *pb, const char *ttl_path)
             SordNode *port_node = tq[SORD_OBJECT];
             const uint8_t *puri = sord_node_get_string(port_node);
             if (!puri) { sord_iter_next(tit); continue; }
-            /* URI ends with "/:bpm", "/:bpb", "/:rolling" after resolution */
+            /* Match by last path segment after '/' */
             const char *last_slash = strrchr((const char *)puri, '/');
             if (last_slash) {
                 const char *tail = last_slash + 1;
                 float val = 0.0f;
-                if      (strcmp(tail, ":bpm")     == 0 &&
+                if      (strcmp(tail, ":bpm")        == 0 &&
                          lv2u_get_float(m, port_node, ingen_value, &val))
                     pb->bpm = val;
-                else if (strcmp(tail, ":bpb")     == 0 &&
+                else if (strcmp(tail, ":bpb")        == 0 &&
                          lv2u_get_float(m, port_node, ingen_value, &val))
                     pb->bpb = val;
-                else if (strcmp(tail, ":rolling") == 0 &&
+                else if (strcmp(tail, ":rolling")    == 0 &&
                          lv2u_get_float(m, port_node, ingen_value, &val))
                     pb->transport_rolling = (val != 0.0f);
+                else if (strcmp(tail, "midi_loopback") == 0 &&
+                         lv2u_get_float(m, port_node, ingen_value, &val))
+                    pb->midi_loopback = (val != 0.0f);
             }
             sord_iter_next(tit);
         }
@@ -851,6 +856,10 @@ static int pb_save_ttl(pedalboard_t *pb, const char *ttl_path)
                "    a lv2:ControlPort ,\n        lv2:InputPort .\n\n",
             pb->transport_rolling ? 1 : 0);
 
+    fprintf(f, "<midi_loopback>\n    ingen:value %d ;\n    lv2:index 3 ;\n"
+               "    a atom:AtomPort ,\n        lv2:InputPort .\n\n",
+            pb->midi_loopback ? 1 : 0);
+
     /* ── Graph subject <> ── */
     fprintf(f, "<>\n    doap:name \"%s\" ;\n    ingen:polyphony 1 ;\n", pb->name);
 
@@ -870,10 +879,10 @@ static int pb_save_ttl(pedalboard_t *pb, const char *ttl_path)
         fputs(" ;\n", f);
     }
 
-    /* lv2:port list (system ports + transport ports — mod-ui compatible) */
+    /* lv2:port list — mod-ui compatible (transport + loopback + system ports) */
     const char *sys_ports[] = {
         "capture_1", "capture_2", "playback_1", "playback_2",
-        ":bpb", ":bpm", ":rolling", NULL
+        ":bpb", ":bpm", ":rolling", "midi_loopback", NULL
     };
     fputs("    lv2:port", f);
     for (int i = 0; sys_ports[i]; i++)

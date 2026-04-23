@@ -137,6 +137,7 @@ typedef struct {
     float  bpb;
     bool   transport_rolling;   /* true = playing */
     int    transport_sync;      /* 0=internal, 1=midi_clock_slave */
+    bool   midi_loopback;       /* true = Virtual MIDI Loopback enabled */
     bool   modified;
 } pedalboard_t;
 

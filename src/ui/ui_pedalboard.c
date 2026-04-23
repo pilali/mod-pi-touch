@@ -1752,6 +1752,12 @@ void ui_pedalboard_load(const char *bundle_path,
     /* Reload pre-fx instances (host_remove_all removes them too) */
     pre_fx_reload();
 
+    /* Apply Virtual MIDI Loopback state from pedalboard TTL */
+    if (g_pedalboard.midi_loopback)
+        host_add_hw_port("midi_loopback", 1, "MIDI_Loopback", 42);
+    else
+        host_remove_hw_port("midi_loopback");
+
     /* 2. Add plugins, set bypass and port values */
     int total_plugins = g_pedalboard.plugin_count;
     for (int i = 0; i < total_plugins; i++) {
@@ -2104,6 +2110,17 @@ void ui_pedalboard_on_midi_mapped(int instance_id, const char *symbol,
         msg->ch = ch; msg->cc = cc; msg->min = min; msg->max = max;
         lv_async_call(midi_mapped_async_cb, msg);
     }
+}
+
+void ui_pedalboard_set_midi_loopback(bool enabled)
+{
+    if (!g_pb_loaded) return;
+    g_pedalboard.midi_loopback = enabled;
+    g_pedalboard.modified = true;
+    if (enabled)
+        host_add_hw_port("midi_loopback", 1, "MIDI_Loopback", 42);
+    else
+        host_remove_hw_port("midi_loopback");
 }
 
 /* Accessor for other modules */

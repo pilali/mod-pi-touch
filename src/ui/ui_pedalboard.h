@@ -53,6 +53,10 @@ void ui_pedalboard_chain_bypass(bool bypass_all);
 void ui_pedalboard_on_midi_mapped(int instance_id, const char *symbol,
                                   int ch, int cc, float min, float max);
 
+/* Enable or disable the Virtual MIDI Loopback for the current pedalboard.
+ * Updates pb->midi_loopback, issues the mod-host command, and marks modified. */
+void ui_pedalboard_set_midi_loopback(bool enabled);
+
 /* Accessors */
 pedalboard_t *ui_pedalboard_get(void);
 bool          ui_pedalboard_is_loaded(void);

@@ -274,6 +274,13 @@ static void build_audio_section(lv_obj_t *parent)
 
 /* ─── MIDI section ───────────────────────────────────────────────────────────── */
 
+static void midi_loopback_cb(lv_event_t *e)
+{
+    lv_obj_t *cb = lv_event_get_target(e);
+    bool enabled = lv_obj_has_state(cb, LV_STATE_CHECKED);
+    ui_pedalboard_set_midi_loopback(enabled);
+}
+
 static void midi_toggle_cb(lv_event_t *e)
 {
     midi_ctx_t *ctx = lv_event_get_user_data(e);
@@ -354,6 +361,27 @@ static void build_midi_section(lv_obj_t *parent)
 
         lv_obj_set_style_text_color(cb, UI_COLOR_TEXT, 0);
         lv_obj_add_event_cb(cb, midi_toggle_cb, LV_EVENT_VALUE_CHANGED, &g_midi_ctx[i]);
+    }
+
+    /* Virtual MIDI Loopback toggle (ALSA Midi-Through → pedalboard MIDI input) */
+    {
+        lv_obj_t *row = make_row(parent);
+        lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START,
+                              LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+        lv_obj_t *cb = lv_checkbox_create(row);
+        lv_checkbox_set_text(cb, TR(TR_SETTINGS_MIDI_LOOPBACK));
+        lv_obj_set_style_text_color(cb, UI_COLOR_TEXT, 0);
+
+        /* Reflect current pedalboard state */
+        if (ui_pedalboard_is_loaded()) {
+            pedalboard_t *pb = ui_pedalboard_get();
+            if (pb->midi_loopback)
+                lv_obj_add_state(cb, LV_STATE_CHECKED);
+        } else {
+            lv_obj_add_state(cb, LV_STATE_DISABLED);
+        }
+
+        lv_obj_add_event_cb(cb, midi_loopback_cb, LV_EVENT_VALUE_CHANGED, NULL);
     }
 }
 
