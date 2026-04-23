@@ -322,6 +322,35 @@ static int pb_load_ttl(pedalboard_t *pb, const char *ttl_path)
         sord_node_free(lv2u_world(), ingen_arc_pred);
     }
 
+    /* Transport ports: iterate lv2:port of pb_subj, look for :bpm, :bpb, :rolling */
+    if (pb_subj) {
+        SordQuad tpat = { pb_subj, lv2_port, NULL, NULL };
+        SordIter *tit = sord_find(m, tpat);
+        while (tit && !sord_iter_end(tit)) {
+            SordQuad tq; sord_iter_get(tit, tq);
+            SordNode *port_node = tq[SORD_OBJECT];
+            const uint8_t *puri = sord_node_get_string(port_node);
+            if (!puri) { sord_iter_next(tit); continue; }
+            /* URI ends with "/:bpm", "/:bpb", "/:rolling" after resolution */
+            const char *last_slash = strrchr((const char *)puri, '/');
+            if (last_slash) {
+                const char *tail = last_slash + 1;
+                float val = 0.0f;
+                if      (strcmp(tail, ":bpm")     == 0 &&
+                         lv2u_get_float(m, port_node, ingen_value, &val))
+                    pb->bpm = val;
+                else if (strcmp(tail, ":bpb")     == 0 &&
+                         lv2u_get_float(m, port_node, ingen_value, &val))
+                    pb->bpb = val;
+                else if (strcmp(tail, ":rolling") == 0 &&
+                         lv2u_get_float(m, port_node, ingen_value, &val))
+                    pb->transport_rolling = (val != 0.0f);
+            }
+            sord_iter_next(tit);
+        }
+        if (tit) sord_iter_free(tit);
+    }
+
     /* Free cached URIs */
     sord_node_free(lv2u_world(), ingen_Block);
     sord_node_free(lv2u_world(), ingen_Arc);
@@ -414,6 +443,44 @@ int pb_load(pedalboard_t *pb, const char *bundle_dir)
         snprintf(ttl_path, sizeof(ttl_path), "%s/%s.ttl", bundle_dir, pb->name);
     }
 
+    /* Load transport.json as fallback for bundles saved by older versions
+     * that did not write transport ports into the TTL.
+     * pb_load_ttl() will override these values if :bpm/:bpb/:rolling are
+     * found in the TTL (TTL is authoritative for mod-ui compatibility). */
+    {
+        char trans_path[PB_PATH_MAX];
+        snprintf(trans_path, sizeof(trans_path), "%s/transport.json", bundle_dir);
+        FILE *tf = fopen(trans_path, "r");
+        if (tf) {
+            fseek(tf, 0, SEEK_END);
+            long tsz = ftell(tf);
+            rewind(tf);
+            if (tsz > 0 && tsz < 4096) {
+                char *tbuf = malloc((size_t)tsz + 1);
+                if (tbuf) {
+                    fread(tbuf, 1, (size_t)tsz, tf);
+                    tbuf[tsz] = '\0';
+                    cJSON *tj = cJSON_Parse(tbuf);
+                    free(tbuf);
+                    if (tj) {
+                        cJSON *jbpm  = cJSON_GetObjectItem(tj, "bpm");
+                        cJSON *jbpb  = cJSON_GetObjectItem(tj, "bpb");
+                        cJSON *jroll = cJSON_GetObjectItem(tj, "rolling");
+                        cJSON *jsync = cJSON_GetObjectItem(tj, "sync");
+                        if (cJSON_IsNumber(jbpm))  pb->bpm = (float)jbpm->valuedouble;
+                        if (cJSON_IsNumber(jbpb))  pb->bpb = (float)jbpb->valuedouble;
+                        if (cJSON_IsBool(jroll))   pb->transport_rolling = cJSON_IsTrue(jroll);
+                        if (cJSON_IsString(jsync))
+                            pb->transport_sync =
+                                strcmp(jsync->valuestring, "midi_clock_slave") == 0 ? 1 : 0;
+                        cJSON_Delete(tj);
+                    }
+                }
+            }
+            fclose(tf);
+        }
+    }
+
     fprintf(stderr, "[pedalboard] loading ttl: %s\n", ttl_path);
     int r = pb_load_ttl(pb, ttl_path);
     fprintf(stderr, "[pedalboard] pb_load_ttl returned %d, plugins=%d conns=%d\n",
@@ -425,39 +492,6 @@ int pb_load(pedalboard_t *pb, const char *bundle_dir)
     snprintf(snap_path, sizeof(snap_path), "%s/snapshots.json", bundle_dir);
     snapshot_load(snap_path, pb->snapshots, &pb->snapshot_count,
                   PB_MAX_SNAPSHOTS, &pb->current_snapshot);
-
-    /* Load transport settings (optional — not a hard error if absent) */
-    char trans_path[PB_PATH_MAX];
-    snprintf(trans_path, sizeof(trans_path), "%s/transport.json", bundle_dir);
-    FILE *tf = fopen(trans_path, "r");
-    if (tf) {
-        fseek(tf, 0, SEEK_END);
-        long tsz = ftell(tf);
-        rewind(tf);
-        if (tsz > 0 && tsz < 4096) {
-            char *tbuf = malloc((size_t)tsz + 1);
-            if (tbuf) {
-                fread(tbuf, 1, (size_t)tsz, tf);
-                tbuf[tsz] = '\0';
-                cJSON *tj = cJSON_Parse(tbuf);
-                free(tbuf);
-                if (tj) {
-                    cJSON *jbpm = cJSON_GetObjectItem(tj, "bpm");
-                    cJSON *jbpb = cJSON_GetObjectItem(tj, "bpb");
-                    cJSON *jroll = cJSON_GetObjectItem(tj, "rolling");
-                    cJSON *jsync = cJSON_GetObjectItem(tj, "sync");
-                    if (cJSON_IsNumber(jbpm))  pb->bpm = (float)jbpm->valuedouble;
-                    if (cJSON_IsNumber(jbpb))  pb->bpb = (float)jbpb->valuedouble;
-                    if (cJSON_IsBool(jroll))   pb->transport_rolling = cJSON_IsTrue(jroll);
-                    if (cJSON_IsString(jsync)) {
-                        pb->transport_sync = strcmp(jsync->valuestring, "midi_clock_slave") == 0 ? 1 : 0;
-                    }
-                    cJSON_Delete(tj);
-                }
-            }
-        }
-        fclose(tf);
-    }
 
     /* Load CV assignments from addressings.json */
     {
@@ -804,6 +838,19 @@ static int pb_save_ttl(pedalboard_t *pb, const char *ttl_path)
 
     }
 
+    /* ── Transport ports (mod-ui compatible) ── */
+    fprintf(f, "<:bpb>\n    ingen:value ");
+    write_float(f, pb->bpb);
+    fputs(" ;\n    lv2:index 0 ;\n    a lv2:ControlPort ,\n        lv2:InputPort .\n\n", f);
+
+    fprintf(f, "<:bpm>\n    ingen:value ");
+    write_float(f, pb->bpm);
+    fputs(" ;\n    lv2:index 1 ;\n    a lv2:ControlPort ,\n        lv2:InputPort .\n\n", f);
+
+    fprintf(f, "<:rolling>\n    ingen:value %d ;\n    lv2:index 2 ;\n"
+               "    a lv2:ControlPort ,\n        lv2:InputPort .\n\n",
+            pb->transport_rolling ? 1 : 0);
+
     /* ── Graph subject <> ── */
     fprintf(f, "<>\n    doap:name \"%s\" ;\n    ingen:polyphony 1 ;\n", pb->name);
 
@@ -823,8 +870,11 @@ static int pb_save_ttl(pedalboard_t *pb, const char *ttl_path)
         fputs(" ;\n", f);
     }
 
-    /* lv2:port list (system capture/playback ports) */
-    const char *sys_ports[] = { "capture_1", "capture_2", "playback_1", "playback_2", NULL };
+    /* lv2:port list (system ports + transport ports — mod-ui compatible) */
+    const char *sys_ports[] = {
+        "capture_1", "capture_2", "playback_1", "playback_2",
+        ":bpb", ":bpm", ":rolling", NULL
+    };
     fputs("    lv2:port", f);
     for (int i = 0; sys_ports[i]; i++)
         fprintf(f, " %s<%s>", (i == 0) ? "" : ",\n             ", sys_ports[i]);
@@ -891,22 +941,8 @@ int pb_save(pedalboard_t *pb)
     if (snapshot_save(snap_path, pb->snapshots, pb->snapshot_count,
                       pb->current_snapshot) < 0) return -1;
 
-    /* Save transport settings */
-    char trans_path[PB_PATH_MAX];
-    snprintf(trans_path, sizeof(trans_path), "%s/transport.json", pb->path);
-    FILE *tf = fopen(trans_path, "w");
-    if (tf) {
-        cJSON *tj = cJSON_CreateObject();
-        cJSON_AddNumberToObject(tj, "bpm",     (double)pb->bpm);
-        cJSON_AddNumberToObject(tj, "bpb",     (double)pb->bpb);
-        cJSON_AddBoolToObject  (tj, "rolling", pb->transport_rolling);
-        cJSON_AddStringToObject(tj, "sync",
-            pb->transport_sync == 1 ? "midi_clock_slave" : "none");
-        char *out = cJSON_Print(tj);
-        if (out) { fputs(out, tf); free(out); }
-        cJSON_Delete(tj);
-        fclose(tf);
-    }
+    /* Transport is now stored in the TTL (mod-ui compatible).
+     * transport.json is no longer written; existing ones are read as fallback. */
 
     pb_save_addressings(pb);
 
