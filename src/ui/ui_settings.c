@@ -307,7 +307,6 @@ static void build_midi_section(lv_obj_t *parent)
         lv_obj_t *lbl = lv_label_create(parent);
         lv_label_set_text(lbl, TR(TR_SETTINGS_NO_MIDI));
         lv_obj_set_style_text_color(lbl, UI_COLOR_TEXT_DIM, 0);
-        return;
     }
 
     /* Merge detected ports into settings */
