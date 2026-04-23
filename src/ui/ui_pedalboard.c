@@ -2013,3 +2013,72 @@ void ui_pedalboard_on_midi_mapped(int instance_id, const char *symbol,
 /* Accessor for other modules */
 pedalboard_t *ui_pedalboard_get(void) { return &g_pedalboard; }
 bool          ui_pedalboard_is_loaded(void) { return g_pb_loaded; }
+
+bool ui_pedalboard_is_cv_out_enabled(int instance_id, const char *symbol)
+{
+    pb_plugin_t *plug = pb_find_plugin(&g_pedalboard, instance_id);
+    if (!plug) return false;
+    char uri[PB_CV_URI_MAX];
+    snprintf(uri, sizeof(uri), "/cv/graph/%s/%s", plug->symbol, symbol);
+    for (int i = 0; i < g_cv_source_count; i++)
+        if (strcmp(g_cv_sources[i].uri, uri) == 0) return true;
+    return false;
+}
+
+void ui_pedalboard_set_cv_out_enabled(int instance_id, const char *symbol, bool enabled)
+{
+    pb_plugin_t *plug = pb_find_plugin(&g_pedalboard, instance_id);
+    if (!plug) return;
+    char uri[PB_CV_URI_MAX];
+    snprintf(uri, sizeof(uri), "/cv/graph/%s/%s", plug->symbol, symbol);
+
+    if (!enabled) {
+        /* Remove from g_cv_sources */
+        for (int i = 0; i < g_cv_source_count; i++) {
+            if (strcmp(g_cv_sources[i].uri, uri) != 0) continue;
+            for (int j = i; j < g_cv_source_count - 1; j++)
+                g_cv_sources[j] = g_cv_sources[j + 1];
+            g_cv_source_count--;
+            break;
+        }
+        /* Unmap every parameter that referenced this CV source */
+        for (int i = 0; i < g_pedalboard.plugin_count; i++) {
+            pb_plugin_t *p = &g_pedalboard.plugins[i];
+            for (int j = 0; j < p->port_count; j++) {
+                pb_port_t *port = &p->ports[j];
+                if (strcmp(port->cv_source_uri, uri) != 0) continue;
+                host_cv_unmap(p->instance_id, port->symbol);
+                port->cv_source_uri[0] = '\0';
+                port->cv_op_mode       = '\0';
+            }
+        }
+    } else {
+        /* Add back if not already present */
+        for (int i = 0; i < g_cv_source_count; i++)
+            if (strcmp(g_cv_sources[i].uri, uri) == 0) return;
+        if (g_cv_source_count >= CV_SOURCE_MAX) return;
+
+        const pm_plugin_info_t *pm = pm_plugin_by_uri(plug->uri);
+        if (!pm) return;
+        for (int j = 0; j < pm->port_count; j++) {
+            if (pm->ports[j].type != PM_PORT_CV_OUT) continue;
+            if (strcmp(pm->ports[j].symbol, symbol) != 0) continue;
+            pb_cv_source_t *src = &g_cv_sources[g_cv_source_count++];
+            snprintf(src->uri,       sizeof(src->uri),       "%s", uri);
+            snprintf(src->jack_port, sizeof(src->jack_port), "effect_%d:%s", instance_id, symbol);
+            snprintf(src->label,     sizeof(src->label),     "%s \xe2\x80\x94 %s",
+                     plug->label,
+                     pm->ports[j].name[0] ? pm->ports[j].name : pm->ports[j].symbol);
+            src->cv_min = pm->ports[j].min;
+            src->cv_max = pm->ports[j].max;
+            if (src->cv_min >= 0.0f && src->cv_max > 0.0f)       src->op_mode = '+';
+            else if (src->cv_min < 0.0f && src->cv_max <= 0.0f)  src->op_mode = '-';
+            else if (src->cv_min < 0.0f && src->cv_max > 0.0f)   src->op_mode = 'b';
+            else                                                   src->op_mode = '=';
+            break;
+        }
+    }
+
+    g_pedalboard.modified = true;
+    ui_app_update_title(g_pedalboard.name, true);
+}

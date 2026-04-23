@@ -101,6 +101,7 @@ typedef enum {
     TR_PARAM_BROWSE,
     TR_PARAM_SELECT_MODEL,
     TR_PARAM_OUTPUT_PORTS,
+    TR_PARAM_CV_OUTPUTS,
 
     /* File browser */
     TR_FILE_SELECT_TITLE,

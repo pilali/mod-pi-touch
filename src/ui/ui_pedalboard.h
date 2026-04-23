@@ -62,3 +62,8 @@ bool          ui_pedalboard_is_loaded(void);
  * get_output: returns true and fills *out if a value has been received. */
 void ui_pedalboard_set_output(int instance, const char *symbol, float value);
 bool ui_pedalboard_get_output(int instance, const char *symbol, float *out);
+
+/* CV output port enable/disable.
+ * When a port is disabled all cv_map assignments that used it are removed. */
+bool ui_pedalboard_is_cv_out_enabled(int instance_id, const char *symbol);
+void ui_pedalboard_set_cv_out_enabled(int instance_id, const char *symbol, bool enabled);

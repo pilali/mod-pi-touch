@@ -431,6 +431,21 @@ static void show_cv_source_picker(ctrl_reg_t *reg)
     }
 }
 
+/* ─── CV output port toggle ──────────────────────────────────────────────────── */
+
+typedef struct { char symbol[PB_SYMBOL_MAX]; } cv_out_toggle_ud_t;
+static cv_out_toggle_ud_t g_cv_out_toggle_uds[MAX_CONTROLS];
+static int                g_cv_out_toggle_ud_count = 0;
+
+static void cv_out_toggle_cb(lv_event_t *e)
+{
+    cv_out_toggle_ud_t *ud = lv_event_get_user_data(e);
+    if (!ud || g_instance < 0) return;
+    lv_obj_t *sw    = lv_event_get_target(e);
+    bool      on    = lv_obj_has_state(sw, LV_STATE_CHECKED);
+    ui_pedalboard_set_cv_out_enabled(g_instance, ud->symbol, on);
+}
+
 static void cv_chip_tap_cb(lv_event_t *e)
 {
     cv_chip_ud_t *ud = lv_event_get_user_data(e);
@@ -598,11 +613,12 @@ static void close_cb(lv_event_t *e)
         g_ctrl_count          = 0;
         g_patch_param_count   = 0;
         g_midi_chip_ud_count  = 0;
-        g_cv_chip_ud_count    = 0;
-        g_bypass_midi_lbl     = NULL;
-        g_learning_symbol[0]  = '\0';
-        g_cv_sources          = NULL;
-        g_cv_source_count     = 0;
+        g_cv_chip_ud_count       = 0;
+        g_cv_out_toggle_ud_count = 0;
+        g_bypass_midi_lbl        = NULL;
+        g_learning_symbol[0]     = '\0';
+        g_cv_sources             = NULL;
+        g_cv_source_count        = 0;
     }
 }
 
@@ -692,8 +708,9 @@ void ui_param_editor_show(int instance_id,
     g_bypass_midi_ch    = -1;
     g_bypass_midi_cc    = -1;
     g_learning_symbol[0] = '\0';
-    g_cv_picker.popup   = NULL;
-    g_cv_picker.reg     = NULL;
+    g_cv_picker.popup        = NULL;
+    g_cv_picker.reg          = NULL;
+    g_cv_out_toggle_ud_count = 0;
 
     /* Read bypass MIDI CC from the :bypass port if present */
     for (int i = 0; i < port_count; i++) {
@@ -1109,6 +1126,66 @@ void ui_param_editor_show(int instance_id,
         }
     }
 
+    /* ── CV output port toggles ── */
+    if (pm_info) {
+        bool has_cv_out = false;
+        for (int i = 0; i < pm_info->port_count; i++)
+            if (pm_info->ports[i].type == PM_PORT_CV_OUT) { has_cv_out = true; break; }
+
+        if (has_cv_out) {
+            /* Separator */
+            lv_obj_t *sep2 = lv_obj_create(scroll);
+            lv_obj_set_size(sep2, LV_PCT(95), 1);
+            lv_obj_set_style_bg_color(sep2, UI_COLOR_TEXT_DIM, 0);
+            lv_obj_set_style_bg_opa(sep2, LV_OPA_COVER, 0);
+            lv_obj_set_style_border_width(sep2, 0, 0);
+            lv_obj_set_style_pad_all(sep2, 0, 0);
+
+            lv_obj_t *cv_sec_lbl = lv_label_create(scroll);
+            lv_label_set_text(cv_sec_lbl, TR(TR_PARAM_CV_OUTPUTS));
+            lv_obj_set_style_text_color(cv_sec_lbl, lv_color_hex(0x60a0a0), 0);
+            lv_obj_set_style_text_font(cv_sec_lbl, &lv_font_montserrat_14, 0);
+
+            for (int i = 0; i < pm_info->port_count
+                            && g_cv_out_toggle_ud_count < MAX_CONTROLS; i++) {
+                const pm_port_info_t *pm_port = &pm_info->ports[i];
+                if (pm_port->type != PM_PORT_CV_OUT) continue;
+
+                cv_out_toggle_ud_t *ud = &g_cv_out_toggle_uds[g_cv_out_toggle_ud_count++];
+                snprintf(ud->symbol, sizeof(ud->symbol), "%s", pm_port->symbol);
+
+                bool cur_enabled = ui_pedalboard_is_cv_out_enabled(instance_id, pm_port->symbol);
+
+                /* Row: [toggle 52px] [name flex] */
+                lv_obj_t *row = lv_obj_create(scroll);
+                lv_obj_set_size(row, LV_PCT(100), 40);
+                lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
+                lv_obj_set_style_border_width(row, 0, 0);
+                lv_obj_set_style_pad_ver(row, 4, 0);
+                lv_obj_set_style_pad_hor(row, 8, 0);
+                lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+                lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START,
+                                      LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+                lv_obj_set_style_pad_column(row, 12, 0);
+                lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+
+                lv_obj_t *sw = lv_switch_create(row);
+                lv_obj_set_size(sw, 44, 24);
+                lv_obj_set_style_bg_color(sw, lv_color_hex(0x1a6060), LV_PART_INDICATOR);
+                if (cur_enabled) lv_obj_add_state(sw, LV_STATE_CHECKED);
+                lv_obj_add_event_cb(sw, cv_out_toggle_cb, LV_EVENT_VALUE_CHANGED, ud);
+
+                lv_obj_t *name_lbl = lv_label_create(row);
+                lv_label_set_text(name_lbl,
+                    pm_port->name[0] ? pm_port->name : pm_port->symbol);
+                lv_obj_set_style_text_color(name_lbl, lv_color_hex(0xa0c0c0), 0);
+                lv_obj_set_style_text_font(name_lbl, &lv_font_montserrat_14, 0);
+                lv_obj_set_flex_grow(name_lbl, 1);
+                lv_label_set_long_mode(name_lbl, LV_LABEL_LONG_DOT);
+            }
+        }
+    }
+
     /* Start meter refresh timer (100 ms = 10 Hz) */
     if (!g_meter_timer)
         g_meter_timer = lv_timer_create(meter_timer_cb, 100, NULL);
@@ -1128,11 +1205,12 @@ void ui_param_editor_close(void)
         g_ctrl_count          = 0;
         g_patch_param_count   = 0;
         g_midi_chip_ud_count  = 0;
-        g_cv_chip_ud_count    = 0;
-        g_bypass_midi_lbl     = NULL;
-        g_learning_symbol[0]  = '\0';
-        g_cv_sources          = NULL;
-        g_cv_source_count     = 0;
+        g_cv_chip_ud_count       = 0;
+        g_cv_out_toggle_ud_count = 0;
+        g_bypass_midi_lbl        = NULL;
+        g_learning_symbol[0]     = '\0';
+        g_cv_sources             = NULL;
+        g_cv_source_count        = 0;
     }
 }
 
