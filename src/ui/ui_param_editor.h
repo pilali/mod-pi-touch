@@ -19,6 +19,13 @@ typedef void (*midi_map_cb_t)(int instance_id, const char *symbol,
                               int midi_ch, int midi_cc,
                               float min, float max, void *userdata);
 
+/* Called when user assigns or removes a CV assignment.
+ * cv_uri == "" means unmap. */
+typedef void (*cv_map_cb_t)(int instance_id, const char *symbol,
+                            const char *cv_uri, const char *jack_port,
+                            float min, float max, char op_mode,
+                            void *userdata);
+
 void ui_param_editor_show(int instance_id,
                           const char *plugin_label,
                           const char *plugin_uri,
@@ -28,7 +35,9 @@ void ui_param_editor_show(int instance_id,
                           bypass_toggle_cb_t bypass_cb, void *bypass_ud,
                           param_change_cb_t value_cb, void *value_ud,
                           patch_change_cb_t patch_cb, void *patch_ud,
-                          midi_map_cb_t midi_cb, void *midi_ud);
+                          midi_map_cb_t midi_cb, void *midi_ud,
+                          pb_cv_source_t *cv_sources, int cv_source_count,
+                          cv_map_cb_t cv_cb, void *cv_ud);
 
 void ui_param_editor_close(void);
 

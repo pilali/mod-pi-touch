@@ -112,6 +112,9 @@ typedef struct {
     lv_obj_t *midi_lbl;
     int       midi_channel;
     int       midi_cc;
+    /* CV assignment (unused for CTRL_METER) */
+    lv_obj_t *cv_lbl;
+    char      cv_source_uri[PB_CV_URI_MAX];
     /* CTRL_METER only */
     lv_obj_t *meter_bar;      /* lv_bar widget */
 } ctrl_reg_t;
@@ -148,6 +151,10 @@ static patch_change_cb_t   g_patch_cb   = NULL;
 static void               *g_patch_ud   = NULL;
 static midi_map_cb_t       g_midi_cb    = NULL;
 static void               *g_midi_ud    = NULL;
+static cv_map_cb_t         g_cv_cb      = NULL;
+static void               *g_cv_ud      = NULL;
+static pb_cv_source_t     *g_cv_sources = NULL;
+static int                 g_cv_source_count = 0;
 
 /* Bypass MIDI state */
 static lv_obj_t           *g_bypass_midi_lbl = NULL;
@@ -271,6 +278,187 @@ static lv_obj_t *make_midi_chip(lv_obj_t *parent, int midi_ch, int midi_cc,
     lv_label_set_text(lbl, buf);
     lv_obj_center(lbl);
     lv_obj_set_style_text_color(lbl, lv_color_hex(0x8090b0), 0);
+    lv_obj_set_style_text_font(lbl, &lv_font_montserrat_12, 0);
+
+    return lbl;
+}
+
+/* ─── CV chip helpers ────────────────────────────────────────────────────────── */
+
+typedef struct { ctrl_reg_t *reg; } cv_chip_ud_t;
+static cv_chip_ud_t g_cv_chip_uds[MAX_CONTROLS];
+static int          g_cv_chip_ud_count = 0;
+
+/* Picker state (one picker open at a time) */
+typedef struct {
+    ctrl_reg_t *reg;
+    lv_obj_t   *popup;
+    bool        has_unmap; /* first list item is "Unmap" */
+} cv_picker_state_t;
+static cv_picker_state_t g_cv_picker;
+
+static void fmt_cv(char *buf, size_t bufsz, const char *uri,
+                   pb_cv_source_t *srcs, int n_srcs)
+{
+    if (!uri || !uri[0]) { snprintf(buf, bufsz, " — "); return; }
+    for (int i = 0; i < n_srcs; i++) {
+        if (strcmp(srcs[i].uri, uri) == 0) {
+            /* Show last component of label (after " — ") */
+            const char *sep = strstr(srcs[i].label, " \xe2\x80\x94 ");
+            const char *short_label = sep ? sep + 4 /* skip " — " */ : srcs[i].label;
+            snprintf(buf, bufsz, "CV: %s", short_label);
+            return;
+        }
+    }
+    snprintf(buf, bufsz, "CV: ?");
+}
+
+static void cv_picker_item_cb(lv_event_t *e)
+{
+    lv_obj_t *list = lv_event_get_current_target(e);
+    lv_obj_t *btn  = lv_event_get_target(e);
+    if (btn == list) return; /* click on list itself */
+
+    cv_picker_state_t *ps = lv_event_get_user_data(e);
+    if (!ps || !ps->reg) return;
+
+    int32_t idx = lv_obj_get_index(btn);
+
+    ctrl_reg_t *reg = ps->reg;
+    const char *sym = reg->symbol;
+
+    if (idx < 0) goto close;
+    if (ps->has_unmap && idx == 0) {
+        /* Unmap */
+        reg->cv_source_uri[0] = '\0';
+        if (reg->cv_lbl) lv_label_set_text(reg->cv_lbl, " — ");
+        if (g_cv_cb)
+            g_cv_cb(g_instance, sym, "", "", 0.0f, 0.0f, '\0', g_cv_ud);
+    } else {
+        int src_idx = (int)idx - (ps->has_unmap ? 1 : 0);
+
+        if (src_idx < 0 || src_idx >= g_cv_source_count) goto close;
+        pb_cv_source_t *src = &g_cv_sources[src_idx];
+        snprintf(reg->cv_source_uri, sizeof(reg->cv_source_uri), "%s", src->uri);
+        char chip_buf[64];
+        fmt_cv(chip_buf, sizeof(chip_buf), src->uri, g_cv_sources, g_cv_source_count);
+        if (reg->cv_lbl) lv_label_set_text(reg->cv_lbl, chip_buf);
+        if (g_cv_cb)
+            g_cv_cb(g_instance, sym, src->uri, src->jack_port,
+                    src->cv_min, src->cv_max, src->op_mode, g_cv_ud);
+    }
+
+close:
+    if (ps->popup) { lv_obj_del(ps->popup); ps->popup = NULL; }
+}
+
+static void cv_picker_close_cb(lv_event_t *e)
+{
+    cv_picker_state_t *ps = lv_event_get_user_data(e);
+    if (ps && ps->popup) { lv_obj_del(ps->popup); ps->popup = NULL; }
+}
+
+static void show_cv_source_picker(ctrl_reg_t *reg)
+{
+    /* Close existing picker if open */
+    if (g_cv_picker.popup) { lv_obj_del(g_cv_picker.popup); g_cv_picker.popup = NULL; }
+
+    g_cv_picker.reg       = reg;
+    g_cv_picker.has_unmap = (reg->cv_source_uri[0] != '\0');
+
+    lv_obj_t *overlay = lv_obj_create(lv_layer_top());
+    lv_obj_set_size(overlay, LV_PCT(100), LV_PCT(100));
+    lv_obj_set_style_bg_color(overlay, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(overlay, LV_OPA_50, 0);
+    lv_obj_add_event_cb(overlay, cv_picker_close_cb, LV_EVENT_CLICKED, &g_cv_picker);
+    g_cv_picker.popup = overlay;
+
+    int n = g_cv_source_count + (g_cv_picker.has_unmap ? 1 : 0);
+    int h = 60 + n * 44 + 20;
+    if (h > 500) h = 500;
+
+    lv_obj_t *box = lv_obj_create(overlay);
+    lv_obj_set_size(box, 380, h);
+    lv_obj_center(box);
+    lv_obj_set_style_bg_color(box, lv_color_hex(0x1a2030), 0);
+    lv_obj_set_style_border_color(box, lv_color_hex(0x405060), 0);
+    lv_obj_set_style_border_width(box, 2, 0);
+    lv_obj_set_style_radius(box, 10, 0);
+    lv_obj_set_style_pad_all(box, 12, 0);
+    lv_obj_set_flex_flow(box, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(box, 8, 0);
+    lv_obj_clear_flag(box, LV_OBJ_FLAG_CLICKABLE); /* don't propagate clicks to overlay */
+
+    lv_obj_t *title = lv_label_create(box);
+    lv_label_set_text_fmt(title, "CV source — %s", reg->symbol);
+    lv_obj_set_style_text_color(title, lv_color_hex(0xc0d0e0), 0);
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_14, 0);
+
+    lv_obj_t *list = lv_obj_create(box);
+    lv_obj_set_size(list, LV_PCT(100), 0);
+    lv_obj_set_flex_grow(list, 1);
+    lv_obj_set_style_bg_opa(list, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(list, 0, 0);
+    lv_obj_set_style_pad_all(list, 0, 0);
+    lv_obj_set_flex_flow(list, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(list, 4, 0);
+    lv_obj_add_event_cb(list, cv_picker_item_cb, LV_EVENT_CLICKED, &g_cv_picker);
+
+    if (g_cv_picker.has_unmap) {
+        lv_obj_t *btn = lv_btn_create(list);
+        lv_obj_set_size(btn, LV_PCT(100), 40);
+        lv_obj_set_style_bg_color(btn, lv_color_hex(0x502020), 0);
+        lv_obj_t *lbl = lv_label_create(btn);
+        lv_label_set_text(lbl, LV_SYMBOL_CLOSE "  Retirer");
+        lv_obj_center(lbl);
+        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_14, 0);
+    }
+
+    for (int i = 0; i < g_cv_source_count; i++) {
+        pb_cv_source_t *src = &g_cv_sources[i];
+        lv_obj_t *btn = lv_btn_create(list);
+        lv_obj_set_size(btn, LV_PCT(100), 40);
+        bool is_current = (strcmp(src->uri, reg->cv_source_uri) == 0);
+        lv_obj_set_style_bg_color(btn,
+            is_current ? lv_color_hex(0x1a4040) : lv_color_hex(0x243040), 0);
+        lv_obj_t *lbl = lv_label_create(btn);
+        lv_label_set_text(lbl, src->label);
+        lv_obj_center(lbl);
+        lv_label_set_long_mode(lbl, LV_LABEL_LONG_DOT);
+        lv_obj_set_width(lbl, 340);
+        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(lbl, lv_color_hex(0xa0c0c0), 0);
+    }
+}
+
+static void cv_chip_tap_cb(lv_event_t *e)
+{
+    cv_chip_ud_t *ud = lv_event_get_user_data(e);
+    if (!ud || !ud->reg) return;
+    if (g_cv_source_count == 0 && !ud->reg->cv_source_uri[0]) return;
+    show_cv_source_picker(ud->reg);
+}
+
+static lv_obj_t *make_cv_chip(lv_obj_t *parent, const char *cv_uri, int ud_idx)
+{
+    cv_chip_ud_t *ud = &g_cv_chip_uds[ud_idx];
+
+    lv_obj_t *chip = lv_btn_create(parent);
+    lv_obj_set_size(chip, LV_SIZE_CONTENT, 22);
+    lv_obj_set_style_radius(chip, 11, 0);
+    lv_obj_set_style_pad_hor(chip, 8, 0);
+    lv_obj_set_style_pad_ver(chip, 3, 0);
+    lv_obj_set_style_bg_color(chip, lv_color_hex(0x1e3a3a), 0);
+    lv_obj_set_style_border_color(chip, lv_color_hex(0x3a6060), 0);
+    lv_obj_set_style_border_width(chip, 1, 0);
+    lv_obj_add_event_cb(chip, cv_chip_tap_cb, LV_EVENT_CLICKED, ud);
+
+    char buf[64];
+    fmt_cv(buf, sizeof(buf), cv_uri, g_cv_sources, g_cv_source_count);
+    lv_obj_t *lbl = lv_label_create(chip);
+    lv_label_set_text(lbl, buf);
+    lv_obj_center(lbl);
+    lv_obj_set_style_text_color(lbl, lv_color_hex(0x60a0a0), 0);
     lv_obj_set_style_text_font(lbl, &lv_font_montserrat_12, 0);
 
     return lbl;
@@ -402,15 +590,19 @@ static void close_cb(lv_event_t *e)
      * freed memory while still dispatching the event. */
     if (g_modal) {
         if (g_meter_timer) { lv_timer_pause(g_meter_timer); }
+        if (g_cv_picker.popup) { lv_obj_del(g_cv_picker.popup); g_cv_picker.popup = NULL; }
         lv_obj_delete_async(g_modal);
-        g_modal              = NULL;
-        g_instance           = -1;
+        g_modal               = NULL;
+        g_instance            = -1;
         atomic_store(&g_active_instance, -1);
-        g_ctrl_count         = 0;
-        g_patch_param_count  = 0;
-        g_midi_chip_ud_count = 0;
-        g_bypass_midi_lbl    = NULL;
-        g_learning_symbol[0] = '\0';
+        g_ctrl_count          = 0;
+        g_patch_param_count   = 0;
+        g_midi_chip_ud_count  = 0;
+        g_cv_chip_ud_count    = 0;
+        g_bypass_midi_lbl     = NULL;
+        g_learning_symbol[0]  = '\0';
+        g_cv_sources          = NULL;
+        g_cv_source_count     = 0;
     }
 }
 
@@ -470,7 +662,9 @@ void ui_param_editor_show(int instance_id,
                           bypass_toggle_cb_t bypass_cb, void *bypass_ud,
                           param_change_cb_t value_cb, void *value_ud,
                           patch_change_cb_t patch_cb, void *patch_ud,
-                          midi_map_cb_t midi_cb, void *midi_ud)
+                          midi_map_cb_t midi_cb, void *midi_ud,
+                          pb_cv_source_t *cv_sources, int cv_source_count,
+                          cv_map_cb_t cv_cb, void *cv_ud)
 {
     if (g_modal) ui_param_editor_close();
 
@@ -486,13 +680,20 @@ void ui_param_editor_show(int instance_id,
     g_patch_ud          = patch_ud;
     g_midi_cb           = midi_cb;
     g_midi_ud           = midi_ud;
+    g_cv_cb             = cv_cb;
+    g_cv_ud             = cv_ud;
+    g_cv_sources        = cv_sources;
+    g_cv_source_count   = cv_source_count;
     g_ctrl_count        = 0;
     g_patch_param_count = 0;
     g_midi_chip_ud_count = 0;
+    g_cv_chip_ud_count  = 0;
     g_bypass_midi_lbl   = NULL;
     g_bypass_midi_ch    = -1;
     g_bypass_midi_cc    = -1;
     g_learning_symbol[0] = '\0';
+    g_cv_picker.popup   = NULL;
+    g_cv_picker.reg     = NULL;
 
     /* Read bypass MIDI CC from the :bypass port if present */
     for (int i = 0; i < port_count; i++) {
@@ -614,6 +815,8 @@ void ui_param_editor_show(int instance_id,
         snprintf(reg->symbol, sizeof(reg->symbol), "%s", port->symbol);
         reg->midi_channel = port->midi_channel;
         reg->midi_cc      = port->midi_cc;
+        snprintf(reg->cv_source_uri, sizeof(reg->cv_source_uri),
+                 "%s", port->cv_source_uri);
 
         /* Physical min/max from pm (TTL doesn't store them) */
         float p_min = pm_port ? pm_port->min : 0.0f;
@@ -645,6 +848,12 @@ void ui_param_editor_show(int instance_id,
             reg->min = 0.0f; reg->max = 1.0f; /* toggles are 0/1 */
             reg->midi_lbl = make_midi_chip(card, reg->midi_channel,
                                            reg->midi_cc, ud_idx);
+            /* CV chip */
+            {
+                int ci = g_cv_chip_ud_count++;
+                g_cv_chip_uds[ci].reg = reg;
+                reg->cv_lbl = make_cv_chip(card, reg->cv_source_uri, ci);
+            }
 
         } else if (is_enum) {
             /* ── Enum dropdown ── */
@@ -685,6 +894,12 @@ void ui_param_editor_show(int instance_id,
                 g_midi_chip_uds[ud_idx].is_bypass = false;
                 reg->midi_lbl = make_midi_chip(card, reg->midi_channel,
                                                reg->midi_cc, ud_idx);
+            }
+            /* CV chip */
+            {
+                int ci = g_cv_chip_ud_count++;
+                g_cv_chip_uds[ci].reg = reg;
+                reg->cv_lbl = make_cv_chip(card, reg->cv_source_uri, ci);
             }
 
         } else {
@@ -730,6 +945,12 @@ void ui_param_editor_show(int instance_id,
                 g_midi_chip_uds[ud_idx].is_bypass = false;
                 reg->midi_lbl = make_midi_chip(card, reg->midi_channel,
                                                reg->midi_cc, ud_idx);
+            }
+            /* CV chip */
+            {
+                int ci = g_cv_chip_ud_count++;
+                g_cv_chip_uds[ci].reg = reg;
+                reg->cv_lbl = make_cv_chip(card, reg->cv_source_uri, ci);
             }
         }
     }
@@ -899,15 +1120,19 @@ void ui_param_editor_close(void)
 {
     if (g_modal) {
         if (g_meter_timer) { lv_timer_pause(g_meter_timer); }
+        if (g_cv_picker.popup) { lv_obj_del(g_cv_picker.popup); g_cv_picker.popup = NULL; }
         lv_obj_del(g_modal);
-        g_modal              = NULL;
-        g_instance           = -1;
+        g_modal               = NULL;
+        g_instance            = -1;
         atomic_store(&g_active_instance, -1);
-        g_ctrl_count         = 0;
-        g_patch_param_count  = 0;
-        g_midi_chip_ud_count = 0;
-        g_bypass_midi_lbl    = NULL;
-        g_learning_symbol[0] = '\0';
+        g_ctrl_count          = 0;
+        g_patch_param_count   = 0;
+        g_midi_chip_ud_count  = 0;
+        g_cv_chip_ud_count    = 0;
+        g_bypass_midi_lbl     = NULL;
+        g_learning_symbol[0]  = '\0';
+        g_cv_sources          = NULL;
+        g_cv_source_count     = 0;
     }
 }
 

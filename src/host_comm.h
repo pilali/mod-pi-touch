@@ -70,6 +70,12 @@ int host_preset_save(int instance, const char *name, const char *dir, const char
 int host_midi_map(int instance, const char *symbol, int channel, int cc,
                   float min, float max);
 int host_midi_unmap(int instance, const char *symbol);
+/* CV modulation: map a CV output JACK port to a control parameter.
+ * jack_port: e.g. "effect_3:Pitch" or "mod-spi2jack:cv_input_1"
+ * op_mode: '+' (unipolar+), '-' (unipolar-), 'b' (bipolar), '=' (default) */
+int host_cv_map(int instance, const char *symbol, const char *jack_port,
+                float min, float max, char op_mode);
+int host_cv_unmap(int instance, const char *symbol);
 /* Enter MIDI learn mode: mod-host will send "midi_mapped" feedback on the
  * next received MIDI CC and map it to the parameter. */
 int host_midi_learn(int instance, const char *symbol, float min, float max);

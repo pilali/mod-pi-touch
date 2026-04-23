@@ -457,8 +457,135 @@ int pb_load(pedalboard_t *pb, const char *bundle_dir)
         fclose(tf);
     }
 
+    /* Load CV assignments from addressings.json */
+    {
+        char addr_path[PB_PATH_MAX];
+        snprintf(addr_path, sizeof(addr_path), "%s/addressings.json", bundle_dir);
+        FILE *af = fopen(addr_path, "r");
+        if (af) {
+            fseek(af, 0, SEEK_END); long asz = ftell(af); rewind(af);
+            char *abuf = malloc((size_t)asz + 1);
+            if (abuf) {
+                fread(abuf, 1, (size_t)asz, af); abuf[asz] = '\0';
+                cJSON *aroot = cJSON_Parse(abuf);
+                free(abuf);
+                if (aroot) {
+                    cJSON *entry;
+                    cJSON_ArrayForEach(entry, aroot) {
+                        const char *key = entry->string;
+                        if (!key || strncmp(key, "/cv/graph/", 10) != 0) continue;
+                        const char *rest = key + 10;
+                        /* HW CV: "/cv/graph/cv_N" (no slash after prefix) */
+                        bool is_hw = (strncmp(rest, "cv_", 3) == 0 &&
+                                      !strchr(rest, '/'));
+                        cJSON *addrs = is_hw ? entry
+                                             : cJSON_GetObjectItem(entry, "addrs");
+                        if (!cJSON_IsArray(addrs)) continue;
+                        cJSON *addr;
+                        cJSON_ArrayForEach(addr, addrs) {
+                            cJSON *ji = cJSON_GetObjectItem(addr, "instance");
+                            cJSON *jp = cJSON_GetObjectItem(addr, "port");
+                            cJSON *jn = cJSON_GetObjectItem(addr, "minimum");
+                            cJSON *jx = cJSON_GetObjectItem(addr, "maximum");
+                            cJSON *jo = cJSON_GetObjectItem(addr, "operational_mode");
+                            if (!cJSON_IsString(ji) || !cJSON_IsString(jp)) continue;
+                            const char *inst_path = ji->valuestring;
+                            const char *port_sym  = jp->valuestring;
+                            if (strncmp(inst_path, "/graph/", 7) != 0) continue;
+                            const char *inst_sym = inst_path + 7;
+                            pb_plugin_t *tgt = pb_find_plugin_by_symbol(pb, inst_sym);
+                            if (!tgt) continue;
+                            for (int pi = 0; pi < tgt->port_count; pi++) {
+                                if (strcmp(tgt->ports[pi].symbol, port_sym) != 0) continue;
+                                pb_port_t *port = &tgt->ports[pi];
+                                snprintf(port->cv_source_uri, sizeof(port->cv_source_uri),
+                                         "%s", key);
+                                port->cv_min = cJSON_IsNumber(jn) ?
+                                    (float)jn->valuedouble : port->min;
+                                port->cv_max = cJSON_IsNumber(jx) ?
+                                    (float)jx->valuedouble : port->max;
+                                port->cv_op_mode = (cJSON_IsString(jo) &&
+                                                    jo->valuestring[0]) ?
+                                    jo->valuestring[0] : '+';
+                                break;
+                            }
+                        }
+                    }
+                    cJSON_Delete(aroot);
+                }
+            }
+            fclose(af);
+        }
+    }
+
     pb->modified = false;
     return 0;
+}
+
+/* ─── addressings.json save ──────────────────────────────────────────────────── */
+
+static void pb_save_addressings(const pedalboard_t *pb)
+{
+    cJSON *root = cJSON_CreateObject();
+    /* /bpm is always present (mod-ui compatibility) */
+    cJSON_AddItemToObject(root, "/bpm", cJSON_CreateArray());
+
+    for (int i = 0; i < pb->plugin_count; i++) {
+        const pb_plugin_t *plug = &pb->plugins[i];
+        for (int j = 0; j < plug->port_count; j++) {
+            const pb_port_t *port = &plug->ports[j];
+            if (!port->cv_source_uri[0]) continue;
+
+            const char *src_uri = port->cv_source_uri;
+            const char *rest    = src_uri + 10; /* skip "/cv/graph/" */
+            bool is_hw = (strncmp(rest, "cv_", 3) == 0 && !strchr(rest, '/'));
+
+            char inst_path[PB_URI_MAX];
+            snprintf(inst_path, sizeof(inst_path), "/graph/%s", plug->symbol);
+            char opmode_str[2] = { port->cv_op_mode ? port->cv_op_mode : '+', '\0' };
+
+            cJSON *addr_obj = cJSON_CreateObject();
+            cJSON_AddStringToObject(addr_obj, "instance", inst_path);
+            cJSON_AddStringToObject(addr_obj, "port",     port->symbol);
+            cJSON_AddStringToObject(addr_obj, "label",    port->symbol);
+            cJSON_AddNumberToObject(addr_obj, "minimum",  (double)port->cv_min);
+            cJSON_AddNumberToObject(addr_obj, "maximum",  (double)port->cv_max);
+            cJSON_AddNumberToObject(addr_obj, "steps",    0);
+            cJSON_AddStringToObject(addr_obj, "operational_mode", opmode_str);
+
+            if (is_hw) {
+                cJSON *arr = cJSON_GetObjectItem(root, src_uri);
+                if (!arr) {
+                    arr = cJSON_CreateArray();
+                    cJSON_AddItemToObject(root, src_uri, arr);
+                }
+                cJSON_AddItemToArray(arr, addr_obj);
+            } else {
+                cJSON *obj = cJSON_GetObjectItem(root, src_uri);
+                if (!obj) {
+                    obj = cJSON_CreateObject();
+                    const char *last_slash = strrchr(src_uri, '/');
+                    cJSON_AddStringToObject(obj, "name",
+                                            last_slash ? last_slash + 1 : src_uri);
+                    cJSON_AddItemToObject(obj, "addrs", cJSON_CreateArray());
+                    cJSON_AddItemToObject(root, src_uri, obj);
+                }
+                cJSON *addrs = cJSON_GetObjectItem(obj, "addrs");
+                if (addrs) cJSON_AddItemToArray(addrs, addr_obj);
+                else       cJSON_Delete(addr_obj);
+            }
+        }
+    }
+
+    char path[PB_PATH_MAX];
+    snprintf(path, sizeof(path), "%s/addressings.json", pb->path);
+    char *js = cJSON_Print(root);
+    if (js) {
+        FILE *f = fopen(path, "w");
+        if (f) { fputs(js, f); fclose(f); }
+        free(js);
+    }
+    cJSON_Delete(root);
 }
 
 /* ─── TTL generation (save) ──────────────────────────────────────────────────── */
@@ -680,6 +807,8 @@ int pb_save(pedalboard_t *pb)
         cJSON_Delete(tj);
         fclose(tf);
     }
+
+    pb_save_addressings(pb);
 
     pb->modified = false;
     return 0;

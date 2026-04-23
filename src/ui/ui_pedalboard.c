@@ -38,6 +38,10 @@ typedef struct {
 static output_val_t g_output_vals[OUTPUT_VAL_MAX];
 static int          g_output_val_count = 0;
 
+/* ─── CV source table (built when a pedalboard is loaded) ───────────────────── */
+static pb_cv_source_t g_cv_sources[CV_SOURCE_MAX];
+static int            g_cv_source_count = 0;
+
 /* ─── Canvas state ───────────────────────────────────────────────────────────── */
 static lv_obj_t *g_canvas_scroll = NULL; /* scrollable container */
 static lv_obj_t *g_canvas        = NULL; /* actual canvas for connection lines */
@@ -875,6 +879,95 @@ static void pb_snapshot_ui_refresh(void *arg); /* forward declaration */
 static void pb_apply_midi_mapped(int instance_id, const char *symbol,
                                  int ch, int cc, float min, float max); /* fwd */
 
+/* Resolve /cv/graph/… URI to JACK port string.
+ * Returns true if resolution succeeded, false otherwise. */
+static bool cv_uri_to_jack(const char *cv_uri, char *out, size_t outsz)
+{
+    static const char pfx[] = "/cv/graph/";
+    if (strncmp(cv_uri, pfx, sizeof(pfx) - 1) != 0) return false;
+    const char *rest  = cv_uri + sizeof(pfx) - 1;
+    const char *slash = strchr(rest, '/');
+    if (!slash) {
+        /* HW CV: mod-spi2jack:<sym> */
+        snprintf(out, outsz, "mod-spi2jack:%s", rest);
+        return true;
+    }
+    /* Plugin CV: find instance by symbol, build effect_<id>:<port_sym> */
+    char inst_sym[PB_SYMBOL_MAX];
+    snprintf(inst_sym, sizeof(inst_sym), "%.*s", (int)(slash - rest), rest);
+    pb_plugin_t *src = pb_find_plugin_by_symbol(&g_pedalboard, inst_sym);
+    if (!src) return false;
+    snprintf(out, outsz, "effect_%d:%s", src->instance_id, slash + 1);
+    return true;
+}
+
+/* Build g_cv_sources from the currently loaded pedalboard. */
+static void build_cv_sources(void)
+{
+    g_cv_source_count = 0;
+    for (int i = 0; i < g_pedalboard.plugin_count && g_cv_source_count < CV_SOURCE_MAX; i++) {
+        pb_plugin_t *plug = &g_pedalboard.plugins[i];
+        const pm_plugin_info_t *pm = pm_plugin_by_uri(plug->uri);
+        if (!pm) continue;
+        for (int j = 0; j < pm->port_count && g_cv_source_count < CV_SOURCE_MAX; j++) {
+            if (pm->ports[j].type != PM_PORT_CV_OUT) continue;
+            pb_cv_source_t *src = &g_cv_sources[g_cv_source_count++];
+            /* URI */
+            snprintf(src->uri, sizeof(src->uri), "/cv/graph/%s/%s",
+                     plug->symbol, pm->ports[j].symbol);
+            /* JACK port */
+            snprintf(src->jack_port, sizeof(src->jack_port),
+                     "effect_%d:%s", plug->instance_id, pm->ports[j].symbol);
+            /* Human label */
+            snprintf(src->label, sizeof(src->label), "%s \xe2\x80\x94 %s",
+                     plug->label, pm->ports[j].name[0] ? pm->ports[j].name
+                                                        : pm->ports[j].symbol);
+            /* Range & op_mode */
+            src->cv_min = pm->ports[j].min;
+            src->cv_max = pm->ports[j].max;
+            if (src->cv_min >= 0.0f && src->cv_max > 0.0f)
+                src->op_mode = '+';
+            else if (src->cv_min < 0.0f && src->cv_max <= 0.0f)
+                src->op_mode = '-';
+            else if (src->cv_min < 0.0f && src->cv_max > 0.0f)
+                src->op_mode = 'b';
+            else
+                src->op_mode = '=';
+        }
+    }
+}
+
+/* CV assignment callback — called from param editor when user picks or removes a CV source. */
+static void on_cv_mapped(int instance_id, const char *symbol,
+                         const char *cv_uri, const char *jack_port,
+                         float min, float max, char op_mode, void *userdata)
+{
+    (void)userdata;
+    pb_plugin_t *plug = pb_find_plugin(&g_pedalboard, instance_id);
+    if (!plug) return;
+
+    for (int i = 0; i < plug->port_count; i++) {
+        if (strcmp(plug->ports[i].symbol, symbol) != 0) continue;
+        pb_port_t *port = &plug->ports[i];
+
+        if (!cv_uri || !cv_uri[0]) {
+            /* Unmap */
+            host_cv_unmap(instance_id, symbol);
+            port->cv_source_uri[0] = '\0';
+            port->cv_op_mode       = '\0';
+        } else {
+            host_cv_map(instance_id, symbol, jack_port, min, max, op_mode);
+            snprintf(port->cv_source_uri, sizeof(port->cv_source_uri), "%s", cv_uri);
+            port->cv_min     = min;
+            port->cv_max     = max;
+            port->cv_op_mode = op_mode;
+        }
+        g_pedalboard.modified = true;
+        ui_app_update_title(g_pedalboard.name, true);
+        break;
+    }
+}
+
 static void on_patch_changed(int instance_id, const char *param_uri,
                              const char *path, void *userdata)
 {
@@ -925,7 +1018,9 @@ static void on_block_tap(void *userdata)
                          on_block_bypass, (void *)(intptr_t)instance_id,
                          NULL, NULL,
                          on_patch_changed, NULL,
-                         on_midi_mapped, NULL);
+                         on_midi_mapped, NULL,
+                         g_cv_sources, g_cv_source_count,
+                         on_cv_mapped, NULL);
 }
 
 static void on_block_bypass(void *userdata)
@@ -1601,6 +1696,17 @@ void ui_pedalboard_load(const char *bundle_path,
             }
         }
 
+        /* CV assignments */
+        for (int j = 0; j < plug->port_count; j++) {
+            pb_port_t *port = &plug->ports[j];
+            if (!port->cv_source_uri[0]) continue;
+            char jack_port[256];
+            if (cv_uri_to_jack(port->cv_source_uri, jack_port, sizeof(jack_port)))
+                host_cv_map(plug->instance_id, port->symbol, jack_port,
+                            port->cv_min, port->cv_max,
+                            port->cv_op_mode ? port->cv_op_mode : '+');
+        }
+
         /* Subscribe to real-time output port monitoring */
         {
             const pm_plugin_info_t *pm_info = pm_plugin_by_uri(plug->uri);
@@ -1615,6 +1721,9 @@ void ui_pedalboard_load(const char *bundle_path,
 
         if (progress_cb) progress_cb(i + 1, total_plugins, progress_ud);
     }
+
+    /* Build the CV source table for the param editor picker */
+    build_cv_sources();
 
     /* 3. Make audio/MIDI connections */
     if (progress_cb) progress_cb(-1, 0, progress_ud); /* phase: connections */

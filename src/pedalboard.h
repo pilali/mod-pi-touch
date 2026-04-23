@@ -21,6 +21,8 @@ typedef struct {
 } pb_patch_t;
 
 /* ─── Plugin port (control input) ───────────────────────────────────────────── */
+#define PB_CV_URI_MAX 300   /* /cv/graph/<inst_sym>/<port_sym> */
+
 typedef struct {
     char   symbol[PB_SYMBOL_MAX];
     float  value;
@@ -31,7 +33,25 @@ typedef struct {
     int    midi_cc;        /* -1 = none */
     float  midi_min;
     float  midi_max;
+    /* CV assignment (addressings.json) */
+    char   cv_source_uri[PB_CV_URI_MAX]; /* "/cv/graph/inst/port" or "" = none */
+    float  cv_min;
+    float  cv_max;
+    char   cv_op_mode;   /* '+' '-' 'b' '=' or '\0' = none */
 } pb_port_t;
+
+/* ─── CV source descriptor (pre-built for UI picker) ─────────────────────────── */
+#define PB_CV_LABEL_MAX 192
+#define CV_SOURCE_MAX    64
+
+typedef struct {
+    char  uri[PB_CV_URI_MAX];      /* /cv/graph/<inst_sym>/<port_sym> */
+    char  jack_port[256];           /* effect_N:port_sym */
+    char  label[PB_CV_LABEL_MAX];  /* "Plugin Name — Port Name" */
+    char  op_mode;                  /* '+' '-' 'b' '=' */
+    float cv_min;
+    float cv_max;
+} pb_cv_source_t;
 
 /* ─── Plugin instance ────────────────────────────────────────────────────────── */
 typedef struct {

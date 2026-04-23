@@ -539,6 +539,23 @@ int host_midi_unmap(int instance, const char *symbol)
     return host_comm_send_sync(cmd, NULL, 0, 2000);
 }
 
+int host_cv_map(int instance, const char *symbol, const char *jack_port,
+                float min, float max, char op_mode)
+{
+    char cmd[HOST_CMD_MAX];
+    char mode_str[2] = { op_mode ? op_mode : '+', '\0' };
+    snprintf(cmd, sizeof(cmd), "cv_map %d %s %s %f %f %s",
+             instance, symbol, jack_port, (double)min, (double)max, mode_str);
+    return host_comm_send_sync(cmd, NULL, 0, 2000);
+}
+
+int host_cv_unmap(int instance, const char *symbol)
+{
+    char cmd[HOST_CMD_MAX];
+    snprintf(cmd, sizeof(cmd), "cv_unmap %d %s", instance, symbol);
+    return host_comm_send_sync(cmd, NULL, 0, 2000);
+}
+
 int host_midi_learn(int instance, const char *symbol, float min, float max)
 {
     char cmd[HOST_CMD_MAX];
