@@ -1237,19 +1237,23 @@ static int uri_to_plugin_idx(const char *uri, const pedalboard_t *pb)
     return -1;
 }
 
-/* Classify a plugin into its band based on LV2 port types. */
+/* Classify a plugin into its band based on LV2 port types.
+ * A plugin with audio ports is always Audio (even if it also has MIDI/CV
+ * control ports). Only plugins with NO audio ports go to MIDI or CV bands. */
 static plug_band_t classify_plugin(const pb_plugin_t *plug)
 {
     const pm_plugin_info_t *info = pm_plugin_by_uri(plug->uri);
     if (!info) return PLUG_AUDIO;
-    bool has_midi = false, has_cv = false;
+    bool has_audio = false, has_midi = false, has_cv = false;
     for (int i = 0; i < info->port_count; i++) {
         pm_port_type_t t = info->ports[i].type;
-        if (t == PM_PORT_MIDI_IN || t == PM_PORT_MIDI_OUT) has_midi = true;
-        if (t == PM_PORT_CV_IN   || t == PM_PORT_CV_OUT)   has_cv   = true;
+        if (t == PM_PORT_AUDIO_IN || t == PM_PORT_AUDIO_OUT) has_audio = true;
+        if (t == PM_PORT_MIDI_IN  || t == PM_PORT_MIDI_OUT)  has_midi  = true;
+        if (t == PM_PORT_CV_IN    || t == PM_PORT_CV_OUT)    has_cv    = true;
     }
-    if (has_midi) return PLUG_MIDI;
-    if (has_cv)   return PLUG_CV;
+    if (has_audio) return PLUG_AUDIO;
+    if (has_midi)  return PLUG_MIDI;
+    if (has_cv)    return PLUG_CV;
     return PLUG_AUDIO;
 }
 
