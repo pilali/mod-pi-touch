@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "cJSON.h"
+#include "lv2_utils.h"
 
 
 int bank_load(const char *path, bank_list_t *list)
@@ -44,8 +45,10 @@ int bank_load(const char *path, bank_list_t *list)
         /* mod-ui banks.json uses "title" at bank level; older format used "name" */
         cJSON *name = cJSON_GetObjectItem(bank_obj, "title");
         if (!cJSON_IsString(name)) name = cJSON_GetObjectItem(bank_obj, "name");
-        if (cJSON_IsString(name))
+        if (cJSON_IsString(name)) {
             snprintf(bank->name, sizeof(bank->name), "%s", name->valuestring);
+            lv2u_normalize_quotes(bank->name);
+        }
 
         cJSON *pedals = cJSON_GetObjectItem(bank_obj, "pedalboards");
         if (!cJSON_IsArray(pedals)) { list->bank_count++; continue; }
@@ -58,7 +61,10 @@ int bank_load(const char *path, bank_list_t *list)
             bank_pedal_t *pedal = &bank->pedals[bank->pedal_count];
             cJSON *title  = cJSON_GetObjectItem(p, "title");
             cJSON *bundle = cJSON_GetObjectItem(p, "bundle");
-            if (cJSON_IsString(title))  snprintf(pedal->title,  sizeof(pedal->title),  "%s", title->valuestring);
+            if (cJSON_IsString(title)) {
+                snprintf(pedal->title, sizeof(pedal->title), "%s", title->valuestring);
+                lv2u_normalize_quotes(pedal->title);
+            }
             if (cJSON_IsString(bundle)) snprintf(pedal->bundle, sizeof(pedal->bundle), "%s", bundle->valuestring);
             bank->pedal_count++;
         }
