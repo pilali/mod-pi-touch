@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <sys/stat.h>
 
 #include <lilv/lilv.h>
 #include <lv2/atom/atom.h>
@@ -556,14 +557,48 @@ static bool load_cache(const char *cache_path)
 
 /* ─── Public API ─────────────────────────────────────────────────────────────── */
 
+/* Return true only if cache_path exists AND is newer than every directory in
+ * the colon-separated lv2_paths list and /usr/lib/lv2 (and LV2_PATH env).
+ * A newly installed plugin updates its parent directory's mtime, which makes
+ * the cache stale and forces a lilv rescan on the next startup. */
+static bool cache_is_fresh(const char *cache_path, const char *lv2_paths)
+{
+    struct stat cs;
+    if (stat(cache_path, &cs) != 0) return false;
+    time_t cache_mtime = cs.st_mtime;
+
+    const char *sources[3] = { "/usr/lib/lv2", lv2_paths, getenv("LV2_PATH") };
+    for (int s = 0; s < 3; s++) {
+        if (!sources[s]) continue;
+        char buf[4096];
+        snprintf(buf, sizeof(buf), "%s", sources[s]);
+        char *save = NULL;
+        char *tok  = strtok_r(buf, ":", &save);
+        while (tok) {
+            if (tok[0]) {
+                struct stat ds;
+                if (stat(tok, &ds) == 0 && ds.st_mtime > cache_mtime) {
+                    printf("[plugin_manager] '%s' newer than cache — rescanning\n", tok);
+                    return false;
+                }
+            }
+            tok = strtok_r(NULL, ":", &save);
+        }
+    }
+    return true;
+}
+
 int pm_init(const char *lv2_paths, const char *cache_path)
 {
     /* Cleanup previous state if reinitializing */
     if (g_plugins) { free(g_plugins); g_plugins = NULL; g_count = 0; }
     if (g_world)   { lilv_world_free(g_world); g_world = NULL; }
 
-    /* Try cache first */
-    if (cache_path && load_cache(cache_path)) return 0;
+    /* Try cache only if it is newer than all LV2 directories being scanned.
+     * A new plugin installation updates the parent directory mtime and
+     * automatically triggers a full lilv rescan. */
+    if (cache_path && cache_is_fresh(cache_path, lv2_paths) && load_cache(cache_path))
+        return 0;
 
     g_world = lilv_world_new();
     if (!g_world) return -1;
