@@ -622,6 +622,10 @@ static void close_cb(lv_event_t *e)
     }
 }
 
+/* ─── Card size constants ────────────────────────────────────────────────────── */
+#define CARD_W 150  /* reference knob/arc card width */
+#define CARD_H 195  /* all control cards use the same height as the arc card */
+
 /* ─── Card builder helpers ───────────────────────────────────────────────────── */
 
 static lv_obj_t *make_card(lv_obj_t *parent, int w, int h)
@@ -638,6 +642,22 @@ static lv_obj_t *make_card(lv_obj_t *parent, int w, int h)
                           LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_pad_row(card, 6, 0);
     return card;
+}
+
+/* Create a horizontal row for MIDI and CV chips at the bottom of a card. */
+static lv_obj_t *make_chips_row(lv_obj_t *parent)
+{
+    lv_obj_t *row = lv_obj_create(parent);
+    lv_obj_set_size(row, LV_PCT(100), 22);
+    lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(row, 0, 0);
+    lv_obj_set_style_pad_all(row, 0, 0);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(row, 6, 0);
+    lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+    return row;
 }
 
 static lv_obj_t *make_name_lbl(lv_obj_t *card, const char *name)
@@ -789,11 +809,11 @@ void ui_param_editor_show(int instance_id,
 
     /* ── Bypass toggle — always first ── */
     {
-        lv_obj_t *card = make_card(scroll, 140, 145);
+        lv_obj_t *card = make_card(scroll, CARD_W, CARD_H);
         make_name_lbl(card, TR(TR_PARAM_BYPASS_LABEL));
 
         lv_obj_t *btn = lv_btn_create(card);
-        lv_obj_set_size(btn, 110, 44);
+        lv_obj_set_size(btn, 120, 44);
         lv_obj_set_style_bg_color(btn, g_enabled ? UI_COLOR_ACTIVE : UI_COLOR_BYPASS, 0);
         g_bypass_lbl = lv_label_create(btn);
         lv_label_set_text(g_bypass_lbl, g_enabled ? TR(TR_PARAM_ENABLED) : TR(TR_PARAM_DISABLED));
@@ -802,10 +822,11 @@ void ui_param_editor_show(int instance_id,
         lv_obj_add_event_cb(btn, bypass_btn_cb, LV_EVENT_CLICKED, NULL);
 
         /* MIDI chip for bypass */
+        lv_obj_t *chips_row = make_chips_row(card);
         int ud_idx = g_midi_chip_ud_count++;
         g_midi_chip_uds[ud_idx].reg       = NULL;
         g_midi_chip_uds[ud_idx].is_bypass = true;
-        g_bypass_midi_lbl = make_midi_chip(card, g_bypass_midi_ch,
+        g_bypass_midi_lbl = make_midi_chip(chips_row, g_bypass_midi_ch,
                                            g_bypass_midi_cc, ud_idx);
     }
 
@@ -847,7 +868,7 @@ void ui_param_editor_show(int instance_id,
         if (is_toggle) {
             /* ── Toggle switch ── */
             reg->type = CTRL_TOGGLE;
-            lv_obj_t *card = make_card(scroll, 140, 135);
+            lv_obj_t *card = make_card(scroll, CARD_W, CARD_H);
             make_name_lbl(card, disp_name);
 
             lv_obj_t *sw = lv_switch_create(card);
@@ -858,18 +879,19 @@ void ui_param_editor_show(int instance_id,
             lv_obj_add_event_cb(sw, toggle_changed_cb, LV_EVENT_VALUE_CHANGED, reg);
             reg->widget = sw;
 
-            /* MIDI chip */
+            /* MIDI + CV chips side by side */
+            lv_obj_t *chips_row = make_chips_row(card);
             int ud_idx = g_midi_chip_ud_count++;
             g_midi_chip_uds[ud_idx].reg       = reg;
             g_midi_chip_uds[ud_idx].is_bypass = false;
             reg->min = 0.0f; reg->max = 1.0f; /* toggles are 0/1 */
-            reg->midi_lbl = make_midi_chip(card, reg->midi_channel,
+            reg->midi_lbl = make_midi_chip(chips_row, reg->midi_channel,
                                            reg->midi_cc, ud_idx);
             /* CV chip */
             {
                 int ci = g_cv_chip_ud_count++;
                 g_cv_chip_uds[ci].reg = reg;
-                reg->cv_lbl = make_cv_chip(card, reg->cv_source_uri, ci);
+                reg->cv_lbl = make_cv_chip(chips_row, reg->cv_source_uri, ci);
             }
 
         } else if (is_enum) {
@@ -891,32 +913,33 @@ void ui_param_editor_show(int instance_id,
                     cur_sel = k;
             }
 
-            lv_obj_t *card = make_card(scroll, 220, 135);
+            lv_obj_t *card = make_card(scroll, CARD_W * 2, CARD_H);
             make_name_lbl(card, disp_name);
 
             lv_obj_t *dd = lv_dropdown_create(card);
             lv_dropdown_set_options(dd, options);
             lv_dropdown_set_selected(dd, (uint16_t)cur_sel);
-            lv_obj_set_width(dd, 200);
+            lv_obj_set_width(dd, CARD_W * 2 - 16);
             lv_obj_set_style_text_font(dd, &lv_font_montserrat_12, 0);
             lv_obj_set_style_text_font(dd, &lv_font_montserrat_12,
                                        LV_PART_SELECTED);
             lv_obj_add_event_cb(dd, enum_changed_cb, LV_EVENT_VALUE_CHANGED, reg);
             reg->widget = dd;
 
-            /* MIDI chip */
+            /* MIDI + CV chips side by side */
+            lv_obj_t *chips_row = make_chips_row(card);
             {
                 int ud_idx = g_midi_chip_ud_count++;
                 g_midi_chip_uds[ud_idx].reg       = reg;
                 g_midi_chip_uds[ud_idx].is_bypass = false;
-                reg->midi_lbl = make_midi_chip(card, reg->midi_channel,
+                reg->midi_lbl = make_midi_chip(chips_row, reg->midi_channel,
                                                reg->midi_cc, ud_idx);
             }
             /* CV chip */
             {
                 int ci = g_cv_chip_ud_count++;
                 g_cv_chip_uds[ci].reg = reg;
-                reg->cv_lbl = make_cv_chip(card, reg->cv_source_uri, ci);
+                reg->cv_lbl = make_cv_chip(chips_row, reg->cv_source_uri, ci);
             }
 
         } else {
@@ -932,7 +955,7 @@ void ui_param_editor_show(int instance_id,
             if (arc_val < 0)   arc_val = 0;
             if (arc_val > 100) arc_val = 100;
 
-            lv_obj_t *card = make_card(scroll, 140, 195);
+            lv_obj_t *card = make_card(scroll, CARD_W, CARD_H);
             make_name_lbl(card, disp_name);
 
             lv_obj_t *arc = lv_arc_create(card);
@@ -955,19 +978,20 @@ void ui_param_editor_show(int instance_id,
             lv_obj_set_style_text_font(val_lbl, &lv_font_montserrat_12, 0);
             reg->val_lbl = val_lbl;
 
-            /* MIDI chip */
+            /* MIDI + CV chips side by side */
+            lv_obj_t *chips_row = make_chips_row(card);
             {
                 int ud_idx = g_midi_chip_ud_count++;
                 g_midi_chip_uds[ud_idx].reg       = reg;
                 g_midi_chip_uds[ud_idx].is_bypass = false;
-                reg->midi_lbl = make_midi_chip(card, reg->midi_channel,
+                reg->midi_lbl = make_midi_chip(chips_row, reg->midi_channel,
                                                reg->midi_cc, ud_idx);
             }
             /* CV chip */
             {
                 int ci = g_cv_chip_ud_count++;
                 g_cv_chip_uds[ci].reg = reg;
-                reg->cv_lbl = make_cv_chip(card, reg->cv_source_uri, ci);
+                reg->cv_lbl = make_cv_chip(chips_row, reg->cv_source_uri, ci);
             }
         }
     }
@@ -993,16 +1017,16 @@ void ui_param_editor_show(int instance_id,
                 }
             }
 
-            /* Wide card for file selector */
-            lv_obj_t *card = make_card(scroll, 400, 110);
+            /* Wide card for file selector: CARD_W * 3 wide, same height as all cards */
+            lv_obj_t *card = make_card(scroll, CARD_W * 3, CARD_H);
             lv_obj_set_flex_flow(card, LV_FLEX_FLOW_ROW);
             lv_obj_set_flex_align(card, LV_FLEX_ALIGN_START,
                                   LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
             lv_obj_set_style_pad_column(card, 10, 0);
 
-            /* Label column */
+            /* Label column: card_inner_w - pad_col - browse_btn_w = (CARD_W*3-16) - 10 - 130 = 294 */
             lv_obj_t *label_col = lv_obj_create(card);
-            lv_obj_set_size(label_col, 200, LV_PCT(100));
+            lv_obj_set_size(label_col, 294, LV_PCT(100));
             lv_obj_set_style_bg_opa(label_col, LV_OPA_TRANSP, 0);
             lv_obj_set_style_border_width(label_col, 0, 0);
             lv_obj_set_style_pad_all(label_col, 0, 0);
@@ -1024,13 +1048,13 @@ void ui_param_editor_show(int instance_id,
             preg->path_lbl = lv_label_create(label_col);
             lv_label_set_text(preg->path_lbl, cur_name);
             lv_label_set_long_mode(preg->path_lbl, LV_LABEL_LONG_DOT);
-            lv_obj_set_width(preg->path_lbl, 190);
+            lv_obj_set_width(preg->path_lbl, 284);
             lv_obj_set_style_text_color(preg->path_lbl, UI_COLOR_TEXT, 0);
             lv_obj_set_style_text_font(preg->path_lbl, &lv_font_montserrat_12, 0);
 
             /* Browse button */
             lv_obj_t *browse_btn = lv_btn_create(card);
-            lv_obj_set_size(browse_btn, 120, 50);
+            lv_obj_set_size(browse_btn, 130, 60);
             lv_obj_set_style_bg_color(browse_btn, UI_COLOR_PRIMARY, 0);
             lv_obj_t *browse_lbl = lv_label_create(browse_btn);
             lv_label_set_text_fmt(browse_lbl, LV_SYMBOL_DIRECTORY "%s", TR(TR_PARAM_BROWSE));
