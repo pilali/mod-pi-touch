@@ -87,6 +87,9 @@ typedef struct {
     /* WiFi */
     bool  hotspot_enabled;                        /* persist hotspot on/off preference */
     char  hotspot_password[64];                   /* WPA2 passphrase (8-63 chars) */
+
+    /* MOD-UI co-existence — runtime only, not persisted */
+    bool  mod_ui_active;  /* true = mod-ui.service is running, we are disconnected */
 } mpt_settings_t;
 
 /* Load settings from env vars + config file. Safe to call multiple times. */

@@ -104,6 +104,14 @@ static void *connect_and_load_thread(void *arg)
     (void)arg;
     mpt_settings_t *s = settings_get();
 
+    /* If mod-ui.service is running, skip mod-host connection entirely. */
+    if (s->mod_ui_active) {
+        fprintf(stderr, "[main] mod-ui.service is active — skipping mod-host connection.\n");
+        ui_splash_update(100, TR(TR_MODUI_ACTIVE_TITLE));
+        ui_splash_hide_async();
+        return NULL;
+    }
+
     printf("[main] Connecting to mod-host at %s:%d...\n",
            s->host_addr, s->host_cmd_port);
 

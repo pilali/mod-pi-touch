@@ -729,6 +729,44 @@ static void reboot_btn_cb(lv_event_t *e)
     show_confirm(TR(TR_SETTINGS_CONFIRM_REBOOT), do_reboot, NULL);
 }
 
+/* ─── MOD-UI section ─────────────────────────────────────────────────────────── */
+
+static void modui_toggle_cb(lv_event_t *e)
+{
+    lv_obj_t *sw = lv_event_get_target(e);
+    mpt_settings_t *s = settings_get();
+    bool activate = lv_obj_has_state(sw, LV_STATE_CHECKED);
+
+    if (activate) {
+        /* Start mod-ui.service, then release mod-host connection */
+        system("sudo systemctl start mod-ui");
+        host_comm_disconnect();
+        s->mod_ui_active = true;
+    } else {
+        /* Stop mod-ui.service, then reconnect to mod-host */
+        system("sudo systemctl stop mod-ui");
+        s->mod_ui_active = false;
+        host_comm_reconnect();
+    }
+    /* Navigate to pedalboard — shows placeholder or reloads depending on state */
+    ui_app_show_screen(UI_SCREEN_PEDALBOARD);
+}
+
+static void build_modui_section(lv_obj_t *parent)
+{
+    lv_obj_t *row = make_row(parent);
+
+    lv_obj_t *lbl = lv_label_create(row);
+    lv_label_set_text(lbl, TR(TR_SETTINGS_MODUI_ACTIVATE));
+    lv_obj_set_style_text_color(lbl, UI_COLOR_TEXT, 0);
+    lv_obj_set_flex_grow(lbl, 1);
+
+    lv_obj_t *sw = lv_switch_create(row);
+    if (settings_get()->mod_ui_active)
+        lv_obj_add_state(sw, LV_STATE_CHECKED);
+    lv_obj_add_event_cb(sw, modui_toggle_cb, LV_EVENT_VALUE_CHANGED, NULL);
+}
+
 static void build_power_section(lv_obj_t *parent)
 {
     lv_obj_t *row = make_row(parent);
@@ -986,6 +1024,10 @@ void ui_settings_show(lv_obj_t *parent)
     /* ── WiFi ── */
     add_section_header(parent, TR(TR_SETTINGS_WIFI));
     build_wifi_section(parent);
+
+    /* ── MOD-UI ── */
+    add_section_header(parent, TR(TR_SETTINGS_MODUI));
+    build_modui_section(parent);
 
     /* ── Power ── */
     add_section_header(parent, TR(TR_SETTINGS_POWER));

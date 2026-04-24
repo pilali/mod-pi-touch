@@ -10,6 +10,7 @@
 #include "../hw_detect.h"
 #include "../i18n.h"
 #include "../pre_fx.h"
+#include "../wifi_manager.h"
 
 #include "../plugin_manager.h"
 #include "cJSON.h"
@@ -1852,6 +1853,73 @@ void ui_pedalboard_refresh(void)
 
 /* ─── Init ───────────────────────────────────────────────────────────────────── */
 
+/* ─── MOD-UI active placeholder ──────────────────────────────────────────────── */
+
+static void modui_disable_cb(lv_event_t *e)
+{
+    (void)e;
+    mpt_settings_t *s = settings_get();
+    system("sudo systemctl stop mod-ui");
+    s->mod_ui_active = false;
+    host_comm_reconnect();
+    /* Re-init pedalboard screen — will auto-load last state */
+    ui_app_show_screen(UI_SCREEN_PEDALBOARD);
+}
+
+static void build_modui_placeholder(lv_obj_t *parent)
+{
+    /* Full-area container */
+    lv_obj_t *box = lv_obj_create(parent);
+    lv_obj_set_size(box, LV_PCT(100), LV_PCT(100));
+    lv_obj_set_style_bg_color(box, UI_COLOR_BG, 0);
+    lv_obj_set_style_bg_opa(box, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(box, 0, 0);
+    lv_obj_set_flex_flow(box, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(box, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_row(box, 18, 0);
+    lv_obj_clear_flag(box, LV_OBJ_FLAG_SCROLLABLE);
+
+    /* Title */
+    lv_obj_t *title = lv_label_create(box);
+    lv_label_set_text(title, TR(TR_MODUI_ACTIVE_TITLE));
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_24, 0);
+    lv_obj_set_style_text_color(title, UI_COLOR_ACCENT, 0);
+
+    /* Body message */
+    lv_obj_t *body = lv_label_create(box);
+    lv_label_set_text(body, TR(TR_MODUI_ACTIVE_BODY));
+    lv_obj_set_style_text_color(body, UI_COLOR_TEXT_DIM, 0);
+    lv_obj_set_style_text_font(body, &lv_font_montserrat_18, 0);
+    lv_label_set_long_mode(body, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(body, 600);
+    lv_obj_set_style_text_align(body, LV_TEXT_ALIGN_CENTER, 0);
+
+    /* IP URL */
+    char ip[32] = "";
+    char ssid[64] = "";
+    wifi_get_status(ssid, sizeof(ssid), ip, sizeof(ip));
+    lv_obj_t *url_lbl = lv_label_create(box);
+    if (ip[0]) {
+        lv_label_set_text_fmt(url_lbl,
+            "http://%s/\n" LV_SYMBOL_FILE "  http://%s:8081/", ip, ip);
+    } else {
+        lv_label_set_text(url_lbl, "http://<IP>/\n" LV_SYMBOL_FILE "  http://<IP>:8081/");
+    }
+    lv_obj_set_style_text_font(url_lbl, &lv_font_montserrat_18, 0);
+    lv_obj_set_style_text_color(url_lbl, UI_COLOR_TEXT, 0);
+    lv_obj_set_style_text_align(url_lbl, LV_TEXT_ALIGN_CENTER, 0);
+
+    /* Disable button */
+    lv_obj_t *btn = lv_btn_create(box);
+    lv_obj_set_size(btn, 280, 50);
+    lv_obj_set_style_bg_color(btn, lv_palette_darken(LV_PALETTE_RED, 1), 0);
+    lv_obj_add_event_cb(btn, modui_disable_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *btn_lbl = lv_label_create(btn);
+    lv_label_set_text(btn_lbl, TR(TR_MODUI_BTN_DISABLE));
+    lv_obj_center(btn_lbl);
+}
+
 void ui_pedalboard_init(lv_obj_t *parent)
 {
     g_parent_obj = parent;
@@ -1861,6 +1929,13 @@ void ui_pedalboard_init(lv_obj_t *parent)
     g_canvas_scroll = NULL;
     g_canvas        = NULL;
     g_conn_panel    = NULL; /* freed with content area */
+
+    /* When mod-ui.service is running, show informational placeholder instead
+     * of the pedalboard canvas — mod-pi-touch is disconnected from mod-host. */
+    if (settings_get()->mod_ui_active) {
+        build_modui_placeholder(parent);
+        return;
+    }
 
     /* Scrollable container */
     g_canvas_scroll = lv_obj_create(parent);

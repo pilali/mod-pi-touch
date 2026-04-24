@@ -210,6 +210,10 @@ void settings_init(mpt_settings_t *s)
         fclose(f);
     }
 
+    /* Detect whether mod-ui.service is currently running.
+     * system() returns 0 when the unit is active. */
+    s->mod_ui_active = (system("systemctl is-active --quiet mod-ui") == 0);
+
     g_settings   = *s;
     g_initialized = true;
 }
