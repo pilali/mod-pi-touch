@@ -140,8 +140,12 @@ pb_plugin_t *pb_add_plugin(pedalboard_t *pb, int instance_id,
     snprintf(p->uri,     sizeof(p->uri),     "%s", uri);
     snprintf(p->label,   sizeof(p->label),   "%s", symbol);
     p->enabled = true;
-    p->bypass_midi_channel = -1;
-    p->bypass_midi_cc      = -1;
+    p->enabled_snapshotable = true;
+    p->preset_snapshotable  = true;
+    p->bypass_midi_channel  = -1;
+    p->bypass_midi_cc       = -1;
+    p->perf_visible         = true;
+    p->perf_index           = -1;
     /* Default canvas position for mod-ui compatibility — spaced horizontally */
     p->canvas_x = 100.0f + (pb->plugin_count - 1) * 220.0f;
     p->canvas_y = 100.0f;
@@ -214,27 +218,31 @@ static int pb_load_ttl(pedalboard_t *pb, const char *ttl_path)
     char self_uri[PB_PATH_MAX + 7];
     snprintf(self_uri, sizeof(self_uri), "file://%s", ttl_path);
 
-    SordNode *ingen_Block   = lv2u_uri(NS_INGEN "Block");
-    SordNode *ingen_Arc     = lv2u_uri(NS_INGEN "Arc");
-    SordNode *rdf_type      = lv2u_uri(NS_RDF   "type");
-    SordNode *lv2_prototype = lv2u_uri(NS_LV2   "prototype");
-    SordNode *lv2_port      = lv2u_uri(NS_LV2   "port");
-    SordNode *ingen_value   = lv2u_uri(NS_INGEN "value");
-    SordNode *ingen_enabled = lv2u_uri(NS_INGEN "enabled");
-    SordNode *ingen_canvasX = lv2u_uri(NS_INGEN "canvasX");
-    SordNode *ingen_canvasY = lv2u_uri(NS_INGEN "canvasY");
-    SordNode *ingen_tail    = lv2u_uri(NS_INGEN "tail");
-    SordNode *ingen_head    = lv2u_uri(NS_INGEN "head");
-    SordNode *mod_label     = lv2u_uri(NS_MOD   "label");
-    SordNode *lv2_symbol    = lv2u_uri(NS_LV2   "symbol");
-    SordNode *pedal_preset  = lv2u_uri(NS_PEDAL "preset");
-    SordNode *mod_snapshotable = lv2u_uri(NS_MOD "snapshotable");
-    SordNode *midi_binding  = lv2u_uri(NS_MIDI  "binding");
-    SordNode *midi_channel  = lv2u_uri(NS_MIDI  "channel");
-    SordNode *midi_cc       = lv2u_uri(NS_MIDI  "controllerNumber");
-    SordNode *lv2_minimum   = lv2u_uri(NS_LV2   "minimum");
-    SordNode *lv2_maximum   = lv2u_uri(NS_LV2   "maximum");
-    SordNode *doap_name     = lv2u_uri(NS_DOAP  "name");
+    SordNode *ingen_Block        = lv2u_uri(NS_INGEN "Block");
+    SordNode *ingen_Arc          = lv2u_uri(NS_INGEN "Arc");
+    SordNode *rdf_type           = lv2u_uri(NS_RDF   "type");
+    SordNode *lv2_prototype      = lv2u_uri(NS_LV2   "prototype");
+    SordNode *lv2_port           = lv2u_uri(NS_LV2   "port");
+    SordNode *ingen_value        = lv2u_uri(NS_INGEN "value");
+    SordNode *ingen_enabled      = lv2u_uri(NS_INGEN "enabled");
+    SordNode *ingen_canvasX      = lv2u_uri(NS_INGEN "canvasX");
+    SordNode *ingen_canvasY      = lv2u_uri(NS_INGEN "canvasY");
+    SordNode *ingen_tail         = lv2u_uri(NS_INGEN "tail");
+    SordNode *ingen_head         = lv2u_uri(NS_INGEN "head");
+    SordNode *mod_label          = lv2u_uri(NS_MOD   "label");
+    SordNode *lv2_symbol         = lv2u_uri(NS_LV2   "symbol");
+    SordNode *pedal_preset       = lv2u_uri(NS_PEDAL "preset");
+    SordNode *mod_snapshotable   = lv2u_uri(NS_MOD   "snapshotable");
+    SordNode *mod_enabled_snap   = lv2u_uri(NS_MOD   "enabledSnapshotable");
+    SordNode *mod_preset_snap    = lv2u_uri(NS_MOD   "presetSnapshotable");
+    SordNode *perf_visible_node  = lv2u_uri(NS_PERF  "visible");
+    SordNode *perf_index_node    = lv2u_uri(NS_PERF  "index");
+    SordNode *midi_binding       = lv2u_uri(NS_MIDI  "binding");
+    SordNode *midi_channel       = lv2u_uri(NS_MIDI  "channel");
+    SordNode *midi_cc            = lv2u_uri(NS_MIDI  "controllerNumber");
+    SordNode *lv2_minimum        = lv2u_uri(NS_LV2   "minimum");
+    SordNode *lv2_maximum        = lv2u_uri(NS_LV2   "maximum");
+    SordNode *doap_name          = lv2u_uri(NS_DOAP  "name");
 
     /* Pedalboard name — save pb_subj for later use in connection iteration */
     SordNode *pb_subj = NULL;
@@ -284,6 +292,14 @@ static int pb_load_ttl(pedalboard_t *pb, const char *ttl_path)
             lv2u_get_bool(m,  subj, ingen_enabled, &plug->enabled);
             lv2u_get_string(m, subj, mod_label, plug->label, sizeof(plug->label));
             lv2u_normalize_quotes(plug->label);
+            lv2u_get_bool(m, subj, mod_enabled_snap,  &plug->enabled_snapshotable);
+            lv2u_get_bool(m, subj, mod_preset_snap,   &plug->preset_snapshotable);
+            lv2u_get_bool(m, subj, perf_visible_node, &plug->perf_visible);
+            {
+                float fi = -1.0f;
+                if (lv2u_get_float(m, subj, perf_index_node, &fi))
+                    plug->perf_index = (int)fi;
+            }
 
             SordNode *preset_n = lv2u_get_object(m, subj, pedal_preset);
             if (preset_n) {
@@ -298,29 +314,54 @@ static int pb_load_ttl(pedalboard_t *pb, const char *ttl_path)
                 }
             }
 
-            /* Ports */
+            /* Ports — iterate lv2:port list of this block.
+             * :bypass is handled separately (MIDI binding → bypass_midi_channel/cc).
+             * All other ports with ingen:value are stored as control inputs. */
             SordQuad port_pat = { subj, lv2_port, NULL, NULL };
             SordIter *pit = sord_find(m, port_pat);
             while (pit && !sord_iter_end(pit)) {
                 SordQuad pq; sord_iter_get(pit, pq);
                 SordNode *port_node = pq[SORD_OBJECT];
 
+                /* symbol from port URI relative part */
+                char psym[PB_SYMBOL_MAX] = "";
+                const uint8_t *puri = sord_node_get_string(port_node);
+                if (puri) {
+                    const char *sl = strrchr((const char *)puri, '/');
+                    snprintf(psym, sizeof(psym), "%s",
+                             sl ? sl + 1 : (const char *)puri);
+                }
+
+                /* :bypass port — extract MIDI binding only, don't add to port list */
+                if (strcmp(psym, ":bypass") == 0) {
+                    SordNode *binding = lv2u_get_object(m, port_node, midi_binding);
+                    if (binding) {
+                        SordNode *ch_n = lv2u_get_object(m, binding, midi_channel);
+                        SordNode *cc_n = lv2u_get_object(m, binding, midi_cc);
+                        if (ch_n) plug->bypass_midi_channel =
+                                      atoi((const char *)sord_node_get_string(ch_n));
+                        if (cc_n) plug->bypass_midi_cc =
+                                      atoi((const char *)sord_node_get_string(cc_n));
+                    }
+                    sord_iter_next(pit); continue;
+                }
+
+                /* Skip ports without ingen:value (audio/CV/MIDI type declarations) */
+                float dummy = 0.0f;
+                if (!lv2u_get_float(m, port_node, ingen_value, &dummy)) {
+                    sord_iter_next(pit); continue;
+                }
+
                 if (plug->port_count >= PB_MAX_PORTS) { sord_iter_next(pit); continue; }
                 pb_port_t *port = &plug->ports[plug->port_count++];
                 memset(port, 0, sizeof(*port));
                 port->midi_channel = -1;
                 port->midi_cc      = -1;
+                port->snapshotable = true;
+                snprintf(port->symbol, sizeof(port->symbol), "%s", psym);
+                port->value = dummy;
 
-                /* symbol from port URI relative part */
-                const uint8_t *puri = sord_node_get_string(port_node);
-                if (puri) {
-                    const char *sl = strrchr((const char *)puri, '/');
-                    snprintf(port->symbol, sizeof(port->symbol),
-                             "%s", sl ? sl + 1 : (const char *)puri);
-                }
-
-                lv2u_get_float(m, port_node, ingen_value, &port->value);
-                lv2u_get_bool(m,  port_node, mod_snapshotable, &port->snapshotable);
+                lv2u_get_bool(m, port_node, mod_snapshotable, &port->snapshotable);
 
                 /* MIDI binding */
                 SordNode *binding = lv2u_get_object(m, port_node, midi_binding);
@@ -421,6 +462,9 @@ static int pb_load_ttl(pedalboard_t *pb, const char *ttl_path)
                 else if (strcmp(tail, "midi_loopback") == 0 &&
                          lv2u_get_float(m, port_node, ingen_value, &val))
                     pb->midi_loopback = (val != 0.0f);
+                else if (strcmp(tail, "midi_separated_mode") == 0 &&
+                         lv2u_get_float(m, port_node, ingen_value, &val))
+                    pb->midi_separated_mode = (val != 0.0f);
             }
             sord_iter_next(tit);
         }
@@ -443,6 +487,10 @@ static int pb_load_ttl(pedalboard_t *pb, const char *ttl_path)
     sord_node_free(lv2u_world(), lv2_symbol);
     sord_node_free(lv2u_world(), pedal_preset);
     sord_node_free(lv2u_world(), mod_snapshotable);
+    sord_node_free(lv2u_world(), mod_enabled_snap);
+    sord_node_free(lv2u_world(), mod_preset_snap);
+    sord_node_free(lv2u_world(), perf_visible_node);
+    sord_node_free(lv2u_world(), perf_index_node);
     sord_node_free(lv2u_world(), midi_binding);
     sord_node_free(lv2u_world(), midi_channel);
     sord_node_free(lv2u_world(), midi_cc);
@@ -904,6 +952,7 @@ static int pb_save_ttl(pedalboard_t *pb, const char *ttl_path)
         "@prefix midi:  <http://lv2plug.in/ns/ext/midi#> .\n"
         "@prefix mod:   <http://moddevices.com/ns/mod#> .\n"
         "@prefix pedal: <http://moddevices.com/ns/modpedal#> .\n"
+        "@prefix perf:  <http://moddevices.com/ns/modperformance#> .\n"
         "@prefix rdfs:  <http://www.w3.org/2000/01/rdf-schema#> .\n\n",
         f);
 
@@ -919,29 +968,57 @@ static int pb_save_ttl(pedalboard_t *pb, const char *ttl_path)
     /* ── Plugin blocks ── */
     for (int i = 0; i < pb->plugin_count; i++) {
         pb_plugin_t *plug = &pb->plugins[i];
+        const pm_plugin_info_t *pm_info = pm_plugin_by_uri(plug->uri);
 
         fprintf(f, "<%s>\n", plug->symbol);
         fprintf(f, "    ingen:canvasX ");  write_float(f, plug->canvas_x);
         fprintf(f, " ;\n    ingen:canvasY "); write_float(f, plug->canvas_y);
         fprintf(f, " ;\n    ingen:enabled %s ;\n", plug->enabled ? "true" : "false");
+        fprintf(f, "    mod:enabledSnapshotable %s ;\n",
+                plug->enabled_snapshotable ? "true" : "false");
+        fputs("    ingen:polyphonic false ;\n", f);
+        fprintf(f, "    mod:label '%s' ;\n", plug->label);
+
+        /* lv2:port list — control input ports + :bypass */
+        {
+            bool first = true;
+            fputs("    lv2:port", f);
+            /* control inputs from pm_info (authoritative order) or from loaded ports */
+            if (pm_info) {
+                for (int j = 0; j < pm_info->port_count; j++) {
+                    const pm_port_info_t *pi = &pm_info->ports[j];
+                    fprintf(f, " %s<%s/%s>",
+                            first ? "" : " ,\n             ",
+                            plug->symbol, pi->symbol);
+                    first = false;
+                }
+            } else {
+                for (int j = 0; j < plug->port_count; j++) {
+                    fprintf(f, " %s<%s/%s>",
+                            first ? "" : " ,\n             ",
+                            plug->symbol, plug->ports[j].symbol);
+                    first = false;
+                }
+            }
+            /* Always include :bypass */
+            fprintf(f, " %s<%s/:bypass>",
+                    first ? "" : " ,\n             ", plug->symbol);
+            fputs(" ;\n", f);
+        }
+
         fprintf(f, "    lv2:prototype <%s> ;\n", plug->uri);
-        fprintf(f, "    mod:label \"%s\" ;\n", plug->label);
+        fprintf(f, "    perf:visible %s ;\n", plug->perf_visible ? "true" : "false");
+        if (plug->perf_index >= 0)
+            fprintf(f, "    perf:index %d ;\n", plug->perf_index);
         fprintf(f, "    pedal:instanceNumber %d ;\n", i);
         if (plug->preset_uri[0])
             fprintf(f, "    pedal:preset <%s> ;\n", plug->preset_uri);
         else
             fprintf(f, "    pedal:preset <> ;\n");
+        fprintf(f, "    mod:presetSnapshotable %s ;\n",
+                plug->preset_snapshotable ? "true" : "false");
 
-        /* lv2:port list — comma-separated on a single predicate */
-        if (plug->port_count > 0) {
-            fputs("    lv2:port", f);
-            for (int j = 0; j < plug->port_count; j++)
-                fprintf(f, " %s<%s/%s>",
-                        (j == 0) ? "" : " ,\n             ",
-                        plug->symbol, plug->ports[j].symbol);
-            fputs(" ;\n", f);
-        }
-        /* Patch parameters (file paths stored as block property) */
+        /* Patch parameters */
         for (int j = 0; j < plug->patch_param_count; j++) {
             pb_patch_t *pp = &plug->patch_params[j];
             if (!pp->path[0]) continue;
@@ -950,7 +1027,45 @@ static int pb_save_ttl(pedalboard_t *pb, const char *ttl_path)
 
         fputs("    a ingen:Block .\n\n", f);
 
-        /* Port value declarations */
+        /* ── Port value declarations ── */
+
+        /* Audio input ports */
+        if (pm_info) {
+            for (int j = 0; j < pm_info->port_count; j++) {
+                const pm_port_info_t *pi = &pm_info->ports[j];
+                if (pi->type == PM_PORT_AUDIO_IN) {
+                    fprintf(f, "<%s/%s>\n    a lv2:AudioPort ,\n        lv2:InputPort .\n\n",
+                            plug->symbol, pi->symbol);
+                } else if (pi->type == PM_PORT_AUDIO_OUT) {
+                    fprintf(f, "<%s/%s>\n    a lv2:AudioPort ,\n        lv2:OutputPort .\n\n",
+                            plug->symbol, pi->symbol);
+                } else if (pi->type == PM_PORT_CV_IN) {
+                    fprintf(f, "<%s/%s>\n    a lv2:CVPort ,\n        lv2:InputPort .\n\n",
+                            plug->symbol, pi->symbol);
+                } else if (pi->type == PM_PORT_CV_OUT) {
+                    fprintf(f, "<%s/%s>\n    a lv2:CVPort ,\n        lv2:OutputPort .\n\n",
+                            plug->symbol, pi->symbol);
+                } else if (pi->type == PM_PORT_MIDI_IN) {
+                    fprintf(f, "<%s/%s>\n"
+                               "    atom:bufferType atom:Sequence ;\n"
+                               "    atom:supports midi:MidiEvent ;\n"
+                               "    a atom:AtomPort ,\n        lv2:InputPort .\n\n",
+                            plug->symbol, pi->symbol);
+                } else if (pi->type == PM_PORT_MIDI_OUT) {
+                    fprintf(f, "<%s/%s>\n"
+                               "    atom:bufferType atom:Sequence ;\n"
+                               "    atom:supports midi:MidiEvent ;\n"
+                               "    a atom:AtomPort ,\n        lv2:OutputPort .\n\n",
+                            plug->symbol, pi->symbol);
+                } else if (pi->type == PM_PORT_CONTROL_OUT) {
+                    fprintf(f, "<%s/%s>\n    a lv2:ControlPort ,\n        lv2:OutputPort .\n\n",
+                            plug->symbol, pi->symbol);
+                }
+                /* control input ports are handled below (need stored values) */
+            }
+        }
+
+        /* Control input port values (from loaded/live state) */
         for (int j = 0; j < plug->port_count; j++) {
             pb_port_t *port = &plug->ports[j];
             fprintf(f, "<%s/%s>\n    ingen:value ", plug->symbol, port->symbol);
@@ -961,11 +1076,9 @@ static int pb_save_ttl(pedalboard_t *pb, const char *ttl_path)
                 fprintf(f, "        midi:channel %d ;\n", port->midi_channel);
                 fprintf(f, "        midi:controllerNumber %d ;\n", port->midi_cc);
                 if (port->midi_min != 0.0f || port->midi_max != 1.0f) {
-                    fprintf(f, "        lv2:minimum ");
-                    write_float(f, port->midi_min);
+                    fprintf(f, "        lv2:minimum "); write_float(f, port->midi_min);
                     fputs(" ;\n", f);
-                    fprintf(f, "        lv2:maximum ");
-                    write_float(f, port->midi_max);
+                    fprintf(f, "        lv2:maximum "); write_float(f, port->midi_max);
                     fputs(" ;\n", f);
                 }
                 fputs("        a midi:Controller ;\n    ] ;\n", f);
@@ -974,9 +1087,20 @@ static int pb_save_ttl(pedalboard_t *pb, const char *ttl_path)
                     port->snapshotable ? "true" : "false");
         }
 
+        /* :bypass pseudo-port */
+        fprintf(f, "<%s/:bypass>\n    ingen:value %d ;\n", plug->symbol,
+                plug->enabled ? 0 : 1);
+        if (plug->bypass_midi_channel >= 0 && plug->bypass_midi_cc >= 0) {
+            fputs("    midi:binding [\n", f);
+            fprintf(f, "        midi:channel %d ;\n", plug->bypass_midi_channel);
+            fprintf(f, "        midi:controllerNumber %d ;\n", plug->bypass_midi_cc);
+            fputs("        a midi:Controller ;\n    ] ;\n", f);
+        }
+        fprintf(f, "    mod:snapshotable %s ;\n    a lv2:ControlPort ,\n        lv2:InputPort .\n\n",
+                plug->enabled_snapshotable ? "true" : "false");
     }
 
-    /* ── Transport ports (mod-ui compatible) ── */
+    /* ── System/transport ports ── */
     fprintf(f, "<:bpb>\n    ingen:value ");
     write_float(f, pb->bpb);
     fputs(" ;\n    lv2:index 0 ;\n    a lv2:ControlPort ,\n        lv2:InputPort .\n\n", f);
@@ -989,7 +1113,57 @@ static int pb_save_ttl(pedalboard_t *pb, const char *ttl_path)
                "    a lv2:ControlPort ,\n        lv2:InputPort .\n\n",
             pb->transport_rolling ? 1 : 0);
 
-    fprintf(f, "<midi_loopback>\n    ingen:value %d ;\n    lv2:index 3 ;\n"
+    fputs("<control_in>\n"
+          "    atom:bufferType atom:Sequence ;\n"
+          "    lv2:index 3 ;\n"
+          "    lv2:name \"Control In\" ;\n"
+          "    lv2:portProperty lv2:connectionOptional ;\n"
+          "    lv2:symbol \"control_in\" ;\n"
+          "    <http://lv2plug.in/ns/ext/resize-port#minimumSize> 4096 ;\n"
+          "    a atom:AtomPort ,\n        lv2:InputPort .\n\n", f);
+
+    fputs("<control_out>\n"
+          "    atom:bufferType atom:Sequence ;\n"
+          "    lv2:index 4 ;\n"
+          "    lv2:name \"Control Out\" ;\n"
+          "    lv2:portProperty lv2:connectionOptional ;\n"
+          "    lv2:symbol \"control_out\" ;\n"
+          "    <http://lv2plug.in/ns/ext/resize-port#minimumSize> 4096 ;\n"
+          "    a atom:AtomPort ,\n        lv2:OutputPort .\n\n", f);
+
+    fputs("<capture_1>\n"
+          "    lv2:index 5 ;\n"
+          "    lv2:name \"Capture 1\" ;\n"
+          "    lv2:portProperty lv2:connectionOptional ;\n"
+          "    lv2:symbol \"capture_1\" ;\n"
+          "    a lv2:AudioPort ,\n        lv2:InputPort .\n\n", f);
+
+    fputs("<capture_2>\n"
+          "    lv2:index 6 ;\n"
+          "    lv2:name \"Capture 2\" ;\n"
+          "    lv2:portProperty lv2:connectionOptional ;\n"
+          "    lv2:symbol \"capture_2\" ;\n"
+          "    a lv2:AudioPort ,\n        lv2:InputPort .\n\n", f);
+
+    fputs("<playback_1>\n"
+          "    lv2:index 7 ;\n"
+          "    lv2:name \"Playback 1\" ;\n"
+          "    lv2:portProperty lv2:connectionOptional ;\n"
+          "    lv2:symbol \"playback_1\" ;\n"
+          "    a lv2:AudioPort ,\n        lv2:OutputPort .\n\n", f);
+
+    fputs("<playback_2>\n"
+          "    lv2:index 8 ;\n"
+          "    lv2:name \"Playback 2\" ;\n"
+          "    lv2:portProperty lv2:connectionOptional ;\n"
+          "    lv2:symbol \"playback_2\" ;\n"
+          "    a lv2:AudioPort ,\n        lv2:OutputPort .\n\n", f);
+
+    fprintf(f, "<midi_separated_mode>\n    ingen:value %d ;\n    lv2:index 9 ;\n"
+               "    a atom:AtomPort ,\n        lv2:InputPort .\n\n",
+            pb->midi_separated_mode ? 1 : 0);
+
+    fprintf(f, "<midi_loopback>\n    ingen:value %d ;\n    lv2:index 10 ;\n"
                "    a atom:AtomPort ,\n        lv2:InputPort .\n\n",
             pb->midi_loopback ? 1 : 0);
 
@@ -1012,16 +1186,20 @@ static int pb_save_ttl(pedalboard_t *pb, const char *ttl_path)
         fputs(" ;\n", f);
     }
 
-    /* lv2:port list — mod-ui compatible (transport + loopback + system ports) */
-    const char *sys_ports[] = {
-        "capture_1", "capture_2", "playback_1", "playback_2",
-        ":bpb", ":bpm", ":rolling", "midi_loopback", NULL
-    };
-    fputs("    lv2:port", f);
-    for (int i = 0; sys_ports[i]; i++)
-        fprintf(f, " %s<%s>", (i == 0) ? "" : ",\n             ", sys_ports[i]);
-    fputs(" ;\n", f);
+    /* lv2:port list — order matches mod-ui */
+    fputs("    lv2:port <:bpb> ,\n"
+          "             <:bpm> ,\n"
+          "             <:rolling> ,\n"
+          "             <control_in> ,\n"
+          "             <control_out> ,\n"
+          "             <capture_1> ,\n"
+          "             <capture_2> ,\n"
+          "             <playback_1> ,\n"
+          "             <playback_2> ,\n"
+          "             <midi_separated_mode> ,\n"
+          "             <midi_loopback> ;\n", f);
 
+    fputs("    lv2:extensionData <http://lv2plug.in/ns/ext/state#interface> ;\n", f);
     fputs("    a ingen:Graph ,\n        lv2:Plugin ,\n        pedal:Pedalboard .\n", f);
 
     fclose(f);

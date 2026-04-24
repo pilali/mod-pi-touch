@@ -19,7 +19,7 @@
 #define NS_MOD   "http://moddevices.com/ns/mod#"
 #define NS_ATOM  "http://lv2plug.in/ns/ext/atom#"
 #define NS_MIDI  "http://lv2plug.in/ns/ext/midi#"
-#define NS_PERF  "http://moddevices.com/ns/modpedal#performance#"
+#define NS_PERF  "http://moddevices.com/ns/modperformance#"
 
 /* ─── Global sord world (shared across the app) ────────────────────────────── */
 

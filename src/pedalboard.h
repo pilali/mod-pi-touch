@@ -38,6 +38,8 @@ typedef struct {
     float  cv_min;
     float  cv_max;
     char   cv_op_mode;   /* '+' '-' 'b' '=' or '\0' = none */
+    /* Tempo sync (addressings.json /bpm) */
+    float  tempo_divider; /* 0 = not tempo-synced, >0 = current divider value */
 } pb_port_t;
 
 /* ─── CV source descriptor (pre-built for UI picker) ─────────────────────────── */
@@ -76,6 +78,10 @@ typedef struct {
 
     int    bypass_midi_channel;
     int    bypass_midi_cc;
+
+    /* mod:performance — preserved across load/save (perf:visible, perf:index) */
+    bool   perf_visible;        /* default true */
+    int    perf_index;          /* -1 = not set */
 
     /* CV output ports currently enabled as CV sources.
      * Populated from addressings.json (entry present = enabled).
@@ -138,6 +144,8 @@ typedef struct {
     bool   transport_rolling;   /* true = playing */
     int    transport_sync;      /* 0=internal, 1=midi_clock_slave */
     bool   midi_loopback;       /* true = Virtual MIDI Loopback enabled */
+    bool   midi_separated_mode; /* false = aggregated MIDI mode */
+
     bool   modified;
 } pedalboard_t;
 
