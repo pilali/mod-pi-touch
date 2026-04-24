@@ -2,6 +2,7 @@
 #include "lv2_utils.h"
 #include "snapshot.h"
 #include "plugin_manager.h"
+#include "settings.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -30,17 +31,74 @@ static const char *uri_to_path(const char *uri)
 }
 
 /* Derive a filesystem/URI-safe stem from a display name.
- * Replaces any character that is not alphanumeric or '-' with '_'.
- * Example: "Grungy test" → "Grungy_test" */
+ * Matches mod-ui's symbolify(name)[:16]:
+ *  - sequences of non-[_a-zA-Z0-9] chars → single '_'
+ *  - prepend '_' if result starts with a digit
+ *  - truncate to 16 characters */
 static void make_stem(const char *name, char *stem, size_t sz)
 {
-    size_t i = 0;
-    for (const char *p = name; *p && i < sz - 1; p++, i++) {
+    char tmp[128];
+    size_t ti = 0;
+    bool in_sep = false;
+
+    for (const char *p = name; *p && ti < sizeof(tmp) - 1; p++) {
         unsigned char c = (unsigned char)*p;
-        stem[i] = ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-                   (c >= '0' && c <= '9') || c == '-') ? (char)c : '_';
+        bool valid = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                     (c >= '0' && c <= '9') || c == '_';
+        if (valid) {
+            tmp[ti++] = (char)c;
+            in_sep = false;
+        } else if (!in_sep) {
+            tmp[ti++] = '_';
+            in_sep = true;
+        }
     }
-    stem[i] = '\0';
+    if (ti == 0) { tmp[ti++] = '_'; }
+    tmp[ti] = '\0';
+
+    /* Prepend '_' if starts with digit */
+    if (tmp[0] >= '0' && tmp[0] <= '9' && ti < sizeof(tmp) - 1) {
+        memmove(tmp + 1, tmp, ti + 1);
+        tmp[0] = '_';
+        ti++;
+    }
+
+    /* Truncate to 16 chars (mod-ui [:16]) */
+    size_t limit = (sz > 17) ? 16 : sz - 1;
+    if (ti > limit) ti = limit;
+    memcpy(stem, tmp, ti);
+    stem[ti] = '\0';
+}
+
+/* For a file:// preset URI, if the referenced file doesn't exist, search the
+ * user LV2 directory for a bundle/TTL with the same relative path components.
+ * Rewrites uri_out in-place if a valid alternative is found. */
+static void normalize_preset_uri(char *uri_out, size_t sz, const char *uri_in)
+{
+    if (strncmp(uri_in, "file://", 7) != 0) return;
+    const char *fs_path = uri_in + 7;
+    if (access(fs_path, F_OK) == 0) return; /* exists — no change needed */
+
+    /* Extract the last two components: <bundle.lv2>/<preset.ttl> */
+    const char *last_slash = strrchr(fs_path, '/');
+    if (!last_slash) return;
+    const char *preset_file = last_slash + 1;
+    const char *bundle_start = last_slash;
+    while (bundle_start > fs_path && *(bundle_start - 1) != '/') bundle_start--;
+    if (bundle_start >= last_slash) return;
+    char bundle_name[256];
+    size_t blen = (size_t)(last_slash - bundle_start);
+    if (blen == 0 || blen >= sizeof(bundle_name)) return;
+    memcpy(bundle_name, bundle_start, blen);
+    bundle_name[blen] = '\0';
+
+    /* Try to find <lv2_user_dir>/<bundle_name>/<preset_file> */
+    const mpt_settings_t *s = settings_get();
+    char candidate[1024];
+    snprintf(candidate, sizeof(candidate), "%s/%s/%s",
+             s->lv2_user_dir, bundle_name, preset_file);
+    if (access(candidate, F_OK) == 0)
+        snprintf(uri_out, sz, "file://%s", candidate);
 }
 
 /* ─── Init ───────────────────────────────────────────────────────────────────── */
@@ -151,6 +209,11 @@ static int pb_load_ttl(pedalboard_t *pb, const char *ttl_path)
     SordModel *m = lv2u_load_ttl(ttl_path);
     if (!m) return -1;
 
+    /* Build the file:// URI for this TTL so we can detect pedal:preset <> (which
+     * sord resolves to the base URI). Plugins with no preset use <> in mod-ui. */
+    char self_uri[PB_PATH_MAX + 7];
+    snprintf(self_uri, sizeof(self_uri), "file://%s", ttl_path);
+
     SordNode *ingen_Block   = lv2u_uri(NS_INGEN "Block");
     SordNode *ingen_Arc     = lv2u_uri(NS_INGEN "Arc");
     SordNode *rdf_type      = lv2u_uri(NS_RDF   "type");
@@ -223,9 +286,17 @@ static int pb_load_ttl(pedalboard_t *pb, const char *ttl_path)
             lv2u_normalize_quotes(plug->label);
 
             SordNode *preset_n = lv2u_get_object(m, subj, pedal_preset);
-            if (preset_n)
-                snprintf(plug->preset_uri, sizeof(plug->preset_uri), "%s",
-                         sord_node_get_string(preset_n));
+            if (preset_n) {
+                const char *pu = (const char *)sord_node_get_string(preset_n);
+                /* pedal:preset <> in TTL resolves to the base URI (the TTL itself).
+                 * Treat these as "no preset" — mod-ui writes <> for plugins with
+                 * no active preset. */
+                if (pu && pu[0] && strcmp(pu, self_uri) != 0) {
+                    snprintf(plug->preset_uri, sizeof(plug->preset_uri), "%s", pu);
+                    /* If the file:// URI no longer resolves, try current LV2 paths */
+                    normalize_preset_uri(plug->preset_uri, sizeof(plug->preset_uri), pu);
+                }
+            }
 
             /* Ports */
             SordQuad port_pat = { subj, lv2_port, NULL, NULL };
@@ -511,6 +582,31 @@ int pb_load(pedalboard_t *pb, const char *bundle_dir)
                 cJSON *aroot = cJSON_Parse(abuf);
                 free(abuf);
                 if (aroot) {
+                    /* /bpm — tempo addressing entries */
+                    cJSON *bpm_arr = cJSON_GetObjectItem(aroot, "/bpm");
+                    if (cJSON_IsArray(bpm_arr)) {
+                        cJSON *addr;
+                        cJSON_ArrayForEach(addr, bpm_arr) {
+                            cJSON *ji = cJSON_GetObjectItem(addr, "instance");
+                            cJSON *jp = cJSON_GetObjectItem(addr, "port");
+                            cJSON *jd = cJSON_GetObjectItem(addr, "dividers");
+                            cJSON *jt = cJSON_GetObjectItem(addr, "tempo");
+                            if (!cJSON_IsString(ji) || !cJSON_IsString(jp)) continue;
+                            if (!cJSON_IsTrue(jt) || !cJSON_IsNumber(jd)) continue;
+                            const char *inst_path = ji->valuestring;
+                            if (strncmp(inst_path, "/graph/", 7) != 0) continue;
+                            const char *inst_sym = inst_path + 7;
+                            pb_plugin_t *plug = pb_find_plugin_by_symbol(pb, inst_sym);
+                            if (!plug) continue;
+                            const char *port_sym = jp->valuestring;
+                            for (int pi = 0; pi < plug->port_count; pi++) {
+                                if (strcmp(plug->ports[pi].symbol, port_sym) != 0) continue;
+                                plug->ports[pi].tempo_divider = (float)jd->valuedouble;
+                                break;
+                            }
+                        }
+                    }
+
                     cJSON *entry;
                     cJSON_ArrayForEach(entry, aroot) {
                         const char *key = entry->string;
@@ -606,8 +702,45 @@ static const char *cv_port_label(const pb_plugin_t *plug, const char *port_sym)
 static void pb_save_addressings(const pedalboard_t *pb)
 {
     cJSON *root = cJSON_CreateObject();
-    /* /bpm is always present (mod-ui compatibility) */
-    cJSON_AddItemToObject(root, "/bpm", cJSON_CreateArray());
+
+    /* /bpm — tempo sync addressings */
+    cJSON *bpm_arr = cJSON_CreateArray();
+    for (int i = 0; i < pb->plugin_count; i++) {
+        const pb_plugin_t *plug = &pb->plugins[i];
+        for (int j = 0; j < plug->port_count; j++) {
+            const pb_port_t *port = &plug->ports[j];
+            if (port->tempo_divider <= 0.0f) continue;
+
+            /* Look up port label and range from pm */
+            const char *port_label = port->symbol;
+            float p_min = port->min;
+            float p_max = port->max;
+            const pm_plugin_info_t *pm = pm_plugin_by_uri(plug->uri);
+            if (pm) {
+                for (int k = 0; k < pm->port_count; k++) {
+                    if (strcmp(pm->ports[k].symbol, port->symbol) != 0) continue;
+                    if (pm->ports[k].name[0]) port_label = pm->ports[k].name;
+                    p_min = pm->ports[k].min;
+                    p_max = pm->ports[k].max;
+                    break;
+                }
+            }
+
+            char inst_path[PB_URI_MAX];
+            snprintf(inst_path, sizeof(inst_path), "/graph/%s", plug->symbol);
+            cJSON *obj = cJSON_CreateObject();
+            cJSON_AddStringToObject(obj, "instance", inst_path);
+            cJSON_AddStringToObject(obj, "port",     port->symbol);
+            cJSON_AddStringToObject(obj, "label",    port_label);
+            cJSON_AddNumberToObject(obj, "minimum",  (double)p_min);
+            cJSON_AddNumberToObject(obj, "maximum",  (double)p_max);
+            cJSON_AddNumberToObject(obj, "steps",    0);
+            cJSON_AddBoolToObject(obj,   "tempo",    true);
+            cJSON_AddNumberToObject(obj, "dividers", (double)port->tempo_divider);
+            cJSON_AddItemToArray(bpm_arr, obj);
+        }
+    }
+    cJSON_AddItemToObject(root, "/bpm", bpm_arr);
 
     /* Pass 1 — plugin CV output ports that are enabled.
      * Each gets a { "name": "...", "addrs": [] } entry regardless of assignments.
@@ -935,12 +1068,41 @@ int pb_save(pedalboard_t *pb)
 {
     ensure_dir(pb->path);
 
+    char stem[PB_NAME_MAX];
+    make_stem(pb->name, stem, sizeof(stem));
+
+    /* Remove any stale *.ttl files in the bundle (other than manifest.ttl and
+     * the file we are about to write). This handles the case where a previous
+     * save used a different stem (e.g. before the 16-char truncation was added,
+     * or after a pedalboard rename). */
+    {
+        DIR *d = opendir(pb->path);
+        if (d) {
+            struct dirent *ent;
+            while ((ent = readdir(d))) {
+                const char *n = ent->d_name;
+                size_t nl = strlen(n);
+                if (nl <= 4) continue;
+                if (strcmp(n + nl - 4, ".ttl") != 0) continue;
+                if (strcmp(n, "manifest.ttl") == 0) continue;
+                /* Keep the file we are about to write */
+                char expected[PB_NAME_MAX + 4];
+                snprintf(expected, sizeof(expected), "%s.ttl", stem);
+                if (strcmp(n, expected) == 0) continue;
+                /* Delete stale TTL */
+                char stale[PB_PATH_MAX];
+                snprintf(stale, sizeof(stale), "%s/%s", pb->path, n);
+                remove(stale);
+                fprintf(stderr, "[pedalboard] removed stale TTL: %s\n", n);
+            }
+            closedir(d);
+        }
+    }
+
     if (pb_save_manifest(pb) < 0) return -1;
 
     /* TTL filename uses the URI-safe stem; doap:name inside the file keeps
      * the full display name (may contain spaces). */
-    char stem[PB_NAME_MAX];
-    make_stem(pb->name, stem, sizeof(stem));
     char ttl_path[PB_PATH_MAX];
     snprintf(ttl_path, sizeof(ttl_path), "%s/%s.ttl", pb->path, stem);
     if (pb_save_ttl(pb, ttl_path) < 0) return -1;
