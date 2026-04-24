@@ -115,6 +115,8 @@ typedef enum {
     TR_PB_SOURCE_OUTPUT,
     TR_PB_CONNECT,
     TR_PB_DISCONNECT,
+    TR_PB_DISC_TITLE,          /* "Disconnect from:" */
+    TR_PB_DISC_ALL,            /* "All" / "Tout" */
 
     /* Conductor */
     TR_CONDUCTOR_TITLE,

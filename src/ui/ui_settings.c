@@ -309,11 +309,19 @@ static void build_midi_section(lv_obj_t *parent)
         lv_obj_set_style_text_color(lbl, UI_COLOR_TEXT_DIM, 0);
     }
 
-    /* Merge detected ports into settings */
+    /* Merge detected ports into settings (match by capture port or label) */
     for (int i = 0; i < n_hw; i++) {
         int found = -1;
-        for (int j = 0; j < s->midi_port_count; j++)
-            if (strcmp(s->midi_ports[j].dev, hw[i].dev) == 0) { found = j; break; }
+        /* Match by capture port name (primary key) */
+        if (hw[i].dev[0]) {
+            for (int j = 0; j < s->midi_port_count; j++)
+                if (strcmp(s->midi_ports[j].dev, hw[i].dev) == 0) { found = j; break; }
+        }
+        /* Fallback: match by playback port for output-only devices */
+        if (found < 0 && hw[i].dev_out[0]) {
+            for (int j = 0; j < s->midi_port_count; j++)
+                if (strcmp(s->midi_ports[j].dev_out, hw[i].dev_out) == 0) { found = j; break; }
+        }
         if (found < 0 && s->midi_port_count < MPT_MAX_MIDI_PORTS) {
             found = s->midi_port_count++;
             snprintf(s->midi_ports[found].dev, sizeof(s->midi_ports[0].dev),
@@ -321,8 +329,12 @@ static void build_midi_section(lv_obj_t *parent)
             s->midi_ports[found].enabled = false;
         }
         if (found >= 0) {
-            snprintf(s->midi_ports[found].label, sizeof(s->midi_ports[0].label),
+            snprintf(s->midi_ports[found].label,   sizeof(s->midi_ports[0].label),
                      "%s", hw[i].label);
+            snprintf(s->midi_ports[found].dev,     sizeof(s->midi_ports[0].dev),
+                     "%s", hw[i].dev);
+            snprintf(s->midi_ports[found].dev_out, sizeof(s->midi_ports[0].dev_out),
+                     "%s", hw[i].dev_out);
             s->midi_ports[found].is_input  = hw[i].is_input;
             s->midi_ports[found].is_output = hw[i].is_output;
         }
@@ -330,8 +342,14 @@ static void build_midi_section(lv_obj_t *parent)
 
     for (int i = 0; i < n_hw; i++) {
         int found = -1;
-        for (int j = 0; j < s->midi_port_count; j++)
-            if (strcmp(s->midi_ports[j].dev, hw[i].dev) == 0) { found = j; break; }
+        if (hw[i].dev[0]) {
+            for (int j = 0; j < s->midi_port_count; j++)
+                if (strcmp(s->midi_ports[j].dev, hw[i].dev) == 0) { found = j; break; }
+        }
+        if (found < 0 && hw[i].dev_out[0]) {
+            for (int j = 0; j < s->midi_port_count; j++)
+                if (strcmp(s->midi_ports[j].dev_out, hw[i].dev_out) == 0) { found = j; break; }
+        }
         if (found < 0) continue;
 
         g_midi_ctx[i].port_idx = found;
@@ -341,19 +359,7 @@ static void build_midi_section(lv_obj_t *parent)
                               LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
         lv_obj_t *cb = lv_checkbox_create(row);
-
-        char dir[8] = "";
-        if (s->midi_ports[found].is_input && s->midi_ports[found].is_output)
-            snprintf(dir, sizeof(dir), " [I/O]");
-        else if (s->midi_ports[found].is_input)
-            snprintf(dir, sizeof(dir), " [In]");
-        else if (s->midi_ports[found].is_output)
-            snprintf(dir, sizeof(dir), " [Out]");
-
-        char cb_text[128];
-        snprintf(cb_text, sizeof(cb_text), "%s%s",
-                 s->midi_ports[found].label, dir);
-        lv_checkbox_set_text(cb, cb_text);
+        lv_checkbox_set_text(cb, s->midi_ports[found].label);
 
         if (s->midi_ports[found].enabled)
             lv_obj_add_state(cb, LV_STATE_CHECKED);

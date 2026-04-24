@@ -79,31 +79,32 @@ int hw_detect_audio(hw_audio_device_t *out, int max)
  */
 int hw_detect_midi(hw_midi_port_t *out, int max)
 {
-    int count = 0;
-
     FILE *f = popen(JACK_LSP " -p --aliases 2>/dev/null", "r");
     if (!f) return 0;
 
-    /* ── Per-port accumulated state ── */
+    /* ── Collect raw entries (one per JACK port direction) ── */
+    hw_midi_port_t raw[HW_MAX_MIDI_PORTS * 2];
+    int n_raw = 0;
+
     char cur_port[128]  = "";
     char cur_label[128] = "";
     bool cur_physical   = false;
     bool cur_is_output  = false; /* JACK "output" direction */
     bool cur_loopback   = false;
-    bool cur_is_midi    = false; /* true if not a pure audio port */
+    bool cur_is_midi    = false;
 
     char line[512];
 
-/* Emit cur_* if it is a valid physical MIDI port. */
-#define EMIT() do { \
+#define EMIT_RAW() do { \
     if (cur_port[0] && cur_physical && cur_is_midi && !cur_loopback \
-            && count < max) { \
-        snprintf(out[count].dev,   sizeof(out[count].dev),   "%s", cur_port); \
-        snprintf(out[count].label, sizeof(out[count].label), "%s", \
+            && n_raw < (int)(sizeof(raw)/sizeof(raw[0]))) { \
+        memset(&raw[n_raw], 0, sizeof(raw[0])); \
+        snprintf(raw[n_raw].dev,   sizeof(raw[0].dev),   "%s", cur_port); \
+        snprintf(raw[n_raw].label, sizeof(raw[0].label), "%s", \
                  cur_label[0] ? cur_label : cur_port); \
-        out[count].is_input  = cur_is_output;  \
-        out[count].is_output = !cur_is_output; \
-        count++; \
+        raw[n_raw].is_input  = cur_is_output;  \
+        raw[n_raw].is_output = !cur_is_output; \
+        n_raw++; \
     } \
 } while (0)
 
@@ -112,58 +113,74 @@ int hw_detect_midi(hw_midi_port_t *out, int max)
         if (!line[0]) continue;
 
         if (line[0] != ' ' && line[0] != '\t') {
-            /* ── New port name line: emit previous, reset state ── */
-            EMIT();
-
+            EMIT_RAW();
             snprintf(cur_port, sizeof(cur_port), "%s", line);
             cur_label[0]  = '\0';
             cur_physical  = false;
             cur_is_output = false;
             cur_loopback  = false;
-
-            /* Classify: audio system ports are excluded by name. */
             if (strncmp(line, "system:midi_", 12) == 0)
-                cur_is_midi = true;               /* system MIDI port */
+                cur_is_midi = true;
             else if (strncmp(line, "system:", 7) == 0)
-                cur_is_midi = false;              /* system audio port — skip */
+                cur_is_midi = false;
             else
-                cur_is_midi = true;               /* non-system port (ttymidi etc.) */
-
+                cur_is_midi = true;
         } else if (line[0] == ' ') {
-            /* ── Alias line (leading spaces) ── */
             const char *a = line + strspn(line, " ");
-
-            /* Flag loopback */
             if (strcasestr(a, "Midi-Through") || strcasestr(a, "midi_through"))
                 cur_loopback = true;
-
-            /* Build label from first alias only */
-            if (!cur_label[0]) {
-                if (strncmp(a, "alsa_pcm:", 9) == 0) {
-                    /* "alsa_pcm:pisound/midi_playback_1" → "pisound" */
-                    const char *name  = a + 9;
-                    const char *slash = strchr(name, '/');
-                    if (slash)
-                        snprintf(cur_label, sizeof(cur_label),
-                                 "%.*s", (int)(slash - name), name);
-                    else
-                        snprintf(cur_label, sizeof(cur_label), "%s", name);
-                }
-                /* else: leave cur_label empty; port name used as fallback */
+            if (!cur_label[0] && strncmp(a, "alsa_pcm:", 9) == 0) {
+                const char *name  = a + 9;
+                const char *slash = strchr(name, '/');
+                if (slash)
+                    snprintf(cur_label, sizeof(cur_label),
+                             "%.*s", (int)(slash - name), name);
+                else
+                    snprintf(cur_label, sizeof(cur_label), "%s", name);
             }
-
         } else {
-            /* ── Properties line (leading tab): "\tproperties: output,physical,…" ── */
-            const char *p = line + 1; /* skip tab */
+            const char *p = line + 1;
             if (strstr(p, "physical")) cur_physical  = true;
             if (strstr(p, "output"))   cur_is_output = true;
         }
     }
-    EMIT(); /* emit last port */
+    EMIT_RAW();
 
-#undef EMIT
+#undef EMIT_RAW
 
     pclose(f);
+
+    /* ── Group by label: one entry per device, merge capture+playback ── */
+    int count = 0;
+    for (int i = 0; i < n_raw; i++) {
+        /* Find existing entry with same label */
+        int found = -1;
+        for (int j = 0; j < count; j++) {
+            if (strcmp(out[j].label, raw[i].label) == 0) { found = j; break; }
+        }
+
+        if (found < 0) {
+            if (count >= max) continue;
+            memset(&out[count], 0, sizeof(out[0]));
+            snprintf(out[count].label, sizeof(out[0].label), "%s", raw[i].label);
+            if (raw[i].is_input) {
+                snprintf(out[count].dev, sizeof(out[0].dev), "%s", raw[i].dev);
+                out[count].is_input = true;
+            } else {
+                snprintf(out[count].dev_out, sizeof(out[0].dev_out), "%s", raw[i].dev);
+                out[count].is_output = true;
+            }
+            count++;
+        } else {
+            if (raw[i].is_input && !out[found].is_input) {
+                snprintf(out[found].dev, sizeof(out[0].dev), "%s", raw[i].dev);
+                out[found].is_input = true;
+            } else if (raw[i].is_output && !out[found].is_output) {
+                snprintf(out[found].dev_out, sizeof(out[0].dev_out), "%s", raw[i].dev);
+                out[found].is_output = true;
+            }
+        }
+    }
     return count;
 }
 

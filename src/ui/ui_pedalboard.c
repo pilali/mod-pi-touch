@@ -67,7 +67,9 @@ static drag_t g_drag = {0};
 #define IO_LINE_W     2   /* thickness of the vertical bar */
 
 typedef struct {
-    char label[16]; /* "In 1", "In 2", "MIDI", "Out 1"… */
+    char label[16];       /* short canvas label: "In 1", "M2", "Out 1" */
+    char jack_port[64];   /* actual JACK port name: "system:midi_capture_2" */
+    char full_label[64];  /* full device name for chooser: "pisound", "touchosc" */
     bool is_midi;
 } io_port_desc_t;
 
@@ -180,6 +182,20 @@ static conn_port_info_t s_choose_ports[CONN_PORT_MAX];
 static int              s_choose_count = 0;
 static int              s_choose_dst_idx = -99;
 
+/* Disconnect chooser popup state */
+typedef struct {
+    char from_jack[256];
+    char to_jack[256];
+    char from_uri[PB_URI_MAX];
+    char to_uri[PB_URI_MAX];
+    char to_label[80];
+} disc_choice_t;
+
+#define DISC_MAX 32
+static disc_choice_t s_disc_choices[DISC_MAX];
+static int           s_disc_count = 0;
+static lv_obj_t     *g_disc_popup = NULL;
+
 /* lv_line needs persistent point arrays — flat pool, up to 4 pts per line */
 static lv_point_precise_t s_pts[LINE_PTS_MAX];
 static int                s_pts_used = 0;
@@ -214,14 +230,19 @@ static int collect_src_ports(int src_idx, conn_port_info_t *out, int max)
 {
     int count = 0;
     if (src_idx == -1) { /* system audio/MIDI inputs */
-        int ai = 0, mi = 0;
+        int ai = 0;
         for (int i = 0; i < g_n_in_c && count < max; i++) {
             conn_port_info_t *p = &out[count];
             if (g_io_in_c[i].is_midi) {
-                mi++;
-                snprintf(p->symbol,    sizeof(p->symbol),    "midi_capture_%d", mi);
-                snprintf(p->label,     sizeof(p->label),     "%s", g_io_in_c[i].label);
-                snprintf(p->jack_port, sizeof(p->jack_port), "system:midi_capture_%d", mi);
+                /* Use actual JACK port from io_port_desc_t to avoid sequential counter bug */
+                const char *jp = g_io_in_c[i].jack_port;
+                const char *sym = (strncmp(jp, "system:", 7) == 0) ? jp + 7 : jp;
+                const char *lbl = g_io_in_c[i].full_label[0]
+                                      ? g_io_in_c[i].full_label
+                                      : g_io_in_c[i].label;
+                snprintf(p->symbol,    sizeof(p->symbol),    "%s", sym);
+                snprintf(p->label,     sizeof(p->label),     "%s", lbl);
+                snprintf(p->jack_port, sizeof(p->jack_port), "%s", jp);
                 p->is_midi = true;
             } else {
                 ai++;
@@ -262,14 +283,12 @@ static int collect_dst_ports(int dst_idx, conn_port_info_t *out, int max,
     int count = 0;
     if (dst_idx == -2) { /* system audio/MIDI outputs — no CV */
         if (want_cv) return 0;
-        int ai = 0, mi = 0;
+        int ai = 0;
         for (int i = 0; i < g_n_out_c && count < max; i++) {
             bool is_m = g_io_out_c[i].is_midi;
             /* Detect the loopback entry (added last in collect_io_descs) */
             bool is_lb = (is_m && strcmp(g_io_out_c[i].label, "Loopback") == 0);
-            if (!is_lb) {
-                if (is_m) mi++; else ai++;
-            }
+            if (!is_m) ai++;
             if (is_m != want_midi) continue;
             conn_port_info_t *p = &out[count];
             if (is_lb) {
@@ -280,9 +299,15 @@ static int collect_dst_ports(int dst_idx, conn_port_info_t *out, int max,
                 snprintf(p->jack_port, sizeof(p->jack_port), "%s",
                          g_midi_loopback_pb_port);
             } else if (is_m) {
-                snprintf(p->symbol,    sizeof(p->symbol),    "midi_playback_%d", mi);
-                snprintf(p->label,     sizeof(p->label),     "%s", g_io_out_c[i].label);
-                snprintf(p->jack_port, sizeof(p->jack_port), "system:midi_playback_%d", mi);
+                /* Use actual JACK port from io_port_desc_t to avoid sequential counter bug */
+                const char *jp = g_io_out_c[i].jack_port;
+                const char *sym = (strncmp(jp, "system:", 7) == 0) ? jp + 7 : jp;
+                const char *lbl = g_io_out_c[i].full_label[0]
+                                      ? g_io_out_c[i].full_label
+                                      : g_io_out_c[i].label;
+                snprintf(p->symbol,    sizeof(p->symbol),    "%s", sym);
+                snprintf(p->label,     sizeof(p->label),     "%s", lbl);
+                snprintf(p->jack_port, sizeof(p->jack_port), "%s", jp);
             } else {
                 snprintf(p->symbol,    sizeof(p->symbol),    "playback_%d", ai);
                 snprintf(p->label,     sizeof(p->label),     "%s", g_io_out_c[i].label);
@@ -358,6 +383,11 @@ static void conn_panel_close(void)
         lv_obj_add_flag(g_choose_popup, LV_OBJ_FLAG_HIDDEN);
         lv_obj_delete_async(g_choose_popup);
         g_choose_popup = NULL;
+    }
+    if (g_disc_popup) {
+        lv_obj_add_flag(g_disc_popup, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_delete_async(g_disc_popup);
+        g_disc_popup = NULL;
     }
     conn_panel_hide();
     g_conn_mode      = CONN_MODE_IDLE;
@@ -527,6 +557,158 @@ static void conn_btn_connect_cb(lv_event_t *e)
     show_toast("Tap a plugin to connect...");
 }
 
+/* Resolve a JACK port name to a short human-readable label for the disconnect chooser.
+ * Returns a pointer into buf (always non-NULL). */
+static const char *jack_port_to_display(const char *jp, char *buf, size_t bufsz)
+{
+    /* system:playback_N → "Out N" */
+    if (strncmp(jp, "system:playback_", 16) == 0) {
+        snprintf(buf, bufsz, "Out %s", jp + 16);
+        return buf;
+    }
+    /* system:midi_playback_N → full device label from g_io_out_c */
+    if (strncmp(jp, "system:midi_playback_", 21) == 0) {
+        for (int i = 0; i < g_n_out_c; i++) {
+            if (strcmp(g_io_out_c[i].jack_port, jp) == 0) {
+                snprintf(buf, bufsz, "%s", g_io_out_c[i].full_label[0]
+                                              ? g_io_out_c[i].full_label
+                                              : g_io_out_c[i].label);
+                return buf;
+            }
+        }
+        snprintf(buf, bufsz, "%s", jp + 21);
+        return buf;
+    }
+    /* effect_NNN:sym → plugin label */
+    if (strncmp(jp, "effect_", 7) == 0) {
+        int iid = 0;
+        const char *colon = strchr(jp + 7, ':');
+        if (colon) {
+            iid = atoi(jp + 7);
+            for (int i = 0; i < g_pedalboard.plugin_count; i++) {
+                if (g_pedalboard.plugins[i].instance_id == iid) {
+                    snprintf(buf, bufsz, "%s:%s",
+                             g_pedalboard.plugins[i].label, colon + 1);
+                    return buf;
+                }
+            }
+        }
+    }
+    /* Midi-Through loopback playback port */
+    if (g_midi_loopback_pb_port[0] && strcmp(jp, g_midi_loopback_pb_port) == 0) {
+        snprintf(buf, bufsz, "MIDI Loopback");
+        return buf;
+    }
+    snprintf(buf, bufsz, "%s", jp);
+    return buf;
+}
+
+/* ── Disconnect chooser callbacks ──────────────────────────────────────────────── */
+
+static void disc_choice_btn_cb(lv_event_t *e)
+{
+    int idx = (int)(intptr_t)lv_event_get_user_data(e);
+    if (idx < 0 || idx >= s_disc_count) return;
+    disc_choice_t *dc = &s_disc_choices[idx];
+
+    host_disconnect(dc->from_jack, dc->to_jack);
+    pb_remove_connection(&g_pedalboard, dc->from_uri, dc->to_uri);
+    g_pedalboard.modified = true;
+    ui_app_update_title(g_pedalboard.name, true);
+
+    if (g_disc_popup) {
+        lv_obj_add_flag(g_disc_popup, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_delete_async(g_disc_popup);
+        g_disc_popup = NULL;
+    }
+    conn_panel_close();
+    ui_pedalboard_refresh();
+}
+
+static void disc_all_btn_cb(lv_event_t *e)
+{
+    (void)e;
+    for (int i = 0; i < s_disc_count; i++) {
+        disc_choice_t *dc = &s_disc_choices[i];
+        host_disconnect(dc->from_jack, dc->to_jack);
+        pb_remove_connection(&g_pedalboard, dc->from_uri, dc->to_uri);
+    }
+    if (s_disc_count > 0) {
+        g_pedalboard.modified = true;
+        ui_app_update_title(g_pedalboard.name, true);
+    }
+    if (g_disc_popup) {
+        lv_obj_add_flag(g_disc_popup, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_delete_async(g_disc_popup);
+        g_disc_popup = NULL;
+    }
+    conn_panel_close();
+    ui_pedalboard_refresh();
+}
+
+static void show_disconnect_chooser(void)
+{
+    int n = s_disc_count;
+    int popup_h = 50 + (n + 1) * 56;  /* +1 for "All" button */
+    if (popup_h > 440) popup_h = 440;
+
+    g_disc_popup = lv_obj_create(lv_layer_top());
+    lv_obj_t *popup = g_disc_popup;
+    lv_obj_set_size(popup, 440, popup_h);
+    lv_obj_align(popup, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_set_style_bg_color(popup, UI_COLOR_SURFACE, 0);
+    lv_obj_set_style_bg_opa(popup, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_color(popup, UI_COLOR_PRIMARY, 0);
+    lv_obj_set_style_border_width(popup, 2, 0);
+    lv_obj_set_style_radius(popup, 8, 0);
+    lv_obj_set_style_pad_all(popup, 12, 0);
+    lv_obj_clear_flag(popup, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *title = lv_label_create(popup);
+    lv_label_set_text(title, TR(TR_PB_DISC_TITLE));
+    lv_obj_set_style_text_color(title, UI_COLOR_TEXT, 0);
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
+    lv_obj_align(title, LV_ALIGN_TOP_LEFT, 0, 0);
+
+    for (int i = 0; i < n; i++) {
+        lv_obj_t *btn = lv_btn_create(popup);
+        lv_obj_set_size(btn, 410, 48);
+        lv_obj_set_pos(btn, 0, 36 + i * 54);
+        lv_obj_set_style_bg_color(btn, UI_COLOR_BG, 0);
+        lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_color(btn, UI_COLOR_TEXT_DIM, 0);
+        lv_obj_set_style_border_width(btn, 1, 0);
+        lv_obj_set_style_radius(btn, 4, 0);
+        lv_obj_set_style_shadow_width(btn, 0, 0);
+
+        lv_obj_t *lbl = lv_label_create(btn);
+        lv_label_set_text(lbl, s_disc_choices[i].to_label);
+        lv_obj_set_style_text_color(lbl, UI_COLOR_TEXT, 0);
+        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_14, 0);
+        lv_obj_center(lbl);
+
+        lv_obj_add_event_cb(btn, disc_choice_btn_cb, LV_EVENT_SHORT_CLICKED,
+                            (void *)(intptr_t)i);
+    }
+
+    /* "All" / "Tout" button at the bottom */
+    lv_obj_t *all_btn = lv_btn_create(popup);
+    lv_obj_set_size(all_btn, 410, 48);
+    lv_obj_set_pos(all_btn, 0, 36 + n * 54);
+    lv_obj_set_style_bg_color(all_btn, UI_COLOR_PRIMARY, 0);
+    lv_obj_set_style_bg_opa(all_btn, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(all_btn, 0, 0);
+    lv_obj_set_style_radius(all_btn, 4, 0);
+    lv_obj_set_style_shadow_width(all_btn, 0, 0);
+
+    lv_obj_t *all_lbl = lv_label_create(all_btn);
+    lv_label_set_text(all_lbl, TR(TR_PB_DISC_ALL));
+    lv_obj_set_style_text_color(all_lbl, lv_color_white(), 0);
+    lv_obj_set_style_text_font(all_lbl, &lv_font_montserrat_14, 0);
+    lv_obj_center(all_lbl);
+    lv_obj_add_event_cb(all_btn, disc_all_btn_cb, LV_EVENT_SHORT_CLICKED, NULL);
+}
+
 static void conn_btn_disconnect_cb(lv_event_t *e)
 {
     (void)e;
@@ -536,30 +718,46 @@ static void conn_btn_disconnect_cb(lv_event_t *e)
     }
 
     const char *src_jack = g_src_ports[g_conn_sel_port].jack_port;
-    int removed = 0;
 
-    /* Remove ALL connections originating from the selected source port */
-    for (int i = 0; i < g_pedalboard.connection_count; ) {
+    /* Collect all connections from this source port */
+    s_disc_count = 0;
+    for (int i = 0; i < g_pedalboard.connection_count && s_disc_count < DISC_MAX; i++) {
         pb_connection_t *conn = &g_pedalboard.connections[i];
         char from_jack[256], to_jack[256];
         bool fok = uri_to_jack_port(conn->from, &g_pedalboard, from_jack, sizeof(from_jack));
         bool tok = uri_to_jack_port(conn->to,   &g_pedalboard, to_jack,   sizeof(to_jack));
+        if (!fok || !tok || strcmp(from_jack, src_jack) != 0) continue;
 
-        if (fok && tok && strcmp(from_jack, src_jack) == 0) {
-            host_disconnect(from_jack, to_jack);
-            pb_remove_connection(&g_pedalboard, conn->from, conn->to);
-            g_pedalboard.modified = true;
-            removed++;
-            continue; /* entry removed — don't advance i */
-        }
-        i++;
+        disc_choice_t *dc = &s_disc_choices[s_disc_count];
+        snprintf(dc->from_jack, sizeof(dc->from_jack), "%s", from_jack);
+        snprintf(dc->to_jack,   sizeof(dc->to_jack),   "%s", to_jack);
+        snprintf(dc->from_uri,  sizeof(dc->from_uri),  "%s", conn->from);
+        snprintf(dc->to_uri,    sizeof(dc->to_uri),    "%s", conn->to);
+        char lbuf[80];
+        snprintf(dc->to_label, sizeof(dc->to_label), "%s",
+                 jack_port_to_display(to_jack, lbuf, sizeof(lbuf)));
+        s_disc_count++;
     }
 
-    if (removed > 0)
-        ui_app_update_title(g_pedalboard.name, true);
+    if (s_disc_count == 0) {
+        conn_panel_close();
+        return;
+    }
 
-    conn_panel_close();
-    ui_pedalboard_refresh();
+    if (s_disc_count == 1) {
+        /* Single connection — disconnect directly */
+        host_disconnect(s_disc_choices[0].from_jack, s_disc_choices[0].to_jack);
+        pb_remove_connection(&g_pedalboard,
+                             s_disc_choices[0].from_uri, s_disc_choices[0].to_uri);
+        g_pedalboard.modified = true;
+        ui_app_update_title(g_pedalboard.name, true);
+        conn_panel_close();
+        ui_pedalboard_refresh();
+        return;
+    }
+
+    /* Multiple connections — show chooser popup */
+    show_disconnect_chooser();
 }
 
 static void conn_panel_close_btn_cb(lv_event_t *e) { (void)e; conn_panel_close(); }
@@ -1176,11 +1374,15 @@ static int collect_io_descs(bool want_inputs, io_port_desc_t *descs, int max)
         if (!p->enabled) continue;
         bool relevant = want_inputs ? p->is_input : p->is_output;
         if (!relevant) continue;
+        const char *jp = want_inputs ? p->dev : p->dev_out;
+        if (!jp[0]) continue;  /* port not available in this direction */
         midi_idx++;
         if (midi_idx == 1)
             snprintf(descs[count].label, sizeof(descs[0].label), "MIDI");
         else
             snprintf(descs[count].label, sizeof(descs[0].label), "M%d", midi_idx);
+        snprintf(descs[count].jack_port,  sizeof(descs[0].jack_port),  "%s", jp);
+        snprintf(descs[count].full_label, sizeof(descs[0].full_label), "%s", p->label);
         descs[count].is_midi = true;
         count++;
     }
@@ -1188,7 +1390,10 @@ static int collect_io_descs(bool want_inputs, io_port_desc_t *descs, int max)
     /* ── Virtual MIDI Loopback (output side only) ── */
     if (!want_inputs && g_pedalboard.midi_loopback && g_midi_loopback_pb_port[0]
             && count < max) {
-        snprintf(descs[count].label, sizeof(descs[0].label), "Loopback");
+        snprintf(descs[count].label,      sizeof(descs[0].label),      "Loopback");
+        snprintf(descs[count].jack_port,  sizeof(descs[0].jack_port),  "%s",
+                 g_midi_loopback_pb_port);
+        snprintf(descs[count].full_label, sizeof(descs[0].full_label), "MIDI Loopback");
         descs[count].is_midi = true;
         count++;
     }

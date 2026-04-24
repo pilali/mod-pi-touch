@@ -96,6 +96,8 @@ static const char * const g_en[TR_COUNT] = {
     /* TR_PB_SOURCE_OUTPUT */      "Source output:",
     /* TR_PB_CONNECT */            "Connect",
     /* TR_PB_DISCONNECT */         "Disconnect",
+    /* TR_PB_DISC_TITLE */         "Disconnect from:",
+    /* TR_PB_DISC_ALL */           "All",
 
     /* TR_CONDUCTOR_TITLE */       "Conductor",
     /* TR_CONDUCTOR_TEMPO */       "Tempo (BPM)",
@@ -298,6 +300,8 @@ static const char * const g_fr[TR_COUNT] = {
     /* TR_PB_SOURCE_OUTPUT */      "Sortie source :",
     /* TR_PB_CONNECT */            "Connecter",
     /* TR_PB_DISCONNECT */         "D\xc3\xa9" "connecter",
+    /* TR_PB_DISC_TITLE */         "D\xc3\xa9" "connecter de :",
+    /* TR_PB_DISC_ALL */           "Tout",
 
     /* TR_CONDUCTOR_TITLE */       "Conducteur",
     /* TR_CONDUCTOR_TEMPO */       "Tempo (BPM)",

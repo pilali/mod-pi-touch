@@ -11,12 +11,13 @@ typedef struct {
     char label[64];     /* "pisound", "USB Audio Device", … */
 } hw_audio_device_t;
 
-/* One ALSA raw-MIDI port */
+/* One physical MIDI device (one entry per device, both directions merged) */
 typedef struct {
-    char dev[64];       /* "/dev/snd/midiC1D0" or "hw:1,0,0" */
-    char label[64];     /* human-readable name */
-    bool is_input;
-    bool is_output;
+    char dev[64];       /* JACK capture port, e.g. "system:midi_capture_2" */
+    char dev_out[64];   /* JACK playback port, e.g. "system:midi_playback_2" */
+    char label[64];     /* human-readable device name, e.g. "pisound" */
+    bool is_input;      /* capture port exists */
+    bool is_output;     /* playback port exists */
 } hw_midi_port_t;
 
 /* Enumerate ALSA PCM cards from /proc/asound/cards.

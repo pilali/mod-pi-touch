@@ -163,13 +163,16 @@ void settings_init(mpt_settings_t *s)
                         cJSON *mp = cJSON_GetArrayItem(jmidi, i);
                         if (!cJSON_IsObject(mp)) continue;
                         mpt_midi_port_t *p = &s->midi_ports[s->midi_port_count++];
-                        cJSON *mdev = cJSON_GetObjectItem(mp, "dev");
-                        cJSON *mlbl = cJSON_GetObjectItem(mp, "label");
-                        cJSON *min  = cJSON_GetObjectItem(mp, "input");
-                        cJSON *mout = cJSON_GetObjectItem(mp, "output");
-                        cJSON *men  = cJSON_GetObjectItem(mp, "enabled");
+                        cJSON *mdev  = cJSON_GetObjectItem(mp, "dev");
+                        cJSON *mdout = cJSON_GetObjectItem(mp, "dev_out");
+                        cJSON *mlbl  = cJSON_GetObjectItem(mp, "label");
+                        cJSON *min   = cJSON_GetObjectItem(mp, "input");
+                        cJSON *mout  = cJSON_GetObjectItem(mp, "output");
+                        cJSON *men   = cJSON_GetObjectItem(mp, "enabled");
                         if (cJSON_IsString(mdev))
                             snprintf(p->dev, sizeof(p->dev), "%s", mdev->valuestring);
+                        if (cJSON_IsString(mdout))
+                            snprintf(p->dev_out, sizeof(p->dev_out), "%s", mdout->valuestring);
                         if (cJSON_IsString(mlbl))
                             snprintf(p->label, sizeof(p->label), "%s", mlbl->valuestring);
                         p->is_input  = cJSON_IsTrue(min);
@@ -279,6 +282,7 @@ int settings_save_prefs(const mpt_settings_t *s)
     for (int i = 0; i < s->midi_port_count; i++) {
         cJSON *mp = cJSON_CreateObject();
         cJSON_AddStringToObject(mp, "dev",     s->midi_ports[i].dev);
+        cJSON_AddStringToObject(mp, "dev_out", s->midi_ports[i].dev_out);
         cJSON_AddStringToObject(mp, "label",   s->midi_ports[i].label);
         cJSON_AddBoolToObject(mp,   "input",   s->midi_ports[i].is_input);
         cJSON_AddBoolToObject(mp,   "output",  s->midi_ports[i].is_output);

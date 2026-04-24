@@ -7,10 +7,11 @@
 #define MPT_MAX_MIDI_PORTS 16
 
 typedef struct {
-    char  dev[64];      /* ALSA raw-MIDI device, e.g. "hw:1,0,0" */
-    char  label[64];    /* human-readable name */
-    bool  is_input;
-    bool  is_output;
+    char  dev[64];      /* JACK capture port, e.g. "system:midi_capture_2" */
+    char  dev_out[64];  /* JACK playback port, e.g. "system:midi_playback_2" */
+    char  label[64];    /* human-readable device name */
+    bool  is_input;     /* capture port exists */
+    bool  is_output;    /* playback port exists */
     bool  enabled;      /* user-selected */
 } mpt_midi_port_t;
 
