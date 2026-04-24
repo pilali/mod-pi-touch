@@ -4,7 +4,9 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
-#include <jack/jack.h>
+
+/* JACK on this build uses /dev/shm as its tmpdir. */
+#define JACK_LSP "TMPDIR=/dev/shm jack_lsp"
 
 /* ─── Audio (ALSA PCM cards) ─────────────────────────────────────────────────
  *
@@ -90,6 +92,8 @@ static void jack_midi_port_label(const char *name, char *label, size_t sz)
  *          already covered by Phase 1 via ALSA aliases).  This catches
  *          software clients bridged by a2jmidid (TouchOSC, LMMS, etc.) and
  *          any app that connects directly as a JACK MIDI client.
+ *          Uses `jack_lsp` (no JACK client API) to avoid realtime-thread
+ *          teardown crashes.
  */
 int hw_detect_midi(hw_midi_port_t *out, int max)
 {
@@ -131,129 +135,137 @@ int hw_detect_midi(hw_midi_port_t *out, int max)
         pclose(f);
     }
 
-    /* ── Phase 2: JACK software MIDI clients ── */
-    jack_status_t status;
-    jack_client_t *client = jack_client_open("mpt_midi_scan",
-                                             JackNoStartServer, &status);
-    if (client) {
-        /* JackPortIsOutput = port sends MIDI out (= MIDI source = capture) */
-        const char **ports = jack_get_ports(client, NULL,
-                                            JACK_DEFAULT_MIDI_TYPE,
-                                            JackPortIsOutput);
-        if (ports) {
-            for (int i = 0; ports[i] && count < max; i++) {
-                const char *name = ports[i];
+    /* ── Phase 2: JACK software MIDI sources via jack_lsp ──
+     *
+     * jack_lsp --aliases lists every port followed by its aliases (indented).
+     * We want output ports (sources) that are not system:*, not mod-host,
+     * not mod-monitor, not mpt_*, and not the Midi-Through loopback. */
+    FILE *lsp = popen(JACK_LSP " --aliases 2>/dev/null", "r");
+    if (lsp) {
+        char cur_port[128] = "";
+        char line[512];
+        bool cur_is_loopback = false;
 
-                /* Skip system:* (hardware, already in Phase 1) */
-                if (strncmp(name, "system:", 7) == 0) continue;
-                /* Skip mod-host and internal monitor ports */
-                if (strncmp(name, "mod-host",    8) == 0) continue;
-                if (strncmp(name, "mod-monitor", 11) == 0) continue;
-                if (strncmp(name, "mpt_",         4) == 0) continue;
+        while (fgets(line, sizeof(line), lsp) && count < max) {
+            line[strcspn(line, "\r\n")] = '\0';
 
-                /* Skip Midi-Through loopback (identified by JACK alias) */
-                char aliases_buf[2][256];
-                char *alias_ptrs[2] = { aliases_buf[0], aliases_buf[1] };
-                int n_al = jack_port_get_aliases(
-                    jack_port_by_name(client, name),
-                    alias_ptrs);
-                bool is_loopback = false;
-                for (int a = 0; a < n_al; a++) {
-                    if (strstr(alias_ptrs[a], "Midi-Through") ||
-                        strstr(alias_ptrs[a], "midi_through") ||
-                        strstr(alias_ptrs[a], "Midi_Through"))
-                        is_loopback = true;
+            if (line[0] != ' ' && line[0] != '\t') {
+                /* Port name line — emit previous port if it was a valid software source */
+                if (cur_port[0] && !cur_is_loopback) {
+                    /* Skip system:*, mod-host, mod-monitor, mpt_* */
+                    bool skip =
+                        strncmp(cur_port, "system:",      7) == 0 ||
+                        strncmp(cur_port, "mod-host",     8) == 0 ||
+                        strncmp(cur_port, "mod-monitor", 11) == 0 ||
+                        strncmp(cur_port, "mpt_",         4) == 0;
+                    if (!skip) {
+                        /* jack_lsp lists all ports; we want sources (output ports).
+                         * Without -p we can't tell direction easily — we keep any
+                         * non-system non-monitor client port as a potential source.
+                         * The caller uses is_input=true / is_output=false to indicate
+                         * "this is a MIDI source mod-host can read from". */
+                        char label[64];
+                        jack_midi_port_label(cur_port, label, sizeof(label));
+                        snprintf(out[count].dev,   sizeof(out[count].dev),   "%s", cur_port);
+                        snprintf(out[count].label, sizeof(out[count].label), "%s", label);
+                        out[count].is_input  = true;
+                        out[count].is_output = false;
+                        count++;
+                    }
                 }
-                if (is_loopback) continue;
+                snprintf(cur_port, sizeof(cur_port), "%s", line);
+                cur_is_loopback = false;
+            } else {
+                /* Alias line — mark loopback if Midi-Through alias found */
+                const char *a = line + strspn(line, " \t");
+                if (strcasestr(a, "Midi-Through") || strcasestr(a, "midi_through"))
+                    cur_is_loopback = true;
+            }
+        }
 
+        /* Emit last port */
+        if (cur_port[0] && !cur_is_loopback && count < max) {
+            bool skip =
+                strncmp(cur_port, "system:",      7) == 0 ||
+                strncmp(cur_port, "mod-host",     8) == 0 ||
+                strncmp(cur_port, "mod-monitor", 11) == 0 ||
+                strncmp(cur_port, "mpt_",         4) == 0;
+            if (!skip) {
                 char label[64];
-                jack_midi_port_label(name, label, sizeof(label));
-
-                snprintf(out[count].dev,   sizeof(out[count].dev),   "%s", name);
+                jack_midi_port_label(cur_port, label, sizeof(label));
+                snprintf(out[count].dev,   sizeof(out[count].dev),   "%s", cur_port);
                 snprintf(out[count].label, sizeof(out[count].label), "%s", label);
                 out[count].is_input  = true;
                 out[count].is_output = false;
                 count++;
             }
-            jack_free(ports);
         }
-        jack_client_close(client);
+
+        pclose(lsp);
     }
 
     return count;
 }
 
-/* ─── MIDI loopback detection (ALSA Midi-Through in JACK) ───────────────────── */
-
+/* ─── MIDI loopback detection ───────────────────────────────────────────────
+ *
+ * Uses jack_lsp --aliases to find the system:midi_capture_N port whose alias
+ * contains "Midi-Through".  Returns that port name (the JACK capture port that
+ * reads from Midi-Through; the caller derives the playback port from it).
+ * No JACK client API is used, avoiding realtime-thread teardown crashes.
+ */
 int hw_detect_midi_loopback(char *out_jack_port, size_t sz)
 {
     out_jack_port[0] = '\0';
 
-    jack_status_t status;
-    jack_client_t *client = jack_client_open("mpt_lb_scan",
-                                             JackNoStartServer, &status);
-    if (!client) return 0;
+    FILE *f = popen(JACK_LSP " --aliases 2>/dev/null", "r");
+    if (!f) return 0;
 
-    int found = 0;
-    const char **ports = jack_get_ports(client, "^system:midi_capture_",
-                                        JACK_DEFAULT_MIDI_TYPE,
-                                        JackPortIsOutput);
-    if (ports) {
-        for (int i = 0; ports[i] && !found; i++) {
-            char aliases_buf[2][256];
-            char *alias_ptrs[2] = { aliases_buf[0], aliases_buf[1] };
-            jack_port_t *jp = jack_port_by_name(client, ports[i]);
-            int n_al = jack_port_get_aliases(jp, alias_ptrs);
-            for (int a = 0; a < n_al; a++) {
-                if (strstr(alias_ptrs[a], "Midi-Through") ||
-                    strstr(alias_ptrs[a], "midi_through") ||
-                    strstr(alias_ptrs[a], "Midi_Through")) {
-                    snprintf(out_jack_port, sz, "%s", ports[i]);
-                    found = 1;
-                    break;
-                }
+    char cur[128] = "";
+    char line[512];
+    int  found = 0;
+
+    while (fgets(line, sizeof(line), f) && !found) {
+        line[strcspn(line, "\r\n")] = '\0';
+
+        if (line[0] != ' ' && line[0] != '\t') {
+            /* Port name — only track system:midi_capture_* */
+            if (strncmp(line, "system:midi_capture_", 20) == 0)
+                snprintf(cur, sizeof(cur), "%s", line);
+            else
+                cur[0] = '\0';
+        } else if (cur[0]) {
+            /* Alias line under a midi_capture port — check for Midi-Through */
+            const char *a = line + strspn(line, " \t");
+            if (strcasestr(a, "Midi-Through") || strcasestr(a, "midi_through")) {
+                snprintf(out_jack_port, sz, "%s", cur);
+                found = 1;
             }
         }
-        jack_free(ports);
     }
 
-    jack_client_close(client);
+    pclose(f);
     return found;
 }
 
 /* ─── JACK port enumeration ──────────────────────────────────────────────────
  *
- * Opens a temporary JACK client (JackNoStartServer so we don't accidentally
- * launch jackd), counts system:capture_N and system:playback_N audio ports,
- * then immediately closes the client.
+ * Uses jack_lsp to count system:capture_N and system:playback_N audio ports.
  */
 int hw_detect_jack_ports(hw_jack_ports_t *out)
 {
     memset(out, 0, sizeof(*out));
 
-    jack_status_t status;
-    jack_client_t *client = jack_client_open("mpt_detect",
-                                              JackNoStartServer, &status);
-    if (!client) return -1;
+    FILE *f = popen(JACK_LSP " 2>/dev/null", "r");
+    if (!f) return -1;
 
-    const char **ports;
-
-    /* Audio capture: system outputs audio into JACK → JackPortIsOutput */
-    ports = jack_get_ports(client, "^system:capture_",
-                           JACK_DEFAULT_AUDIO_TYPE, JackPortIsOutput);
-    if (ports) {
-        while (ports[out->audio_capture]) out->audio_capture++;
-        jack_free(ports);
+    char line[256];
+    while (fgets(line, sizeof(line), f)) {
+        line[strcspn(line, "\r\n")] = '\0';
+        if (strncmp(line, "system:capture_",  15) == 0) out->audio_capture++;
+        if (strncmp(line, "system:playback_", 16) == 0) out->audio_playback++;
     }
 
-    /* Audio playback: JACK pushes audio into hardware → JackPortIsInput */
-    ports = jack_get_ports(client, "^system:playback_",
-                           JACK_DEFAULT_AUDIO_TYPE, JackPortIsInput);
-    if (ports) {
-        while (ports[out->audio_playback]) out->audio_playback++;
-        jack_free(ports);
-    }
-
-    jack_client_close(client);
+    pclose(f);
     return 0;
 }
