@@ -35,7 +35,11 @@ typedef struct {
     char           enum_labels[16][PM_NAME_MAX];
     float          enum_values[16];
     int            enum_count;
+    /* tempo sync (mod:tempoRelatedDynamicScalePoints) */
+    bool           is_tempo_related;
+    char           unit_symbol[8]; /* "s", "ms", "min", "Hz", "kHz", "MHz", "BPM" or "" */
 } pm_port_info_t;
+
 
 /* ─── Patch parameter (patch:writable with atom:Path range) ──────────────────── */
 typedef struct {
@@ -52,6 +56,8 @@ typedef struct {
     char author[PM_NAME_MAX];
     char category[PM_CAT_MAX];
     char subcategory[PM_CAT_MAX];
+    bool is_cv_plugin;    /* declared as mod:ControlVoltagePlugin */
+    bool is_midi_plugin;  /* declared as mod:MIDIPlugin */
 
     pm_port_info_t ports[PM_PORT_MAX];
     int            port_count;
