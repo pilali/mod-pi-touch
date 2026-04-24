@@ -561,6 +561,24 @@ static void conn_btn_connect_cb(lv_event_t *e)
  * Returns a pointer into buf (always non-NULL). */
 static const char *jack_port_to_display(const char *jp, char *buf, size_t bufsz)
 {
+    /* system:capture_N → "In N" (source side) */
+    if (strncmp(jp, "system:capture_", 15) == 0) {
+        snprintf(buf, bufsz, "In %s", jp + 15);
+        return buf;
+    }
+    /* system:midi_capture_N → full device label from g_io_in_c (source side) */
+    if (strncmp(jp, "system:midi_capture_", 20) == 0) {
+        for (int i = 0; i < g_n_in_c; i++) {
+            if (strcmp(g_io_in_c[i].jack_port, jp) == 0) {
+                snprintf(buf, bufsz, "%s", g_io_in_c[i].full_label[0]
+                                              ? g_io_in_c[i].full_label
+                                              : g_io_in_c[i].label);
+                return buf;
+            }
+        }
+        snprintf(buf, bufsz, "%s", jp + 20);
+        return buf;
+    }
     /* system:playback_N → "Out N" */
     if (strncmp(jp, "system:playback_", 16) == 0) {
         snprintf(buf, bufsz, "Out %s", jp + 16);
@@ -579,12 +597,24 @@ static const char *jack_port_to_display(const char *jp, char *buf, size_t bufsz)
         snprintf(buf, bufsz, "%s", jp + 21);
         return buf;
     }
-    /* effect_NNN:sym → plugin label */
+    /* Midi-Through loopback playback port */
+    if (g_midi_loopback_pb_port[0] && strcmp(jp, g_midi_loopback_pb_port) == 0) {
+        snprintf(buf, bufsz, "MIDI Loopback");
+        return buf;
+    }
+    /* effect_NNN:sym → plugin label, with pre-fx instances handled specially */
     if (strncmp(jp, "effect_", 7) == 0) {
-        int iid = 0;
         const char *colon = strchr(jp + 7, ':');
         if (colon) {
-            iid = atoi(jp + 7);
+            int iid = atoi(jp + 7);
+            if (iid == PRE_FX_GATE_INSTANCE) {
+                snprintf(buf, bufsz, "Gate:%s", colon + 1);
+                return buf;
+            }
+            if (iid == PRE_FX_TUNER_INSTANCE) {
+                snprintf(buf, bufsz, "Tuner:%s", colon + 1);
+                return buf;
+            }
             for (int i = 0; i < g_pedalboard.plugin_count; i++) {
                 if (g_pedalboard.plugins[i].instance_id == iid) {
                     snprintf(buf, bufsz, "%s:%s",
@@ -593,11 +623,6 @@ static const char *jack_port_to_display(const char *jp, char *buf, size_t bufsz)
                 }
             }
         }
-    }
-    /* Midi-Through loopback playback port */
-    if (g_midi_loopback_pb_port[0] && strcmp(jp, g_midi_loopback_pb_port) == 0) {
-        snprintf(buf, bufsz, "MIDI Loopback");
-        return buf;
     }
     snprintf(buf, bufsz, "%s", jp);
     return buf;
@@ -936,20 +961,37 @@ static lv_coord_t sysport_y(const char *port_sym, bool is_input)
     int n              = is_input ? g_n_in_c  : g_n_out_c;
     if (n == 0) return (lv_coord_t)(g_canvas_h_c / 2);
 
-    bool is_midi = (strncmp(port_sym, "midi", 4) == 0);
-    const char *p = strrchr(port_sym, '_');
-    int num = (p && *(p+1)) ? atoi(p + 1) : 1;   /* 1-based number in port name */
+    int idx = -1;
 
-    int idx;
-    if (!is_midi) {
-        idx = num - 1;
+    if (strncmp(port_sym, "midi", 4) == 0) {
+        /* MIDI port: look up by actual JACK port name stored in jack_port field.
+         * Cannot use the port number directly because Midi-Through filtering makes
+         * port numbers non-contiguous (e.g. pisound may be midi_capture_2 = idx 0). */
+        if (strcmp(port_sym, "midi_loopback") == 0) {
+            /* Virtual loopback: find the entry labeled "Loopback" */
+            for (int i = 0; i < n; i++)
+                if (descs[i].is_midi && strcmp(descs[i].label, "Loopback") == 0)
+                    { idx = i; break; }
+        } else {
+            /* Real MIDI port: match by full JACK name "system:<port_sym>" */
+            char full[80];
+            snprintf(full, sizeof(full), "system:%s", port_sym);
+            for (int i = 0; i < n; i++)
+                if (descs[i].is_midi && strcmp(descs[i].jack_port, full) == 0)
+                    { idx = i; break; }
+        }
+        /* Fallback: first MIDI row */
+        if (idx < 0)
+            for (int i = 0; i < n; i++)
+                if (descs[i].is_midi) { idx = i; break; }
     } else {
-        int audio_cnt = 0;
-        for (int i = 0; i < n; i++) if (!descs[i].is_midi) audio_cnt++;
-        idx = audio_cnt + (num - 1);
+        /* Audio port: always sequential capture_1..N / playback_1..N */
+        const char *p = strrchr(port_sym, '_');
+        int num = (p && *(p + 1)) ? atoi(p + 1) : 1;
+        idx = num - 1;
     }
-    if (idx < 0 || idx >= n) idx = 0;
 
+    if (idx < 0 || idx >= n) idx = 0;
     int total_h = n * IO_ROW_H - (IO_ROW_H - IO_DOT);
     int start_y = (g_canvas_h_c - total_h) / 2;
     return (lv_coord_t)(start_y + idx * IO_ROW_H + IO_DOT / 2);
