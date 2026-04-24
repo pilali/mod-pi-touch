@@ -1537,23 +1537,16 @@ static int uri_to_plugin_idx(const char *uri, const pedalboard_t *pb)
     return -1;
 }
 
-/* Classify a plugin into its band based on LV2 port types.
- * A plugin with audio ports is always Audio (even if it also has MIDI/CV
- * control ports). Only plugins with NO audio ports go to MIDI or CV bands. */
+/* Classify a plugin into its band using the LV2 type declarations:
+ *   mod:ControlVoltagePlugin → CV band
+ *   mod:MIDIPlugin           → MIDI band
+ *   everything else          → Audio band */
 static plug_band_t classify_plugin(const pb_plugin_t *plug)
 {
     const pm_plugin_info_t *info = pm_plugin_by_uri(plug->uri);
     if (!info) return PLUG_AUDIO;
-    bool has_audio = false, has_midi = false, has_cv = false;
-    for (int i = 0; i < info->port_count; i++) {
-        pm_port_type_t t = info->ports[i].type;
-        if (t == PM_PORT_AUDIO_IN || t == PM_PORT_AUDIO_OUT) has_audio = true;
-        if (t == PM_PORT_MIDI_IN  || t == PM_PORT_MIDI_OUT)  has_midi  = true;
-        if (t == PM_PORT_CV_IN    || t == PM_PORT_CV_OUT)    has_cv    = true;
-    }
-    if (has_audio) return PLUG_AUDIO;
-    if (has_midi)  return PLUG_MIDI;
-    if (has_cv)    return PLUG_CV;
+    if (info->is_cv_plugin)   return PLUG_CV;
+    if (info->is_midi_plugin) return PLUG_MIDI;
     return PLUG_AUDIO;
 }
 
@@ -2008,22 +2001,59 @@ void ui_pedalboard_apply_snapshot(int idx)
     if (!g_pb_loaded) return;
     if (idx < 0 || idx >= g_pedalboard.snapshot_count) return;
 
-    pb_snapshot_load(&g_pedalboard, idx);
-
     pb_snapshot_t *snap = &g_pedalboard.snapshots[idx];
+
     for (int i = 0; i < snap->plugin_count; i++) {
         snap_plugin_t *sp = &snap->plugins[i];
         pb_plugin_t *plug = pb_find_plugin_by_symbol(&g_pedalboard, sp->symbol);
         if (!plug) continue;
-        host_bypass(plug->instance_id, sp->bypassed);
-        for (int j = 0; j < sp->param_count; j++)
-            host_param_set(plug->instance_id, sp->params[j].symbol, sp->params[j].value);
-        for (int j = 0; j < sp->patch_param_count; j++)
-            if (sp->patch_params[j].path[0])
-                host_patch_set(plug->instance_id,
-                               sp->patch_params[j].uri,
-                               sp->patch_params[j].path);
+
+        bool cur_bypassed = !plug->enabled;
+        bool new_bypassed = sp->bypassed;
+        bool diff_bypass  = plug->enabled_snapshotable && (cur_bypassed != new_bypassed);
+
+        /* If becoming bypassed, mute first — params change while silent. */
+        if (diff_bypass && new_bypassed)
+            host_bypass(plug->instance_id, true);
+
+        /* Only send preset_load if the preset URI actually changed. */
+        if (sp->preset_uri[0] && strcmp(sp->preset_uri, plug->preset_uri) != 0)
+            host_preset_load(plug->instance_id, sp->preset_uri);
+
+        /* Only send param_set for values that changed. */
+        for (int j = 0; j < sp->param_count; j++) {
+            for (int k = 0; k < plug->port_count; k++) {
+                if (strcmp(plug->ports[k].symbol, sp->params[j].symbol) == 0) {
+                    if (plug->ports[k].value != sp->params[j].value)
+                        host_param_set(plug->instance_id,
+                                       sp->params[j].symbol, sp->params[j].value);
+                    break;
+                }
+            }
+        }
+
+        /* Only send patch_set for file paths that changed. */
+        for (int j = 0; j < sp->patch_param_count; j++) {
+            if (!sp->patch_params[j].path[0]) continue;
+            for (int k = 0; k < plug->patch_param_count; k++) {
+                if (strcmp(plug->patch_params[k].uri, sp->patch_params[j].uri) == 0) {
+                    if (strcmp(plug->patch_params[k].path, sp->patch_params[j].path) != 0)
+                        host_patch_set(plug->instance_id,
+                                       sp->patch_params[j].uri,
+                                       sp->patch_params[j].path);
+                    break;
+                }
+            }
+        }
+
+        /* If becoming un-bypassed, activate last — all params already applied. */
+        if (diff_bypass && !new_bypassed)
+            host_bypass(plug->instance_id, false);
     }
+
+    /* Update in-memory state after all commands are sent. */
+    pb_snapshot_load(&g_pedalboard, idx);
+
     /* Marshal LVGL call to main thread (may be called from background thread). */
     lv_async_call(pb_snapshot_ui_refresh, NULL);
 }
