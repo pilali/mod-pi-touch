@@ -246,9 +246,16 @@ static int collect_src_ports(int src_idx, conn_port_info_t *out, int max)
                 p->is_midi = true;
             } else {
                 ai++;
-                snprintf(p->symbol,    sizeof(p->symbol),    "capture_%d", ai);
-                snprintf(p->label,     sizeof(p->label),     "%s", g_io_in_c[i].label);
-                snprintf(p->jack_port, sizeof(p->jack_port), "system:capture_%d", ai);
+                snprintf(p->symbol, sizeof(p->symbol), "capture_%d", ai);
+                snprintf(p->label,  sizeof(p->label),  "%s", g_io_in_c[i].label);
+                /* Mirror uri_to_jack_port: when pre-fx gate is loaded, audio
+                 * captures are redirected through it (capture_N → Output_N). */
+                if (pre_fx_is_loaded() && ai >= 1 && ai <= 8)
+                    snprintf(p->jack_port, sizeof(p->jack_port),
+                             "effect_%d:Output_%d", PRE_FX_GATE_INSTANCE, ai);
+                else
+                    snprintf(p->jack_port, sizeof(p->jack_port),
+                             "system:capture_%d", ai);
                 p->is_midi = false;
             }
             count++;
