@@ -405,7 +405,7 @@ static const char * const g_fr[TR_COUNT] = {
     /* TR_SETTINGS_MODUI_ACTIVATE */  "Activer MOD-UI",
     /* TR_SETTINGS_MODUI_DEACTIVATE */"D\xc3\xa9sactiver MOD-UI",
     /* TR_MODUI_ACTIVE_TITLE */       "MOD-UI Actif",
-    /* TR_MODUI_ACTIVE_BODY */        "mod-ui est en cours d'ex\xc3\xa9cution.\nmod-pi-touch est d\xc3\xa9connect\xc3\xa9.\n\nAcc\xc3\xa9dez \xc3\xa0 MOD-UI \xc3\xa0 l'adresse :",
+    /* TR_MODUI_ACTIVE_BODY */        "mod-ui est en cours d'ex\xc3\xa9" "cution.\nmod-pi-touch est d\xc3\xa9" "connect\xc3\xa9.\n\nAcc\xc3\xa9" "dez \xc3\xa0 MOD-UI \xc3\xa0 l'adresse :",
     /* TR_MODUI_BTN_DISABLE */        "D\xc3\xa9sactiver et reconnecter",
 
     /* TR_SETTINGS_POWER */           "Alimentation",
