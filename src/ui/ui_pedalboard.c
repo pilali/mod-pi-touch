@@ -1631,6 +1631,10 @@ void ui_pedalboard_init(lv_obj_t *parent)
      * extents.  A transparent spacer added in ui_pedalboard_refresh() defines
      * the scrollable area. */
 
+    /* Detect the ALSA Midi-Through JACK port once at startup (main thread,
+     * before any background threads open JACK clients concurrently). */
+    detect_midi_loopback_ports();
+
     if (g_pb_loaded) {
         ui_pedalboard_refresh();
     } else {
@@ -1811,9 +1815,7 @@ void ui_pedalboard_load(const char *bundle_path,
         host_remove_hw_port("midi_loopback");
         g_midi_loopback_active = false;
     }
-    g_midi_loopback_pb_port[0] = '\0';
     if (g_pedalboard.midi_loopback) {
-        detect_midi_loopback_ports();
         host_add_hw_port("midi_loopback", 1, "MIDI_Loopback", 42);
         g_midi_loopback_active = true;
     }
@@ -2178,7 +2180,6 @@ void ui_pedalboard_set_midi_loopback(bool enabled)
     g_pedalboard.midi_loopback = enabled;
     g_pedalboard.modified = true;
     if (enabled) {
-        detect_midi_loopback_ports();
         if (!g_midi_loopback_active) {
             host_add_hw_port("midi_loopback", 1, "MIDI_Loopback", 42);
             g_midi_loopback_active = true;
