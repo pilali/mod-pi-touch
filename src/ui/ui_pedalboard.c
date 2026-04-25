@@ -105,6 +105,8 @@ static int         uri_to_plugin_idx(const char *uri, const pedalboard_t *pb);
 #define CONN_SQ_SIZE    22   /* connection square side in px — large enough for touch */
 #define CONN_PANEL_H   300   /* connection panel height in px */
 #define LINE_PTS_MAX   512   /* flat point pool: up to 4 pts per orthogonal line */
+#define CONN_SPREAD_PX  6    /* pixels between parallel lines from the same block */
+#define CONN_DOT_D      8    /* diameter of port dot at block edge */
 
 typedef enum {
     CONN_MODE_IDLE = 0,
@@ -1005,6 +1007,50 @@ static lv_coord_t sysport_y(const char *port_sym, bool is_input)
     return (lv_coord_t)(start_y + idx * IO_ROW_H + IO_DOT / 2);
 }
 
+/* ── Connection type (for color coding) ──────────────────────────────────────── */
+
+typedef enum { CONN_TYPE_AUDIO = 0, CONN_TYPE_MIDI, CONN_TYPE_CV } conn_type_t;
+
+static conn_type_t classify_connection(const pb_connection_t *conn,
+                                       const pedalboard_t *pb)
+{
+    const char *fsys = uri_to_sysport(conn->from, pb);
+    if (fsys)
+        return (strncmp(fsys, "midi", 4) == 0) ? CONN_TYPE_MIDI : CONN_TYPE_AUDIO;
+
+    int pi = uri_to_plugin_idx(conn->from, pb);
+    if (pi < 0) return CONN_TYPE_AUDIO;
+
+    const char *port_sym = strrchr(conn->from, '/');
+    if (!port_sym) return CONN_TYPE_AUDIO;
+    port_sym++;
+
+    const pm_plugin_info_t *info = pm_plugin_by_uri(pb->plugins[pi].uri);
+    if (!info) return CONN_TYPE_AUDIO;
+
+    for (int k = 0; k < info->port_count; k++) {
+        if (strcmp(info->ports[k].symbol, port_sym) == 0) {
+            switch (info->ports[k].type) {
+                case PM_PORT_MIDI_OUT:
+                case PM_PORT_MIDI_IN:  return CONN_TYPE_MIDI;
+                case PM_PORT_CV_OUT:
+                case PM_PORT_CV_IN:    return CONN_TYPE_CV;
+                default:               return CONN_TYPE_AUDIO;
+            }
+        }
+    }
+    return CONN_TYPE_AUDIO;
+}
+
+static lv_color_t conn_type_color(conn_type_t type)
+{
+    switch (type) {
+        case CONN_TYPE_MIDI: return UI_COLOR_ACCENT;
+        case CONN_TYPE_CV:   return lv_color_hex(0x9B59B6);
+        default:             return UI_COLOR_ACTIVE;
+    }
+}
+
 /* ── Draw connection lines ───────────────────────────────────────────────────── */
 
 static void redraw_connections(void)
@@ -1012,8 +1058,16 @@ static void redraw_connections(void)
     if (!g_canvas_scroll) return;
     s_pts_used = 0;
 
-    /* Gather unique (src, dst) pairs — used by draw_conn_squares for stub check */
+    /* ── Pre-pass: gather groups, cache si/di, build spread counters ── */
     g_conn_group_count = 0;
+
+    int c_si[PB_MAX_CONNECTS], c_di[PB_MAX_CONNECTS];
+    int src_cnt[PB_MAX_PLUGINS], dst_cnt[PB_MAX_PLUGINS];
+    memset(c_si,    0xFF, sizeof(c_si));   /* -1 sentinel via memset not reliable */
+    memset(c_di,    0xFF, sizeof(c_di));
+    memset(src_cnt, 0,    sizeof(src_cnt));
+    memset(dst_cnt, 0,    sizeof(dst_cnt));
+
     for (int c = 0; c < g_pedalboard.connection_count; c++) {
         const char *fu = g_pedalboard.connections[c].from;
         const char *tu = g_pedalboard.connections[c].to;
@@ -1021,8 +1075,10 @@ static void redraw_connections(void)
         const char *tsys = uri_to_sysport(tu, &g_pedalboard);
         int si = fsys ? -1 : uri_to_plugin_idx(fu, &g_pedalboard);
         int di = tsys ? -2 : uri_to_plugin_idx(tu, &g_pedalboard);
-        if (!fsys && si < 0) continue;
-        if (!tsys && di < 0) continue;
+        if (!fsys && si < 0) { c_si[c] = -99; continue; }
+        if (!tsys && di < 0) { c_si[c] = -99; continue; }
+        c_si[c] = si; c_di[c] = di;
+
         bool dup = false;
         for (int k = 0; k < g_conn_group_count; k++)
             if (g_conn_groups[k].src_idx == si && g_conn_groups[k].dst_idx == di)
@@ -1032,32 +1088,59 @@ static void redraw_connections(void)
             g_conn_groups[g_conn_group_count].dst_idx = di;
             g_conn_group_count++;
         }
+
+        if (si >= 0 && si < g_pedalboard.plugin_count) src_cnt[si]++;
+        if (di >= 0 && di < g_pedalboard.plugin_count) dst_cnt[di]++;
     }
 
-    /* Draw one orthogonal line per individual connection with port-accurate y */
+    /* Assign per-connection spread indices */
+    int src_ki[PB_MAX_CONNECTS], dst_ki[PB_MAX_CONNECTS];
+    int src_cur[PB_MAX_PLUGINS], dst_cur[PB_MAX_PLUGINS];
+    memset(src_ki,  0, sizeof(src_ki));
+    memset(dst_ki,  0, sizeof(dst_ki));
+    memset(src_cur, 0, sizeof(src_cur));
+    memset(dst_cur, 0, sizeof(dst_cur));
     for (int c = 0; c < g_pedalboard.connection_count; c++) {
+        if (c_si[c] == -99) continue;
+        int si = c_si[c], di = c_di[c];
+        if (si >= 0 && si < g_pedalboard.plugin_count) src_ki[c] = src_cur[si]++;
+        if (di >= 0 && di < g_pedalboard.plugin_count) dst_ki[c] = dst_cur[di]++;
+    }
+
+    /* ── Draw one orthogonal line per connection ── */
+    for (int c = 0; c < g_pedalboard.connection_count; c++) {
+        if (c_si[c] == -99) continue;
+        int si = c_si[c], di = c_di[c];
         const char *fu = g_pedalboard.connections[c].from;
         const char *tu = g_pedalboard.connections[c].to;
         const char *fsys = uri_to_sysport(fu, &g_pedalboard);
         const char *tsys = uri_to_sysport(tu, &g_pedalboard);
-        int si = fsys ? -1 : uri_to_plugin_idx(fu, &g_pedalboard);
-        int di = tsys ? -2 : uri_to_plugin_idx(tu, &g_pedalboard);
-        if (!fsys && si < 0) continue;
-        if (!tsys && di < 0) continue;
 
         /* X positions from column edges */
         lv_coord_t x1, x2, tmp;
         elem_right_center(si, &x1, &tmp);
         elem_left_center (di, &x2, &tmp);
 
-        /* Y: port-specific for system I/O, block centre for plugins */
-        lv_coord_t y1 = (si == -1 && fsys)
-            ? sysport_y(fsys, true)
-            : (lv_coord_t)(g_layout_y[si] + LAYOUT_BLOCK_H / 2);
+        /* Y: system ports use port-specific Y; plugins use spread Y */
+        lv_coord_t y1, y2;
+        if (si == -1 && fsys) {
+            y1 = sysport_y(fsys, true);
+        } else {
+            int n = src_cnt[si]; int k = src_ki[c];
+            y1 = (lv_coord_t)(g_layout_y[si] + LAYOUT_BLOCK_H / 2.0f
+                              + (k - (n - 1) / 2.0f) * CONN_SPREAD_PX);
+        }
+        if (di == -2 && tsys) {
+            y2 = sysport_y(tsys, false);
+        } else {
+            int n = dst_cnt[di]; int k = dst_ki[c];
+            y2 = (lv_coord_t)(g_layout_y[di] + LAYOUT_BLOCK_H / 2.0f
+                              + (k - (n - 1) / 2.0f) * CONN_SPREAD_PX);
+        }
 
-        lv_coord_t y2 = (di == -2 && tsys)
-            ? sysport_y(tsys, false)
-            : (lv_coord_t)(g_layout_y[di] + LAYOUT_BLOCK_H / 2);
+        /* Color by signal type */
+        conn_type_t ctype = classify_connection(&g_pedalboard.connections[c], &g_pedalboard);
+        lv_color_t  line_color = conn_type_color(ctype);
 
         /* Vertical segment placed close to the destination (1/4 gap before it) */
         lv_coord_t mid_x = x2 - (lv_coord_t)(LAYOUT_H_GAP / 4);
@@ -1080,11 +1163,35 @@ static void redraw_connections(void)
 
         lv_obj_t *line = lv_line_create(g_canvas_scroll);
         lv_line_set_points(line, &s_pts[s_pts_used], n_pts);
-        lv_obj_set_style_line_color(line, lv_color_hex(0x505050), 0);
+        lv_obj_set_style_line_color(line, line_color, 0);
         lv_obj_set_style_line_width(line, 2, 0);
         lv_obj_set_style_line_rounded(line, false, 0);
         lv_obj_clear_flag(line, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
         s_pts_used += n_pts;
+
+        /* Port dots at block edges (only for plugin endpoints, not system I/O) */
+        if (si >= 0) {
+            lv_obj_t *dot = lv_obj_create(g_canvas_scroll);
+            lv_obj_set_size(dot, CONN_DOT_D, CONN_DOT_D);
+            lv_obj_set_pos(dot, x1 - CONN_DOT_D / 2, y1 - CONN_DOT_D / 2);
+            lv_obj_set_style_bg_color(dot, line_color, 0);
+            lv_obj_set_style_bg_opa(dot, LV_OPA_COVER, 0);
+            lv_obj_set_style_border_width(dot, 0, 0);
+            lv_obj_set_style_radius(dot, LV_RADIUS_CIRCLE, 0);
+            lv_obj_set_style_shadow_width(dot, 0, 0);
+            lv_obj_clear_flag(dot, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+        }
+        if (di >= 0) {
+            lv_obj_t *dot = lv_obj_create(g_canvas_scroll);
+            lv_obj_set_size(dot, CONN_DOT_D, CONN_DOT_D);
+            lv_obj_set_pos(dot, x2 - CONN_DOT_D / 2, y2 - CONN_DOT_D / 2);
+            lv_obj_set_style_bg_color(dot, line_color, 0);
+            lv_obj_set_style_bg_opa(dot, LV_OPA_COVER, 0);
+            lv_obj_set_style_border_width(dot, 0, 0);
+            lv_obj_set_style_radius(dot, LV_RADIUS_CIRCLE, 0);
+            lv_obj_set_style_shadow_width(dot, 0, 0);
+            lv_obj_clear_flag(dot, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+        }
     }
 
     /* Stub line for plugins with no outgoing connections */
@@ -1809,11 +1916,12 @@ void ui_pedalboard_refresh(void)
 
         if (n_bands > 1) {
             static const char * const band_names[PLUG_BAND_COUNT] = { "Audio", "MIDI", "CV" };
+            bool prev_band_drawn = false;
             for (int b = 0; b < PLUG_BAND_COUNT; b++) {
                 if (!bands_present[b]) continue;
 
-                /* Horizontal separator above every non-first band */
-                if (b > 0) {
+                /* Horizontal separator only between two present bands */
+                if (prev_band_drawn) {
                     int sep_y = g_band_y_c[b] - BAND_SEPARATOR_H / 2;
                     lv_obj_t *sep = lv_obj_create(g_canvas_scroll);
                     lv_obj_set_size(sep, content_w, 1);
@@ -1824,9 +1932,9 @@ void ui_pedalboard_refresh(void)
                     lv_obj_clear_flag(sep, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
                 }
 
-                /* Band label (above the Audio section, or just below the separator) */
-                int lbl_y = (b == 0)
-                    ? (g_band_y_c[0] - 22)
+                /* Band label: above the first band, or just below the separator */
+                int lbl_y = (!prev_band_drawn)
+                    ? (g_band_y_c[b] - 22)
                     : (g_band_y_c[b] - BAND_SEPARATOR_H / 2 + 6);
                 lv_obj_t *lbl = lv_label_create(g_canvas_scroll);
                 lv_label_set_text(lbl, band_names[b]);
@@ -1834,6 +1942,7 @@ void ui_pedalboard_refresh(void)
                 lv_obj_set_style_text_color(lbl, lv_color_hex(0x405870), 0);
                 lv_obj_set_style_text_font(lbl, &lv_font_montserrat_14, 0);
                 lv_obj_clear_flag(lbl, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+                prev_band_drawn = true;
             }
         }
     }
