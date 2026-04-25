@@ -117,6 +117,12 @@ typedef struct {
     char      cv_source_uri[PB_CV_URI_MAX];
     /* CTRL_METER only */
     lv_obj_t *meter_bar;      /* lv_bar widget */
+    /* Tempo sync */
+    bool      is_tempo_related;
+    char      unit_symbol[8];
+    float     tempo_divider;   /* 0 = not synced */
+    lv_obj_t *tempo_lbl;       /* label in the tempo chip */
+    pb_port_t *port_ref;       /* direct pointer into pedalboard port for tempo_divider update */
 } ctrl_reg_t;
 
 static ctrl_reg_t g_controls[MAX_CONTROLS];
@@ -166,6 +172,279 @@ static char g_learning_symbol[PB_SYMBOL_MAX] = {0};
 
 /* Timer that refreshes output port meters at ~10 Hz */
 static lv_timer_t *g_meter_timer = NULL;
+
+/* ─── Tempo sync helpers ─────────────────────────────────────────────────────── */
+
+typedef struct { float value; const char *label; } tempo_div_t;
+
+static const tempo_div_t TEMPO_DIVS[] = {
+    { 0.333f,  "2."    },
+    { 0.5f,    "2"     },
+    { 0.75f,   "2T"    },
+    { 0.666f,  "1."    },
+    { 1.0f,    "1"     },
+    { 1.5f,    "1T"    },
+    { 1.333f,  "1/2."  },
+    { 2.0f,    "1/2"   },
+    { 3.0f,    "1/2T"  },
+    { 2.666f,  "1/4."  },
+    { 4.0f,    "1/4"   },
+    { 6.0f,    "1/4T"  },
+    { 5.333f,  "1/8."  },
+    { 8.0f,    "1/8"   },
+    { 12.0f,   "1/8T"  },
+    { 10.666f, "1/16." },
+    { 16.0f,   "1/16"  },
+    { 24.0f,   "1/16T" },
+    { 21.333f, "1/32." },
+    { 32.0f,   "1/32"  },
+    { 48.0f,   "1/32T" },
+};
+#define TEMPO_DIVS_COUNT 21
+
+/* Compute the port value for a given BPM, divider, and unit symbol.
+ * Matches mod-ui's getPortValue() + convertSecondsToPortValueEquivalent(). */
+static float tempo_compute_port_value(float bpm, float divider, const char *unit)
+{
+    if (divider <= 0.0f || bpm <= 0.0f) return 0.0f;
+    if (strcmp(unit, "BPM") == 0) return bpm / divider;
+    float secs = 240.0f / (bpm * divider);
+    if (strcmp(unit, "ms")  == 0) return secs * 1000.0f;
+    if (strcmp(unit, "min") == 0) return secs / 60.0f;
+    if (secs <= 0.0f) return 0.0f;
+    if (strcmp(unit, "Hz")  == 0) return 1.0f       / secs;
+    if (strcmp(unit, "kHz") == 0) return 0.001f     / secs;
+    if (strcmp(unit, "MHz") == 0) return 0.000001f  / secs;
+    return secs; /* "s" or unknown */
+}
+
+/* Find the division label for a stored divider value (closest match). */
+static const char *tempo_div_label(float divider)
+{
+    if (divider <= 0.0f) return "\xe2\x80\x94"; /* em-dash "—" */
+    const tempo_div_t *best = &TEMPO_DIVS[0];
+    float best_diff = fabsf(divider - TEMPO_DIVS[0].value);
+    for (int i = 1; i < TEMPO_DIVS_COUNT; i++) {
+        float d = fabsf(divider - TEMPO_DIVS[i].value);
+        if (d < best_diff) { best_diff = d; best = &TEMPO_DIVS[i]; }
+    }
+    return best->label;
+}
+
+/* ─── Tempo picker popup ──────────────────────────────────────────────────────── */
+
+typedef struct { ctrl_reg_t *reg; lv_obj_t *popup; } tempo_picker_state_t;
+static tempo_picker_state_t g_tempo_picker;
+
+static void tempo_picker_close(void)
+{
+    if (g_tempo_picker.popup) {
+        lv_obj_del(g_tempo_picker.popup);
+        g_tempo_picker.popup = NULL;
+    }
+    g_tempo_picker.reg = NULL;
+}
+
+typedef struct { int div_index; int unmap; } tempo_btn_ud_t;
+#define TEMPO_BTN_MAX (TEMPO_DIVS_COUNT + 1)
+static tempo_btn_ud_t g_tempo_btn_uds[TEMPO_BTN_MAX];
+static int            g_tempo_btn_ud_count = 0;
+
+static void tempo_btn_cb(lv_event_t *e)
+{
+    tempo_btn_ud_t *ud = lv_event_get_user_data(e);
+    if (!ud || !g_tempo_picker.reg) { tempo_picker_close(); return; }
+
+    ctrl_reg_t *reg = g_tempo_picker.reg;
+
+    if (ud->unmap) {
+        reg->tempo_divider = 0.0f;
+        if (reg->port_ref) reg->port_ref->tempo_divider = 0.0f;
+        if (reg->tempo_lbl) lv_label_set_text(reg->tempo_lbl, "\xe2\x80\x94");
+    } else if (ud->div_index >= 0 && ud->div_index < TEMPO_DIVS_COUNT) {
+        float divider = TEMPO_DIVS[ud->div_index].value;
+        reg->tempo_divider = divider;
+        if (reg->port_ref) reg->port_ref->tempo_divider = divider;
+
+        /* Compute and send new value */
+        pedalboard_t *pb = ui_pedalboard_get();
+        float bpm = pb ? pb->bpm : 120.0f;
+        float val = tempo_compute_port_value(bpm, divider, reg->unit_symbol);
+        if (val < reg->min) val = reg->min;
+        if (val > reg->max) val = reg->max;
+
+        if (g_instance >= 0) host_param_set(g_instance, reg->symbol, val);
+        if (g_value_cb) g_value_cb(g_instance, reg->symbol, val, g_value_ud);
+
+        /* Update arc knob display */
+        if (reg->widget && reg->type == CTRL_ARC) {
+            float range = reg->max - reg->min;
+            if (range > 0.0f) {
+                int av = (int)(((val - reg->min) / range) * 100.0f + 0.5f);
+                if (av < 0) av = 0; if (av > 100) av = 100;
+                lv_arc_set_value(reg->widget, av);
+            }
+        }
+        if (reg->val_lbl) {
+            char buf[32];
+            if (reg->is_integer) snprintf(buf, sizeof(buf), "%d", (int)val);
+            else                 snprintf(buf, sizeof(buf), "%.3g", (double)val);
+            lv_label_set_text(reg->val_lbl, buf);
+        }
+
+        if (reg->tempo_lbl)
+            lv_label_set_text(reg->tempo_lbl, TEMPO_DIVS[ud->div_index].label);
+    }
+
+    tempo_picker_close();
+}
+
+static void tempo_overlay_close_cb(lv_event_t *e)
+{
+    (void)e;
+    tempo_picker_close();
+}
+
+static void show_tempo_picker(ctrl_reg_t *reg)
+{
+    if (g_tempo_picker.popup) tempo_picker_close();
+
+    g_tempo_picker.reg = reg;
+
+    /* Filter divisions: keep only those that produce a value in [min, max]
+     * at any BPM between 20 and 280 (matches mod-ui getDividerOptions). */
+    bool valid[TEMPO_DIVS_COUNT];
+    int  valid_count = 0;
+    for (int i = 0; i < TEMPO_DIVS_COUNT; i++) {
+        float v20  = tempo_compute_port_value(20.0f,  TEMPO_DIVS[i].value, reg->unit_symbol);
+        float v280 = tempo_compute_port_value(280.0f, TEMPO_DIVS[i].value, reg->unit_symbol);
+        float lo = v20 < v280 ? v20 : v280;
+        float hi = v20 < v280 ? v280 : v20;
+        /* Accept if the [lo,hi] range overlaps with [min,max] */
+        valid[i] = (lo <= reg->max && hi >= reg->min);
+        if (valid[i]) valid_count++;
+    }
+    /* If no valid divisions (odd port range), show all */
+    if (valid_count == 0) {
+        for (int i = 0; i < TEMPO_DIVS_COUNT; i++) valid[i] = true;
+        valid_count = TEMPO_DIVS_COUNT;
+    }
+    bool has_unmap = (reg->tempo_divider > 0.0f);
+    int n_buttons = valid_count + (has_unmap ? 1 : 0);
+    int btn_h = 36;
+    int h = 52 + n_buttons * (btn_h + 4) + 16;
+    if (h > 560) h = 560;
+
+    lv_obj_t *overlay = lv_obj_create(lv_layer_top());
+    lv_obj_set_size(overlay, LV_PCT(100), LV_PCT(100));
+    lv_obj_set_style_bg_color(overlay, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(overlay, LV_OPA_60, 0);
+    lv_obj_add_event_cb(overlay, tempo_overlay_close_cb, LV_EVENT_CLICKED, NULL);
+    g_tempo_picker.popup = overlay;
+
+    lv_obj_t *box = lv_obj_create(overlay);
+    lv_obj_set_size(box, 260, h);
+    lv_obj_center(box);
+    lv_obj_set_style_bg_color(box, lv_color_hex(0x1a2030), 0);
+    lv_obj_set_style_border_color(box, lv_color_hex(0x60a070), 0);
+    lv_obj_set_style_border_width(box, 2, 0);
+    lv_obj_set_style_radius(box, 10, 0);
+    lv_obj_set_style_pad_all(box, 10, 0);
+    lv_obj_set_flex_flow(box, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(box, 4, 0);
+    lv_obj_clear_flag(box, LV_OBJ_FLAG_CLICKABLE);
+
+    lv_obj_t *title = lv_label_create(box);
+    lv_label_set_text_fmt(title, LV_SYMBOL_REFRESH " %s", reg->symbol);
+    lv_obj_set_style_text_color(title, lv_color_hex(0x80c0a0), 0);
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_14, 0);
+
+    lv_obj_t *scroll = lv_obj_create(box);
+    lv_obj_set_size(scroll, LV_PCT(100), 0);
+    lv_obj_set_flex_grow(scroll, 1);
+    lv_obj_set_style_bg_opa(scroll, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(scroll, 0, 0);
+    lv_obj_set_style_pad_all(scroll, 0, 0);
+    lv_obj_set_flex_flow(scroll, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(scroll, 4, 0);
+    lv_obj_add_flag(scroll, LV_OBJ_FLAG_SCROLLABLE);
+
+    g_tempo_btn_ud_count = 0;
+
+    if (has_unmap && g_tempo_btn_ud_count < TEMPO_BTN_MAX) {
+        int ui = g_tempo_btn_ud_count++;
+        g_tempo_btn_uds[ui].div_index = -1;
+        g_tempo_btn_uds[ui].unmap     = 1;
+        lv_obj_t *btn = lv_btn_create(scroll);
+        lv_obj_set_size(btn, LV_PCT(100), btn_h);
+        lv_obj_set_style_bg_color(btn, lv_color_hex(0x502020), 0);
+        lv_obj_add_event_cb(btn, tempo_btn_cb, LV_EVENT_CLICKED, &g_tempo_btn_uds[ui]);
+        lv_obj_t *lbl = lv_label_create(btn);
+        lv_label_set_text(lbl, LV_SYMBOL_CLOSE "  Désactiver");
+        lv_obj_center(lbl);
+        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_14, 0);
+    }
+
+    for (int i = 0; i < TEMPO_DIVS_COUNT; i++) {
+        if (!valid[i]) continue;
+        if (g_tempo_btn_ud_count >= TEMPO_BTN_MAX) break;
+        int ui = g_tempo_btn_ud_count++;
+        g_tempo_btn_uds[ui].div_index = i;
+        g_tempo_btn_uds[ui].unmap     = 0;
+        bool is_current = (fabsf(reg->tempo_divider - TEMPO_DIVS[i].value) < 0.01f);
+        lv_obj_t *btn = lv_btn_create(scroll);
+        lv_obj_set_size(btn, LV_PCT(100), btn_h);
+        lv_obj_set_style_bg_color(btn,
+            is_current ? lv_color_hex(0x1a4030) : lv_color_hex(0x243040), 0);
+        lv_obj_add_event_cb(btn, tempo_btn_cb, LV_EVENT_CLICKED, &g_tempo_btn_uds[ui]);
+        lv_obj_t *lbl = lv_label_create(btn);
+        lv_label_set_text(lbl, TEMPO_DIVS[i].label);
+        lv_obj_center(lbl);
+        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_14, 0);
+        lv_obj_set_style_text_color(lbl,
+            is_current ? lv_color_hex(0x80c0a0) : lv_color_hex(0xa0b0c0), 0);
+    }
+}
+
+/* ─── Tempo chip userdata pool ───────────────────────────────────────────────── */
+
+typedef struct { ctrl_reg_t *reg; } tempo_chip_ud_t;
+static tempo_chip_ud_t g_tempo_chip_uds[MAX_CONTROLS];
+static int             g_tempo_chip_ud_count = 0;
+
+static void tempo_chip_tap_cb(lv_event_t *e)
+{
+    tempo_chip_ud_t *ud = lv_event_get_user_data(e);
+    if (!ud || !ud->reg) return;
+    show_tempo_picker(ud->reg);
+}
+
+/* Create a tempo chip button (teal style). Returns the label inside.
+ * Registers a tap callback that opens the division picker. */
+static lv_obj_t *make_tempo_chip(lv_obj_t *parent, ctrl_reg_t *reg)
+{
+    if (g_tempo_chip_ud_count >= MAX_CONTROLS) return NULL;
+    tempo_chip_ud_t *ud = &g_tempo_chip_uds[g_tempo_chip_ud_count++];
+    ud->reg = reg;
+
+    lv_obj_t *chip = lv_btn_create(parent);
+    lv_obj_set_size(chip, LV_SIZE_CONTENT, 22);
+    lv_obj_set_style_radius(chip, 11, 0);
+    lv_obj_set_style_pad_hor(chip, 8, 0);
+    lv_obj_set_style_pad_ver(chip, 3, 0);
+    lv_obj_set_style_bg_color(chip, lv_color_hex(0x1a3a20), 0);
+    lv_obj_set_style_border_color(chip, lv_color_hex(0x3a7050), 0);
+    lv_obj_set_style_border_width(chip, 1, 0);
+    lv_obj_add_event_cb(chip, tempo_chip_tap_cb, LV_EVENT_CLICKED, ud);
+
+    lv_obj_t *lbl = lv_label_create(chip);
+    lv_label_set_text(lbl, tempo_div_label(reg->tempo_divider));
+    lv_obj_center(lbl);
+    lv_obj_set_style_text_color(lbl, lv_color_hex(0x60c090), 0);
+    lv_obj_set_style_text_font(lbl, &lv_font_montserrat_12, 0);
+
+    return lbl;
+}
 
 /* ─── Helpers ─────────────────────────────────────────────────────────────────── */
 
@@ -503,6 +782,13 @@ static void arc_changed_cb(lv_event_t *e)
     float value = reg->min + ratio * (reg->max - reg->min);
     if (reg->is_integer) value = (float)(int)(value + 0.5f);
 
+    /* Manual adjustment cancels tempo sync */
+    if (reg->is_tempo_related && reg->tempo_divider > 0.0f) {
+        reg->tempo_divider = 0.0f;
+        if (reg->port_ref) reg->port_ref->tempo_divider = 0.0f;
+        if (reg->tempo_lbl) lv_label_set_text(reg->tempo_lbl, "\xe2\x80\x94");
+    }
+
     char buf[32];
     if (reg->is_integer)
         snprintf(buf, sizeof(buf), "%d", (int)value);
@@ -606,6 +892,7 @@ static void close_cb(lv_event_t *e)
     if (g_modal) {
         if (g_meter_timer) { lv_timer_pause(g_meter_timer); }
         if (g_cv_picker.popup) { lv_obj_del(g_cv_picker.popup); g_cv_picker.popup = NULL; }
+        if (g_tempo_picker.popup) { lv_obj_del(g_tempo_picker.popup); g_tempo_picker.popup = NULL; }
         lv_obj_delete_async(g_modal);
         g_modal               = NULL;
         g_instance            = -1;
@@ -615,6 +902,7 @@ static void close_cb(lv_event_t *e)
         g_midi_chip_ud_count  = 0;
         g_cv_chip_ud_count       = 0;
         g_cv_out_toggle_ud_count = 0;
+        g_tempo_chip_ud_count    = 0;
         g_bypass_midi_lbl        = NULL;
         g_learning_symbol[0]     = '\0';
         g_cv_sources             = NULL;
@@ -731,6 +1019,9 @@ void ui_param_editor_show(int instance_id,
     g_cv_picker.popup        = NULL;
     g_cv_picker.reg          = NULL;
     g_cv_out_toggle_ud_count = 0;
+    g_tempo_chip_ud_count    = 0;
+    g_tempo_picker.popup     = NULL;
+    g_tempo_picker.reg       = NULL;
 
     /* Read bypass MIDI CC from the :bypass port if present */
     for (int i = 0; i < port_count; i++) {
@@ -855,6 +1146,15 @@ void ui_param_editor_show(int instance_id,
         reg->midi_cc      = port->midi_cc;
         snprintf(reg->cv_source_uri, sizeof(reg->cv_source_uri),
                  "%s", port->cv_source_uri);
+        reg->port_ref = port;  /* direct pointer for tempo_divider updates */
+
+        /* Tempo sync fields */
+        if (pm_port && pm_port->is_tempo_related) {
+            reg->is_tempo_related = true;
+            snprintf(reg->unit_symbol, sizeof(reg->unit_symbol),
+                     "%s", pm_port->unit_symbol);
+            reg->tempo_divider = port->tempo_divider;
+        }
 
         /* Physical min/max from pm (TTL doesn't store them) */
         float p_min = pm_port ? pm_port->min : 0.0f;
@@ -978,7 +1278,7 @@ void ui_param_editor_show(int instance_id,
             lv_obj_set_style_text_font(val_lbl, &lv_font_montserrat_12, 0);
             reg->val_lbl = val_lbl;
 
-            /* MIDI + CV chips side by side */
+            /* Chips row: MIDI + CV (+ tempo if applicable) */
             lv_obj_t *chips_row = make_chips_row(card);
             {
                 int ud_idx = g_midi_chip_ud_count++;
@@ -993,6 +1293,9 @@ void ui_param_editor_show(int instance_id,
                 g_cv_chip_uds[ci].reg = reg;
                 reg->cv_lbl = make_cv_chip(chips_row, reg->cv_source_uri, ci);
             }
+            /* Tempo sync chip */
+            if (reg->is_tempo_related)
+                reg->tempo_lbl = make_tempo_chip(chips_row, reg);
         }
     }
 
@@ -1222,6 +1525,7 @@ void ui_param_editor_close(void)
     if (g_modal) {
         if (g_meter_timer) { lv_timer_pause(g_meter_timer); }
         if (g_cv_picker.popup) { lv_obj_del(g_cv_picker.popup); g_cv_picker.popup = NULL; }
+        if (g_tempo_picker.popup) { lv_obj_del(g_tempo_picker.popup); g_tempo_picker.popup = NULL; }
         lv_obj_del(g_modal);
         g_modal               = NULL;
         g_instance            = -1;
@@ -1231,6 +1535,7 @@ void ui_param_editor_close(void)
         g_midi_chip_ud_count  = 0;
         g_cv_chip_ud_count       = 0;
         g_cv_out_toggle_ud_count = 0;
+        g_tempo_chip_ud_count    = 0;
         g_bypass_midi_lbl        = NULL;
         g_learning_symbol[0]     = '\0';
         g_cv_sources             = NULL;

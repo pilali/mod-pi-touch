@@ -2,6 +2,7 @@
 #include "ui_app.h"
 #include "../pedalboard.h"
 #include "../host_comm.h"
+#include "../plugin_manager.h"
 #include "../i18n.h"
 #include "ui_pedalboard.h"
 
@@ -29,6 +30,50 @@ static int g_bpb_denom = 4;   /* time signature denominator (2/4/8/16) */
 static struct timespec g_taps[TAP_MAX];
 static int             g_tap_count = 0;
 
+/* ─── Compute tempo-synced port value from BPM + divider + unit ──────────────── */
+
+static float tempo_compute_value(float bpm, float divider, const char *unit)
+{
+    if (divider <= 0.0f) return 0.0f;
+    if (strcmp(unit, "BPM") == 0) return bpm / divider;
+    float secs = 240.0f / (bpm * divider);
+    if (strcmp(unit, "ms")  == 0) return secs * 1000.0f;
+    if (strcmp(unit, "min") == 0) return secs / 60.0f;
+    if (strcmp(unit, "Hz")  == 0) return (secs > 0.0f) ? 1.0f   / secs : 0.0f;
+    if (strcmp(unit, "kHz") == 0) return (secs > 0.0f) ? 0.001f / secs : 0.0f;
+    if (strcmp(unit, "MHz") == 0) return (secs > 0.0f) ? 0.000001f / secs : 0.0f;
+    return secs; /* "s" */
+}
+
+/* Resend all tempo-synced parameters after a BPM change. */
+static void apply_tempo_params(pedalboard_t *pb)
+{
+    for (int i = 0; i < pb->plugin_count; i++) {
+        pb_plugin_t *plug = &pb->plugins[i];
+        const pm_plugin_info_t *pm = pm_plugin_by_uri(plug->uri);
+        for (int j = 0; j < plug->port_count; j++) {
+            pb_port_t *port = &plug->ports[j];
+            if (port->tempo_divider <= 0.0f) continue;
+
+            const char *unit = "";
+            if (pm) {
+                for (int k = 0; k < pm->port_count; k++) {
+                    if (strcmp(pm->ports[k].symbol, port->symbol) == 0) {
+                        unit = pm->ports[k].unit_symbol;
+                        break;
+                    }
+                }
+            }
+            float val = tempo_compute_value(pb->bpm, port->tempo_divider, unit);
+            /* Clamp to port range */
+            if (val < port->min) val = port->min;
+            if (val > port->max) val = port->max;
+            port->value = val;
+            host_param_set(plug->instance_id, port->symbol, val);
+        }
+    }
+}
+
 /* ─── Helper: apply transport to mod-host and mark pedalboard modified ───────── */
 
 static void apply_transport(void)
@@ -36,6 +81,7 @@ static void apply_transport(void)
     pedalboard_t *pb = ui_pedalboard_get();
     if (!pb) return;
     host_transport(pb->transport_rolling, pb->bpb, pb->bpm);
+    apply_tempo_params(pb);
     pb->modified = true;
     ui_app_update_title(pb->name, true);
 }
