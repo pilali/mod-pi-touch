@@ -276,6 +276,16 @@ int host_output_data_ready(void)
 }
 
 /* Single attempt — no retry.  Returns 0 on success, -1 if connection fails. */
+void host_comm_save_params(const char *addr, int cmd_port, int fb_port,
+                           host_feedback_cb_t feedback_cb, void *feedback_ud)
+{
+    snprintf(g_host.host_addr, sizeof(g_host.host_addr), "%s", addr);
+    g_host.cmd_port    = cmd_port;
+    g_host.fb_port     = fb_port;
+    g_host.feedback_cb = feedback_cb;
+    g_host.feedback_ud = feedback_ud;
+}
+
 int host_comm_try_connect(const char *addr, int cmd_port, int fb_port,
                           host_feedback_cb_t feedback_cb, void *feedback_ud)
 {

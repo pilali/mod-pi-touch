@@ -18,6 +18,12 @@ typedef void (*host_resp_cb_t)(int status, const char *value, void *userdata);
 
 /* ─── Lifecycle ─────────────────────────────────────────────────────────────── */
 
+/* Store connection parameters for later use by host_comm_reconnect(), without
+ * actually connecting.  Call at startup when skipping the initial connection
+ * (e.g. when mod-ui.service is already running). */
+void host_comm_save_params(const char *addr, int cmd_port, int fb_port,
+                           host_feedback_cb_t feedback_cb, void *feedback_ud);
+
 /* Single-attempt connect — returns 0 on success, -1 if mod-host is not
  * listening yet.  Does not retry; the caller is responsible for the retry
  * loop so it can update UI progress between attempts. */
