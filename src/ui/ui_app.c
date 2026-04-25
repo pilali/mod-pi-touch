@@ -1182,13 +1182,12 @@ void ui_app_init(void)
 
     /* Floating "add plugin" button — fixed in top-right of canvas, always on top */
     g_btn_add_float = lv_btn_create(g_screen);
-    lv_obj_set_size(g_btn_add_float, 64, 64);
-    /* Position: top-right of canvas, 12px from edges */
-    lv_obj_set_pos(g_btn_add_float, 1280 - 64 - 12, UI_TOP_BAR_H + 12);
+    lv_obj_set_size(g_btn_add_float, 48, 48);
+    lv_obj_set_pos(g_btn_add_float, 1280 - 48 - 12, UI_TOP_BAR_H + 12);
     lv_obj_set_style_bg_color(g_btn_add_float, UI_COLOR_ACTIVE, 0);
-    lv_obj_set_style_radius(g_btn_add_float, 32, 0);  /* circle */
+    lv_obj_set_style_radius(g_btn_add_float, 24, 0);  /* circle */
     lv_obj_set_style_shadow_color(g_btn_add_float, UI_COLOR_ACTIVE, 0);
-    lv_obj_set_style_shadow_width(g_btn_add_float, 18, 0);
+    lv_obj_set_style_shadow_width(g_btn_add_float, 14, 0);
     lv_obj_set_style_shadow_spread(g_btn_add_float, 3, 0);
     lv_obj_set_style_shadow_opa(g_btn_add_float, LV_OPA_50, 0);
     lv_obj_set_style_shadow_ofs_x(g_btn_add_float, 0, 0);
@@ -1196,7 +1195,7 @@ void ui_app_init(void)
     lv_obj_add_event_cb(g_btn_add_float, btn_add_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t *lbl_add_float = lv_label_create(g_btn_add_float);
     lv_label_set_text(lbl_add_float, LV_SYMBOL_PLUS);
-    lv_obj_set_style_text_font(lbl_add_float, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_font(lbl_add_float, &lv_font_montserrat_20, 0);
     lv_obj_center(lbl_add_float);
 
     /* Initialize sub-views */

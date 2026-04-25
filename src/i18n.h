@@ -221,6 +221,7 @@ typedef enum {
     TR_MODUI_ACTIVE_TITLE,
     TR_MODUI_ACTIVE_BODY,
     TR_MODUI_BTN_DISABLE,
+    TR_MODUI_SAVE_CONFIRM,  /* "Save pedalboard before switching to MOD-UI?" */
 
     /* Power */
     TR_SETTINGS_POWER,
