@@ -887,6 +887,7 @@ static void build_setlist_tab(lv_obj_t *parent)
     lv_obj_set_style_pad_all(left, 12, 0);
     lv_obj_set_style_pad_row(left, 8, 0);
     lv_obj_set_flex_flow(left, LV_FLEX_FLOW_COLUMN);
+    lv_obj_clear_flag(left, LV_OBJ_FLAG_SCROLLABLE);
 
     mpt_settings_t *s = settings_get();
     bank_list_t *banks = calloc(1, sizeof(*banks));
@@ -929,8 +930,8 @@ static void build_setlist_tab(lv_obj_t *parent)
 
     /* ── Pedalboard list ── */
     lv_obj_t *pb_list = lv_obj_create(left);
-    lv_obj_set_size(pb_list, LV_PCT(100), LV_SIZE_CONTENT);
-    lv_obj_set_style_max_height(pb_list, 530, 0);
+    lv_obj_set_width(pb_list, LV_PCT(100));
+    lv_obj_set_flex_grow(pb_list, 1);
     lv_obj_set_style_bg_opa(pb_list, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(pb_list, 0, 0);
     lv_obj_set_style_pad_all(pb_list, 0, 0);
@@ -1020,6 +1021,7 @@ static void build_setlist_tab(lv_obj_t *parent)
     lv_obj_set_style_pad_all(right, 16, 0);
     lv_obj_set_style_pad_row(right, 12, 0);
     lv_obj_set_flex_flow(right, LV_FLEX_FLOW_COLUMN);
+    lv_obj_clear_flag(right, LV_OBJ_FLAG_SCROLLABLE);
 
     lv_obj_t *right_title = lv_label_create(right);
     lv_label_set_text(right_title, "Snapshots");
@@ -1031,8 +1033,8 @@ static void build_setlist_tab(lv_obj_t *parent)
     #define SNAP_H_CUR  ((SNAP_H_BASE * 13) / 10)   /* ×1.3 = 130 */
 
     lv_obj_t *snap_list = lv_obj_create(right);
-    lv_obj_set_size(snap_list, LV_PCT(100), LV_SIZE_CONTENT);
-    lv_obj_set_style_max_height(snap_list, 590, 0);
+    lv_obj_set_width(snap_list, LV_PCT(100));
+    lv_obj_set_flex_grow(snap_list, 1);
     lv_obj_set_style_bg_opa(snap_list, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(snap_list, 0, 0);
     lv_obj_set_style_pad_all(snap_list, 0, 0);
