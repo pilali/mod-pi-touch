@@ -104,8 +104,11 @@ static void *connect_and_load_thread(void *arg)
     (void)arg;
     mpt_settings_t *s = settings_get();
 
-    /* If mod-ui.service is running, skip mod-host connection entirely. */
+    /* If mod-ui.service is running, skip mod-host connection entirely.
+     * Still save params so host_comm_reconnect() works when mod-ui is disabled. */
     if (s->mod_ui_active) {
+        host_comm_save_params(s->host_addr, s->host_cmd_port, s->host_fb_port,
+                              feedback_handler, NULL);
         fprintf(stderr, "[main] mod-ui.service is active — skipping mod-host connection.\n");
         ui_splash_update(100, TR(TR_MODUI_ACTIVE_TITLE));
         ui_splash_hide_async();

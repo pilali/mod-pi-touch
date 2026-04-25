@@ -19,7 +19,40 @@ typedef struct {
     void      *userdata;
     bool       bypassed;
     bool       long_pressed; /* suppress the CLICKED that follows LONG_PRESSED */
+    lv_color_t accent;       /* category colour — active border + glow */
 } block_ctx_t;
+
+/* ── Category → accent colour ───────────────────────────────────────────────── */
+static lv_color_t category_accent_color(const char *cat)
+{
+    if (!cat || !cat[0]) return UI_COLOR_PRIMARY;
+    if (!strcmp(cat,"Distortion") || !strcmp(cat,"Waveshaper") || !strcmp(cat,"Simulator"))
+        return lv_color_hex(0xFF6B6B); /* coral red */
+    if (!strcmp(cat,"Reverb") || !strcmp(cat,"Spatial") || !strcmp(cat,"Ambisonics"))
+        return lv_color_hex(0xA78BFA); /* lavender */
+    if (!strcmp(cat,"Delay") || !strcmp(cat,"Echo"))
+        return lv_color_hex(0x60A5FA); /* sky blue */
+    if (!strcmp(cat,"Chorus") || !strcmp(cat,"Flanger") ||
+        !strcmp(cat,"Phaser")  || !strcmp(cat,"Modulator"))
+        return lv_color_hex(0xF472B6); /* pink */
+    if (!strcmp(cat,"EQ")       || !strcmp(cat,"Multi EQ") || !strcmp(cat,"Para EQ") ||
+        !strcmp(cat,"Filter")   || !strcmp(cat,"Highpass")  || !strcmp(cat,"Lowpass") ||
+        !strcmp(cat,"Allpass")  || !strcmp(cat,"Bandpass")  || !strcmp(cat,"Comb")    ||
+        !strcmp(cat,"Spectral"))
+        return lv_color_hex(0xFBBF24); /* amber */
+    if (!strcmp(cat,"Compressor") || !strcmp(cat,"Limiter") ||
+        !strcmp(cat,"Dynamics")   || !strcmp(cat,"Expander") ||
+        !strcmp(cat,"Gate")       || !strcmp(cat,"Envelope"))
+        return lv_color_hex(0x34D399); /* emerald */
+    if (!strcmp(cat,"Pitch"))
+        return lv_color_hex(0xFB923C); /* orange */
+    if (!strcmp(cat,"Generator") || !strcmp(cat,"Instrument") ||
+        !strcmp(cat,"Oscillator") || !strcmp(cat,"Constant"))
+        return lv_color_hex(0x22D3EE); /* cyan */
+    if (!strcmp(cat,"Amplifier"))
+        return lv_color_hex(0xE2B96A); /* gold */
+    return UI_COLOR_PRIMARY;
+}
 
 typedef struct {
     block_ctx_t *bc;
@@ -118,7 +151,7 @@ static void block_long_press_cb(lv_event_t *e)
 
     lv_obj_t *btn_remove = lv_btn_create(menu);
     lv_obj_set_size(btn_remove, LV_PCT(100), 38);
-    lv_obj_set_style_bg_color(btn_remove, lv_color_hex(0xCC2222), 0);
+    lv_obj_set_style_bg_color(btn_remove, UI_COLOR_DANGER, 0);
     lv_obj_t *lbl_remove = lv_label_create(btn_remove);
     lv_label_set_text(lbl_remove, TR(TR_PLUG_REMOVE));
     lv_obj_center(lbl_remove);
@@ -151,20 +184,42 @@ lv_obj_t *ui_plugin_block_create(lv_obj_t *parent, pb_plugin_t *plug,
                                   block_cb_t on_remove,
                                   void *userdata)
 {
+    const pm_plugin_info_t *pi_info = pm_plugin_by_uri(plug->uri);
+    lv_color_t accent = category_accent_color(pi_info ? pi_info->category : "");
+
     block_ctx_t *ctx = malloc(sizeof(*ctx));
     ctx->on_tap    = on_tap;
     ctx->on_bypass = on_bypass;
     ctx->on_remove = on_remove;
     ctx->userdata  = userdata;
     ctx->bypassed  = !plug->enabled;
+    ctx->accent    = accent;
 
     lv_obj_t *block = lv_obj_create(parent);
     lv_obj_set_size(block, BLOCK_W, BLOCK_H);
-    lv_obj_set_style_bg_color(block, lv_color_black(), 0);
-    lv_obj_set_style_bg_opa(block, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_color(block, plug->enabled ? UI_COLOR_PRIMARY : UI_COLOR_TEXT_DIM, 0);
-    lv_obj_set_style_border_width(block, 2, 0);
-    lv_obj_set_style_radius(block, 8, 0);
+    /* Frosted-glass: top slightly blue-tinted, fades to BG; 70% opacity lets
+     * the dark canvas background bleed through, creating the glass depth. */
+    lv_obj_set_style_bg_color(block, lv_color_hex(0x1E2240), 0);
+    lv_obj_set_style_bg_grad_color(block, UI_COLOR_BG, 0);
+    lv_obj_set_style_bg_grad_dir(block, LV_GRAD_DIR_VER, 0);
+    lv_obj_set_style_bg_opa(block, LV_OPA_70, 0);
+    /* Left accent: category colour when active, bypass grey when muted */
+    lv_obj_set_style_border_side(block, LV_BORDER_SIDE_LEFT, 0);
+    lv_obj_set_style_border_width(block, 4, 0);
+    lv_obj_set_style_border_color(block, plug->enabled ? accent : UI_COLOR_BYPASS, 0);
+    lv_obj_set_style_radius(block, 12, 0);
+    /* Rim light: thin outline tinted toward the category accent */
+    lv_obj_set_style_outline_color(block, accent, 0);
+    lv_obj_set_style_outline_opa(block, LV_OPA_20, 0);
+    lv_obj_set_style_outline_width(block, 1, 0);
+    lv_obj_set_style_outline_pad(block, 0, 0);
+    /* Glow: category colour when active */
+    lv_obj_set_style_shadow_color(block, accent, 0);
+    lv_obj_set_style_shadow_width(block, plug->enabled ? 24 : 0, 0);
+    lv_obj_set_style_shadow_spread(block, 4, 0);
+    lv_obj_set_style_shadow_opa(block, 64, 0);
+    lv_obj_set_style_shadow_ofs_x(block, 0, 0);
+    lv_obj_set_style_shadow_ofs_y(block, 0, 0);
     lv_obj_set_style_pad_all(block, 6, 0);
     lv_obj_clear_flag(block, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(block, LV_OBJ_FLAG_CLICKABLE);
@@ -178,8 +233,8 @@ lv_obj_t *ui_plugin_block_create(lv_obj_t *parent, pb_plugin_t *plug,
     lv_obj_align(lbl, LV_ALIGN_TOP_LEFT, 0, 0);
 
     /* Thumbnail — centered in the area below the label */
-    const pm_plugin_info_t *pi = pm_plugin_by_uri(plug->uri);
-    if (pi && pi->thumbnail_path[0]) {
+    if (pi_info && pi_info->thumbnail_path[0]) {
+        const pm_plugin_info_t *pi = pi_info;
         int img_w = 0, img_h = 0;
         if (png_get_size(pi->thumbnail_path, &img_w, &img_h)) {
             int avail_w = BLOCK_W - 12;
@@ -221,5 +276,11 @@ lv_obj_t *ui_plugin_block_create(lv_obj_t *parent, pb_plugin_t *plug,
 void ui_plugin_block_set_bypassed(lv_obj_t *block, bool bypassed)
 {
     lv_obj_set_style_border_color(block,
-        bypassed ? UI_COLOR_TEXT_DIM : UI_COLOR_PRIMARY, 0);
+        bypassed ? UI_COLOR_BYPASS : UI_COLOR_PRIMARY, 0);
+    lv_obj_set_style_shadow_width(block, bypassed ? 0 : 24, 0);
+    lv_obj_set_style_shadow_color(block, UI_COLOR_PRIMARY, 0);
+    lv_obj_set_style_shadow_spread(block, 4, 0);
+    lv_obj_set_style_shadow_opa(block, 64, 0);
+    lv_obj_set_style_shadow_ofs_x(block, 0, 0);
+    lv_obj_set_style_shadow_ofs_y(block, 0, 0);
 }

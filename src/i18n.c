@@ -196,6 +196,7 @@ static const char * const g_en[TR_COUNT] = {
     /* TR_MODUI_ACTIVE_TITLE */       "MOD-UI Active",
     /* TR_MODUI_ACTIVE_BODY */        "mod-ui is running.\nmod-pi-touch is disconnected.\n\nAccess MOD-UI at:",
     /* TR_MODUI_BTN_DISABLE */        "Disable and reconnect",
+    /* TR_MODUI_SAVE_CONFIRM */       "Save pedalboard and load it in MOD-UI?",
 
     /* TR_SETTINGS_POWER */           "Power",
     /* TR_SETTINGS_SHUTDOWN */        "Shutdown",
@@ -407,6 +408,7 @@ static const char * const g_fr[TR_COUNT] = {
     /* TR_MODUI_ACTIVE_TITLE */       "MOD-UI Actif",
     /* TR_MODUI_ACTIVE_BODY */        "mod-ui est en cours d'ex\xc3\xa9" "cution.\nmod-pi-touch est d\xc3\xa9" "connect\xc3\xa9.\n\nAcc\xc3\xa9" "dez \xc3\xa0 MOD-UI \xc3\xa0 l'adresse :",
     /* TR_MODUI_BTN_DISABLE */        "D\xc3\xa9sactiver et reconnecter",
+    /* TR_MODUI_SAVE_CONFIRM */       "Enregistrer le pedalboard et le charger dans MOD-UI ?",
 
     /* TR_SETTINGS_POWER */           "Alimentation",
     /* TR_SETTINGS_SHUTDOWN */        "\xc3\x89teindre",

@@ -1047,10 +1047,20 @@ static conn_type_t classify_connection(const pb_connection_t *conn,
 static lv_color_t conn_type_color(conn_type_t type)
 {
     switch (type) {
-        case CONN_TYPE_MIDI: return UI_COLOR_ACCENT;
-        case CONN_TYPE_CV:   return lv_color_hex(0x9B59B6);
-        default:             return UI_COLOR_ACTIVE;
+        case CONN_TYPE_MIDI: return UI_COLOR_ACCENT;           /* amber  #F59E0B */
+        case CONN_TYPE_CV:   return lv_color_hex(0x10B981);   /* emerald #10B981 */
+        default:             return UI_COLOR_PRIMARY;          /* indigo #6366F1 */
     }
+}
+
+/* Fan-out shading: each successive line from the same port darkens ~20% toward black. */
+static lv_color_t conn_color_fanned(conn_type_t type, int k, int n)
+{
+    lv_color_t base = conn_type_color(type);
+    if (n <= 1 || k == 0) return base;
+    uint8_t mix = (uint8_t)(255 - k * 55);
+    if (mix < 80) mix = 80;
+    return lv_color_mix(base, lv_color_black(), mix);
 }
 
 /* ── Draw connection lines ───────────────────────────────────────────────────── */
@@ -1140,9 +1150,11 @@ static void redraw_connections(void)
                               + (k - (n - 1) / 2.0f) * CONN_SPREAD_PX);
         }
 
-        /* Color by signal type */
+        /* Color by signal type + fan-out index (darker for each extra line) */
         conn_type_t ctype = classify_connection(&g_pedalboard.connections[c], &g_pedalboard);
-        lv_color_t  line_color = conn_type_color(ctype);
+        int fan_k = (si >= 0 && si < g_pedalboard.plugin_count) ? src_ki[c] : 0;
+        int fan_n = (si >= 0 && si < g_pedalboard.plugin_count) ? src_cnt[si] : 1;
+        lv_color_t  line_color = conn_color_fanned(ctype, fan_k, fan_n);
 
         /* Vertical segment placed close to the destination (1/4 gap before it) */
         lv_coord_t mid_x = x2 - (lv_coord_t)(LAYOUT_H_GAP / 4);
@@ -1231,7 +1243,7 @@ static void redraw_connections(void)
 
         lv_obj_t *line = lv_line_create(g_canvas_scroll);
         lv_line_set_points(line, &s_pts[s_pts_used], 2);
-        lv_obj_set_style_line_color(line, lv_color_hex(0x404040), 0);
+        lv_obj_set_style_line_color(line, lv_color_hex(0x252840), 0);
         lv_obj_set_style_line_width(line, 2, 0);
         lv_obj_set_style_line_rounded(line, false, 0);
         lv_obj_clear_flag(line, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
@@ -1270,7 +1282,7 @@ static void draw_conn_squares(void)
         lv_obj_t *sq = lv_obj_create(g_canvas_scroll);
         lv_obj_set_size(sq, CONN_SQ_SIZE, CONN_SQ_SIZE);
         lv_obj_set_pos(sq, sx, sy);
-        lv_obj_set_style_bg_color(sq, lv_color_hex(0x505878), 0);
+        lv_obj_set_style_bg_color(sq, lv_color_hex(0x252840), 0);
         lv_obj_set_style_bg_opa(sq, LV_OPA_COVER, 0);
         lv_obj_set_style_border_color(sq, UI_COLOR_PRIMARY, 0);
         lv_obj_set_style_border_width(sq, 1, 0);
@@ -1983,15 +1995,28 @@ void ui_pedalboard_refresh(void)
 
 /* ─── MOD-UI active placeholder ──────────────────────────────────────────────── */
 
+static void modui_disable_async(void *ud)
+{
+    (void)ud;
+    ui_app_show_screen(UI_SCREEN_PEDALBOARD);
+}
+
+static void *modui_disable_thread(void *arg)
+{
+    (void)arg;
+    system("sudo systemctl stop mod-ui");
+    settings_get()->mod_ui_active = false;
+    host_comm_reconnect();
+    lv_async_call(modui_disable_async, NULL);
+    return NULL;
+}
+
 static void modui_disable_cb(lv_event_t *e)
 {
     (void)e;
-    mpt_settings_t *s = settings_get();
-    system("sudo systemctl stop mod-ui");
-    s->mod_ui_active = false;
-    host_comm_reconnect();
-    /* Re-init pedalboard screen — will auto-load last state */
-    ui_app_show_screen(UI_SCREEN_PEDALBOARD);
+    pthread_t tid;
+    pthread_create(&tid, NULL, modui_disable_thread, NULL);
+    pthread_detach(tid);
 }
 
 static void build_modui_placeholder(lv_obj_t *parent)
@@ -2389,6 +2414,14 @@ void ui_pedalboard_load(const char *bundle_path,
                     conn->from, conn->to);
         }
     }
+
+    /* Restore full LV2 state for plugins that use the LV2_State extension.
+     * mod-host reads bundlepath/effect-<id>/effect.ttl for each loaded plugin
+     * and calls LV2_State_Interface.restore().  This captures state that cannot
+     * be expressed as port values (IR file paths for convolution reverbs, pitch
+     * shifter internal config, etc.) — exactly what mod-ui does at this point. */
+    if (g_pedalboard.path[0])
+        host_state_load(g_pedalboard.path);
 
     /* Apply the current snapshot on top of the TTL base values.
      * This restores parameter values (including patch:set file paths) that

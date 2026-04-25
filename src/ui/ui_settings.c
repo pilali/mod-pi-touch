@@ -731,25 +731,93 @@ static void reboot_btn_cb(lv_event_t *e)
 
 /* ─── MOD-UI section ─────────────────────────────────────────────────────────── */
 
+/* Write mod-ui's last.json so the current pedalboard is auto-loaded on startup.
+ * Format: {"bank":-2,"pedalboard":"<path>","supportsDividers":true}
+ * Path: dirname(banks_file)/last.json  — banks_file defaults to ~/data/banks.json
+ * which is the same data directory that mod-ui uses for last.json. */
+static void write_modui_last_json(const char *pb_path)
+{
+    if (!pb_path || !pb_path[0]) return;
+    mpt_settings_t *s = settings_get();
+    /* dirname(banks_file): "~/data/banks.json" → "~/data" */
+    char data_dir[512];
+    snprintf(data_dir, sizeof(data_dir), "%s", s->banks_file);
+    char *slash = strrchr(data_dir, '/');
+    if (slash) *slash = '\0';
+
+    char last_path[512];
+    snprintf(last_path, sizeof(last_path), "%s/last.json", data_dir);
+
+    FILE *f = fopen(last_path, "w");
+    if (!f) { fprintf(stderr, "[modui] cannot write %s: %m\n", last_path); return; }
+    fprintf(f, "{\"bank\":-2,\"pedalboard\":\"%s\",\"supportsDividers\":true}\n", pb_path);
+    fclose(f);
+    fprintf(stderr, "[modui] wrote %s → %s\n", last_path, pb_path);
+}
+
+/* lv_async_call target — must run on the LVGL main thread */
+static void modui_show_pedalboard_async(void *ud)
+{
+    (void)ud;
+    ui_app_show_screen(UI_SCREEN_PEDALBOARD);
+}
+
+/* Background thread: start mod-ui, disconnect from mod-host, then
+ * post the screen switch back to the LVGL thread. */
+static void *activate_modui_thread(void *arg)
+{
+    (void)arg;
+    system("sudo systemctl start mod-ui");
+    host_comm_disconnect();
+    settings_get()->mod_ui_active = true;
+    lv_async_call(modui_show_pedalboard_async, NULL);
+    return NULL;
+}
+
+/* Background thread: stop mod-ui, reconnect to mod-host (up to 60 s retry),
+ * then post the screen switch back to the LVGL thread. */
+static void *deactivate_modui_thread(void *arg)
+{
+    (void)arg;
+    system("sudo systemctl stop mod-ui");
+    settings_get()->mod_ui_active = false;
+    host_comm_reconnect();
+    lv_async_call(modui_show_pedalboard_async, NULL);
+    return NULL;
+}
+
+static void spawn_detached(void *(*fn)(void *))
+{
+    pthread_t tid;
+    pthread_create(&tid, NULL, fn, NULL);
+    pthread_detach(tid);
+}
+
+static void do_activate_modui(lv_event_t *e)
+{
+    (void)e;
+    /* Fast: save pedalboard + write last.json — on the LVGL thread */
+    pedalboard_t *pb = ui_pedalboard_get();
+    if (pb && pb->path[0]) {
+        ui_pedalboard_save();
+        write_modui_last_json(pb->path);
+    }
+    /* Slow: systemctl start + disconnect — in a background thread */
+    spawn_detached(activate_modui_thread);
+}
+
 static void modui_toggle_cb(lv_event_t *e)
 {
     lv_obj_t *sw = lv_event_get_target(e);
-    mpt_settings_t *s = settings_get();
     bool activate = lv_obj_has_state(sw, LV_STATE_CHECKED);
 
     if (activate) {
-        /* Start mod-ui.service, then release mod-host connection */
-        system("sudo systemctl start mod-ui");
-        host_comm_disconnect();
-        s->mod_ui_active = true;
+        /* Ask user to save/load pedalboard in mod-ui before switching */
+        show_confirm(TR(TR_MODUI_SAVE_CONFIRM), do_activate_modui, NULL);
     } else {
-        /* Stop mod-ui.service, then reconnect to mod-host */
-        system("sudo systemctl stop mod-ui");
-        s->mod_ui_active = false;
-        host_comm_reconnect();
+        /* Slow: systemctl stop + reconnect — in a background thread */
+        spawn_detached(deactivate_modui_thread);
     }
-    /* Navigate to pedalboard — shows placeholder or reloads depending on state */
-    ui_app_show_screen(UI_SCREEN_PEDALBOARD);
 }
 
 static void build_modui_section(lv_obj_t *parent)

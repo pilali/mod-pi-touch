@@ -93,12 +93,14 @@ static const lv_buttonmatrix_ctrl_t azerty_ctrl_sc[] = {
 /* ─── Global theme colors ────────────────────────────────────────────────────── */
 lv_color_t UI_COLOR_BG        = {0};
 lv_color_t UI_COLOR_SURFACE   = {0};
+lv_color_t UI_COLOR_SURFACE_2 = {0};
 lv_color_t UI_COLOR_PRIMARY   = {0};
 lv_color_t UI_COLOR_ACCENT    = {0};
 lv_color_t UI_COLOR_TEXT      = {0};
 lv_color_t UI_COLOR_TEXT_DIM  = {0};
 lv_color_t UI_COLOR_BYPASS    = {0};
 lv_color_t UI_COLOR_ACTIVE    = {0};
+lv_color_t UI_COLOR_DANGER    = {0};
 
 /* ─── Internal state ─────────────────────────────────────────────────────────── */
 static lv_obj_t   *g_screen       = NULL;
@@ -120,17 +122,19 @@ static ui_screen_t g_current_screen = UI_SCREEN_PEDALBOARD;
 static lv_obj_t   *g_toast       = NULL;
 static lv_timer_t *g_toast_timer = NULL;
 
-/* ─── Color theme (dark) ─────────────────────────────────────────────────────── */
+/* ─── Color theme (dark studio) ──────────────────────────────────────────────── */
 static void init_colors(void)
 {
-    UI_COLOR_BG       = lv_color_hex(0x1A1A1A);
-    UI_COLOR_SURFACE  = lv_color_hex(0x2A2A2A);
-    UI_COLOR_PRIMARY  = lv_color_hex(0xFF6B00); /* MOD orange */
-    UI_COLOR_ACCENT   = lv_color_hex(0x00B4D8); /* cyan */
-    UI_COLOR_TEXT     = lv_color_hex(0xEEEEEE);
-    UI_COLOR_TEXT_DIM = lv_color_hex(0x888888);
-    UI_COLOR_BYPASS   = lv_color_hex(0x444444);
-    UI_COLOR_ACTIVE   = lv_color_hex(0x2ECC71); /* green */
+    UI_COLOR_BG        = lv_color_hex(0x0C0D12); /* near-black, blue tint */
+    UI_COLOR_SURFACE   = lv_color_hex(0x14161F); /* dark blue-grey */
+    UI_COLOR_SURFACE_2 = lv_color_hex(0x1D2032); /* hover / nav button bg */
+    UI_COLOR_PRIMARY   = lv_color_hex(0x5B8CFF); /* soft indigo */
+    UI_COLOR_ACCENT    = lv_color_hex(0xF5A623); /* amber */
+    UI_COLOR_TEXT      = lv_color_hex(0xE8EAFF); /* slightly blue-white */
+    UI_COLOR_TEXT_DIM  = lv_color_hex(0x606480); /* muted blue-grey */
+    UI_COLOR_BYPASS    = lv_color_hex(0x2C2F3E); /* dark blue-grey */
+    UI_COLOR_ACTIVE    = lv_color_hex(0x34D399); /* emerald green */
+    UI_COLOR_DANGER    = lv_color_hex(0xEF4444); /* modern red */
 }
 
 /* ─── Top bar callbacks ──────────────────────────────────────────────────────── */
@@ -590,7 +594,7 @@ static void reorder_rebuild(snap_reorder_t *state)
     state->count      = pb->snapshot_count;
     state->drag_child = -1;
 
-    lv_color_t danger = lv_color_hex(0xC0392B);
+    lv_color_t danger = UI_COLOR_DANGER;
 
     for (int i = 0; i < pb->snapshot_count; i++) {
         /* Row container */
@@ -740,7 +744,12 @@ static void reorder_snaps_cb(lv_event_t *e)
     lv_obj_set_style_bg_color(panel, UI_COLOR_BG, 0);
     lv_obj_set_style_border_color(panel, UI_COLOR_PRIMARY, 0);
     lv_obj_set_style_border_width(panel, 1, 0);
-    lv_obj_set_style_radius(panel, 8, 0);
+    lv_obj_set_style_border_opa(panel, LV_OPA_40, 0);
+    lv_obj_set_style_radius(panel, 12, 0);
+    lv_obj_set_style_shadow_color(panel, lv_color_black(), 0);
+    lv_obj_set_style_shadow_width(panel, 40, 0);
+    lv_obj_set_style_shadow_spread(panel, 4, 0);
+    lv_obj_set_style_shadow_opa(panel, LV_OPA_80, 0);
     lv_obj_set_style_pad_all(panel, 12, 0);
     lv_obj_set_style_pad_row(panel, 8, 0);
     lv_obj_set_flex_flow(panel, LV_FLEX_FLOW_COLUMN);
@@ -843,7 +852,12 @@ static void btn_save_cb(lv_event_t *e)
     lv_obj_set_style_bg_color(panel, UI_COLOR_BG, 0);
     lv_obj_set_style_border_color(panel, UI_COLOR_PRIMARY, 0);
     lv_obj_set_style_border_width(panel, 1, 0);
-    lv_obj_set_style_radius(panel, 8, 0);
+    lv_obj_set_style_border_opa(panel, LV_OPA_40, 0);
+    lv_obj_set_style_radius(panel, 12, 0);
+    lv_obj_set_style_shadow_color(panel, lv_color_black(), 0);
+    lv_obj_set_style_shadow_width(panel, 40, 0);
+    lv_obj_set_style_shadow_spread(panel, 4, 0);
+    lv_obj_set_style_shadow_opa(panel, LV_OPA_80, 0);
     lv_obj_set_style_pad_all(panel, 16, 0);
     lv_obj_set_style_pad_row(panel, 10, 0);
     lv_obj_set_flex_flow(panel, LV_FLEX_FLOW_COLUMN);
@@ -896,8 +910,8 @@ static void btn_save_cb(lv_event_t *e)
                           LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
     lv_obj_clear_flag(cols, LV_OBJ_FLAG_SCROLLABLE);
 
-    lv_color_t green  = lv_color_hex(0x27AE60);
-    lv_color_t danger = lv_color_hex(0xC0392B);
+    lv_color_t green  = UI_COLOR_ACTIVE;
+    lv_color_t danger = UI_COLOR_DANGER;
 
     /* ── Left column: Pedalboard ── */
     lv_obj_t *left = lv_obj_create(cols);
@@ -990,33 +1004,50 @@ static void create_top_bar(void)
     g_top_bar = lv_obj_create(g_screen);
     lv_obj_set_size(g_top_bar, LV_PCT(100), UI_TOP_BAR_H);
     lv_obj_align(g_top_bar, LV_ALIGN_TOP_MID, 0, 0);
-    lv_obj_set_style_bg_color(g_top_bar, UI_COLOR_SURFACE, 0);
+    lv_obj_set_style_bg_color(g_top_bar, lv_color_hex(0x181A28), 0);
+    lv_obj_set_style_bg_grad_color(g_top_bar, UI_COLOR_BG, 0);
+    lv_obj_set_style_bg_grad_dir(g_top_bar, LV_GRAD_DIR_VER, 0);
     lv_obj_set_style_bg_opa(g_top_bar, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(g_top_bar, 0, 0);
+    lv_obj_set_style_border_color(g_top_bar, UI_COLOR_PRIMARY, 0);
+    lv_obj_set_style_border_width(g_top_bar, 1, 0);
+    lv_obj_set_style_border_side(g_top_bar, LV_BORDER_SIDE_BOTTOM, 0);
+    lv_obj_set_style_border_opa(g_top_bar, LV_OPA_40, 0);
     lv_obj_set_style_radius(g_top_bar, 0, 0);
     lv_obj_set_style_pad_all(g_top_bar, 5, 0);
     lv_obj_clear_flag(g_top_bar, LV_OBJ_FLAG_SCROLLABLE);
 
-    /* ── Left side: Banks + Conductor ── */
+    /* ── Left side: nav buttons — all use unified SURFACE_2 + PRIMARY border ── */
+#define NAV_BTN_BORDER(b) do { \
+    lv_obj_set_style_border_color((b), UI_COLOR_PRIMARY, 0); \
+    lv_obj_set_style_border_width((b), 1, 0); \
+    lv_obj_set_style_border_opa((b), LV_OPA_40, 0); \
+} while(0)
+
     lv_obj_t *btn_banks = make_top_btn(g_top_bar,
         LV_SYMBOL_LIST, TR(TR_BANKS),
-        UI_COLOR_PRIMARY, btn_banks_cb, &g_banks_label);
+        UI_COLOR_SURFACE_2, btn_banks_cb, &g_banks_label);
+    NAV_BTN_BORDER(btn_banks);
     lv_obj_align(btn_banks, LV_ALIGN_LEFT_MID, 0, 0);
 
     lv_obj_t *btn_pre_fx = make_top_btn(g_top_bar,
         LV_SYMBOL_EDIT, TR(TR_PREFX_TITLE),
-        lv_color_hex(0x1A7A4A), btn_pre_fx_cb, &g_prefx_label);
+        UI_COLOR_SURFACE_2, btn_pre_fx_cb, &g_prefx_label);
+    NAV_BTN_BORDER(btn_pre_fx);
     lv_obj_align(btn_pre_fx, LV_ALIGN_LEFT_MID, UI_TOP_BTN_SZ + 6, 0);
 
     lv_obj_t *btn_cond = make_top_btn(g_top_bar,
         LV_SYMBOL_AUDIO, TR(TR_CONDUCTOR_TITLE),
-        lv_color_hex(0x6A4C9C), btn_conductor_cb, &g_cond_label);
+        UI_COLOR_SURFACE_2, btn_conductor_cb, &g_cond_label);
+    NAV_BTN_BORDER(btn_cond);
     lv_obj_align(btn_cond, LV_ALIGN_LEFT_MID, (UI_TOP_BTN_SZ + 6) * 2, 0);
 
     lv_obj_t *btn_scene = make_top_btn(g_top_bar,
         LV_SYMBOL_SHUFFLE, TR(TR_SCENE_TITLE),
-        lv_color_hex(0x1A6B7A), btn_scene_cb, &g_scene_label);
+        UI_COLOR_SURFACE_2, btn_scene_cb, &g_scene_label);
+    NAV_BTN_BORDER(btn_scene);
     lv_obj_align(btn_scene, LV_ALIGN_LEFT_MID, (UI_TOP_BTN_SZ + 6) * 3, 0);
+
+#undef NAV_BTN_BORDER
 
     /* ── Center: pedalboard title ── */
     g_title_label = lv_label_create(g_top_bar);
@@ -1138,26 +1169,33 @@ void ui_app_init(void)
     g_snap_bar = lv_obj_create(g_screen);
     lv_obj_set_size(g_snap_bar, LV_PCT(100), UI_SNAPSHOT_BAR_H);
     lv_obj_align(g_snap_bar, LV_ALIGN_BOTTOM_MID, 0, 0);
-    lv_obj_set_style_bg_color(g_snap_bar, UI_COLOR_SURFACE, 0);
+    lv_obj_set_style_bg_color(g_snap_bar, lv_color_hex(0x111320), 0);
+    lv_obj_set_style_bg_grad_color(g_snap_bar, UI_COLOR_BG, 0);
+    lv_obj_set_style_bg_grad_dir(g_snap_bar, LV_GRAD_DIR_VER, 0);
     lv_obj_set_style_bg_opa(g_snap_bar, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(g_snap_bar, 0, 0);
+    lv_obj_set_style_border_color(g_snap_bar, UI_COLOR_PRIMARY, 0);
+    lv_obj_set_style_border_width(g_snap_bar, 1, 0);
+    lv_obj_set_style_border_side(g_snap_bar, LV_BORDER_SIDE_TOP, 0);
+    lv_obj_set_style_border_opa(g_snap_bar, LV_OPA_40, 0);
     lv_obj_set_style_radius(g_snap_bar, 0, 0);
     lv_obj_clear_flag(g_snap_bar, LV_OBJ_FLAG_SCROLLABLE);
 
     /* Floating "add plugin" button — fixed in top-right of canvas, always on top */
     g_btn_add_float = lv_btn_create(g_screen);
-    lv_obj_set_size(g_btn_add_float, 64, 64);
-    /* Position: top-right of canvas, 12px from edges */
-    lv_obj_set_pos(g_btn_add_float, 1280 - 64 - 12, UI_TOP_BAR_H + 12);
+    lv_obj_set_size(g_btn_add_float, 48, 48);
+    lv_obj_set_pos(g_btn_add_float, 1280 - 48 - 12, UI_TOP_BAR_H + 12);
     lv_obj_set_style_bg_color(g_btn_add_float, UI_COLOR_ACTIVE, 0);
-    lv_obj_set_style_radius(g_btn_add_float, 32, 0);  /* circle */
-    lv_obj_set_style_shadow_width(g_btn_add_float, 8, 0);
-    lv_obj_set_style_shadow_color(g_btn_add_float, lv_color_hex(0x000000), 0);
-    lv_obj_set_style_shadow_opa(g_btn_add_float, LV_OPA_40, 0);
+    lv_obj_set_style_radius(g_btn_add_float, 24, 0);  /* circle */
+    lv_obj_set_style_shadow_color(g_btn_add_float, UI_COLOR_ACTIVE, 0);
+    lv_obj_set_style_shadow_width(g_btn_add_float, 14, 0);
+    lv_obj_set_style_shadow_spread(g_btn_add_float, 3, 0);
+    lv_obj_set_style_shadow_opa(g_btn_add_float, LV_OPA_50, 0);
+    lv_obj_set_style_shadow_ofs_x(g_btn_add_float, 0, 0);
+    lv_obj_set_style_shadow_ofs_y(g_btn_add_float, 0, 0);
     lv_obj_add_event_cb(g_btn_add_float, btn_add_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t *lbl_add_float = lv_label_create(g_btn_add_float);
     lv_label_set_text(lbl_add_float, LV_SYMBOL_PLUS);
-    lv_obj_set_style_text_font(lbl_add_float, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_font(lbl_add_float, &lv_font_montserrat_20, 0);
     lv_obj_center(lbl_add_float);
 
     /* Initialize sub-views */
@@ -1245,9 +1283,12 @@ static void show_toast_colored(const char *msg, lv_color_t bg)
     lv_obj_align(g_toast, LV_ALIGN_TOP_MID, 0, UI_TOP_BAR_H + 8);
     lv_obj_set_style_bg_color(g_toast, bg, 0);
     lv_obj_set_style_bg_opa(g_toast, LV_OPA_COVER, 0);
-    lv_obj_set_style_radius(g_toast, 6, 0);
+    lv_obj_set_style_radius(g_toast, 10, 0);
     lv_obj_set_style_border_width(g_toast, 0, 0);
-    lv_obj_set_style_shadow_width(g_toast, 0, 0);
+    lv_obj_set_style_shadow_color(g_toast, lv_color_black(), 0);
+    lv_obj_set_style_shadow_width(g_toast, 16, 0);
+    lv_obj_set_style_shadow_spread(g_toast, 2, 0);
+    lv_obj_set_style_shadow_opa(g_toast, LV_OPA_70, 0);
     lv_obj_set_style_pad_all(g_toast, 0, 0);
     lv_obj_clear_flag(g_toast, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
 
