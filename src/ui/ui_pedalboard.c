@@ -1,5 +1,6 @@
 #include "ui_pedalboard.h"
 #include "ui_app.h"
+#include "ui_conductor.h"
 #include "ui_param_editor.h"
 #include "ui_plugin_block.h"
 #include "ui_snapshot_bar.h"
@@ -104,7 +105,8 @@ static int         uri_to_plugin_idx(const char *uri, const pedalboard_t *pb);
 #define CONN_PORT_MAX   32
 #define CONN_SQ_SIZE    22   /* connection square side in px — large enough for touch */
 #define CONN_PANEL_H   300   /* connection panel height in px */
-#define LINE_PTS_MAX   512   /* flat point pool: up to 4 pts per orthogonal line */
+#define LINE_PTS_MAX  1024   /* flat point pool: up to 6 pts per bent line (chamfered corners) */
+#define CORNER_R         8   /* chamfer radius in px for 90° bends */
 #define CONN_SPREAD_PX  6    /* pixels between parallel lines from the same block */
 #define CONN_DOT_D      8    /* diameter of port dot at block edge */
 
@@ -1153,12 +1155,29 @@ static void redraw_connections(void)
             s_pts[s_pts_used + 1] = (lv_point_precise_t){(float)x2, (float)y1};
             n_pts = 2;
         } else {
-            if (s_pts_used + 4 > LINE_PTS_MAX) break;
-            s_pts[s_pts_used + 0] = (lv_point_precise_t){(float)x1,    (float)y1};
-            s_pts[s_pts_used + 1] = (lv_point_precise_t){(float)mid_x, (float)y1};
-            s_pts[s_pts_used + 2] = (lv_point_precise_t){(float)mid_x, (float)y2};
-            s_pts[s_pts_used + 3] = (lv_point_precise_t){(float)x2,    (float)y2};
-            n_pts = 4;
+            /* Bent line: two 90° corners at (mid_x, y1) and (mid_x, y2).
+             * Add chamfer points to soften each corner with radius CORNER_R. */
+            float dy   = (y2 > y1) ? 1.0f : -1.0f;
+            int   vdist = (int)(dy * (y2 - y1));   /* abs vertical distance */
+            if (vdist >= 2 * CORNER_R) {
+                /* Chamfered: 6 points */
+                if (s_pts_used + 6 > LINE_PTS_MAX) break;
+                s_pts[s_pts_used + 0] = (lv_point_precise_t){(float)x1,              (float)y1};
+                s_pts[s_pts_used + 1] = (lv_point_precise_t){(float)(mid_x - CORNER_R), (float)y1};
+                s_pts[s_pts_used + 2] = (lv_point_precise_t){(float)mid_x,           (float)(y1 + dy * CORNER_R)};
+                s_pts[s_pts_used + 3] = (lv_point_precise_t){(float)mid_x,           (float)(y2 - dy * CORNER_R)};
+                s_pts[s_pts_used + 4] = (lv_point_precise_t){(float)(mid_x + CORNER_R), (float)y2};
+                s_pts[s_pts_used + 5] = (lv_point_precise_t){(float)x2,              (float)y2};
+                n_pts = 6;
+            } else {
+                /* Too short to chamfer: keep sharp */
+                if (s_pts_used + 4 > LINE_PTS_MAX) break;
+                s_pts[s_pts_used + 0] = (lv_point_precise_t){(float)x1,    (float)y1};
+                s_pts[s_pts_used + 1] = (lv_point_precise_t){(float)mid_x, (float)y1};
+                s_pts[s_pts_used + 2] = (lv_point_precise_t){(float)mid_x, (float)y2};
+                s_pts[s_pts_used + 3] = (lv_point_precise_t){(float)x2,    (float)y2};
+                n_pts = 4;
+            }
         }
 
         lv_obj_t *line = lv_line_create(g_canvas_scroll);
@@ -2394,6 +2413,14 @@ void ui_pedalboard_load(const char *bundle_path,
         }
     }
 
+    /* Apply transport (BPM, BPB, rolling) read from the pedalboard TTL.
+     * mod-host keeps its own transport state; without this call, a looper
+     * or any plugin that reads mod-host tempo would see a stale value. */
+    host_transport(g_pedalboard.transport_rolling,
+                   g_pedalboard.bpb, g_pedalboard.bpm);
+    if (g_pedalboard.transport_sync == 1)
+        host_transport_sync("midi_clock_slave");
+
     /* Kick-start the mod-host feedback loop.  All monitor_output calls are now
      * done; sending output_data_ready sets g_postevents_ready=true so the
      * PostPonedEventsThread dispatches the initial monitored values.  The
@@ -2414,6 +2441,7 @@ static void pb_load_ui_refresh(void *arg)
     (void)arg;
     ui_app_update_title(g_pedalboard.name, false);
     ui_pedalboard_refresh();
+    ui_conductor_refresh();   /* sync BPM/BPB display to newly-loaded pedalboard */
     last_state_save();
 }
 
