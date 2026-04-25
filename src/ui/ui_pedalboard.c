@@ -1047,9 +1047,9 @@ static conn_type_t classify_connection(const pb_connection_t *conn,
 static lv_color_t conn_type_color(conn_type_t type)
 {
     switch (type) {
-        case CONN_TYPE_MIDI: return UI_COLOR_ACCENT;
-        case CONN_TYPE_CV:   return lv_color_hex(0x9B59B6);
-        default:             return UI_COLOR_ACTIVE;
+        case CONN_TYPE_MIDI: return UI_COLOR_ACCENT;           /* amber */
+        case CONN_TYPE_CV:   return lv_color_hex(0xA78BFA);   /* lavender */
+        default:             return UI_COLOR_PRIMARY;          /* indigo */
     }
 }
 
@@ -1231,7 +1231,7 @@ static void redraw_connections(void)
 
         lv_obj_t *line = lv_line_create(g_canvas_scroll);
         lv_line_set_points(line, &s_pts[s_pts_used], 2);
-        lv_obj_set_style_line_color(line, lv_color_hex(0x404040), 0);
+        lv_obj_set_style_line_color(line, lv_color_hex(0x252840), 0);
         lv_obj_set_style_line_width(line, 2, 0);
         lv_obj_set_style_line_rounded(line, false, 0);
         lv_obj_clear_flag(line, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
@@ -1270,7 +1270,7 @@ static void draw_conn_squares(void)
         lv_obj_t *sq = lv_obj_create(g_canvas_scroll);
         lv_obj_set_size(sq, CONN_SQ_SIZE, CONN_SQ_SIZE);
         lv_obj_set_pos(sq, sx, sy);
-        lv_obj_set_style_bg_color(sq, lv_color_hex(0x505878), 0);
+        lv_obj_set_style_bg_color(sq, lv_color_hex(0x252840), 0);
         lv_obj_set_style_bg_opa(sq, LV_OPA_COVER, 0);
         lv_obj_set_style_border_color(sq, UI_COLOR_PRIMARY, 0);
         lv_obj_set_style_border_width(sq, 1, 0);

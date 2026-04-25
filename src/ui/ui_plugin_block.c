@@ -118,7 +118,7 @@ static void block_long_press_cb(lv_event_t *e)
 
     lv_obj_t *btn_remove = lv_btn_create(menu);
     lv_obj_set_size(btn_remove, LV_PCT(100), 38);
-    lv_obj_set_style_bg_color(btn_remove, lv_color_hex(0xCC2222), 0);
+    lv_obj_set_style_bg_color(btn_remove, UI_COLOR_DANGER, 0);
     lv_obj_t *lbl_remove = lv_label_create(btn_remove);
     lv_label_set_text(lbl_remove, TR(TR_PLUG_REMOVE));
     lv_obj_center(lbl_remove);
@@ -160,11 +160,20 @@ lv_obj_t *ui_plugin_block_create(lv_obj_t *parent, pb_plugin_t *plug,
 
     lv_obj_t *block = lv_obj_create(parent);
     lv_obj_set_size(block, BLOCK_W, BLOCK_H);
-    lv_obj_set_style_bg_color(block, lv_color_black(), 0);
+    lv_obj_set_style_bg_color(block, UI_COLOR_SURFACE, 0);
+    lv_obj_set_style_bg_grad_color(block, UI_COLOR_BG, 0);
+    lv_obj_set_style_bg_grad_dir(block, LV_GRAD_DIR_VER, 0);
     lv_obj_set_style_bg_opa(block, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_color(block, plug->enabled ? UI_COLOR_PRIMARY : UI_COLOR_TEXT_DIM, 0);
-    lv_obj_set_style_border_width(block, 2, 0);
-    lv_obj_set_style_radius(block, 8, 0);
+    lv_obj_set_style_border_side(block, LV_BORDER_SIDE_LEFT, 0);
+    lv_obj_set_style_border_width(block, 4, 0);
+    lv_obj_set_style_border_color(block, plug->enabled ? UI_COLOR_PRIMARY : UI_COLOR_BYPASS, 0);
+    lv_obj_set_style_radius(block, 12, 0);
+    lv_obj_set_style_shadow_color(block, UI_COLOR_PRIMARY, 0);
+    lv_obj_set_style_shadow_width(block, plug->enabled ? 20 : 0, 0);
+    lv_obj_set_style_shadow_spread(block, 3, 0);
+    lv_obj_set_style_shadow_opa(block, LV_OPA_20, 0);
+    lv_obj_set_style_shadow_ofs_x(block, 0, 0);
+    lv_obj_set_style_shadow_ofs_y(block, 0, 0);
     lv_obj_set_style_pad_all(block, 6, 0);
     lv_obj_clear_flag(block, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(block, LV_OBJ_FLAG_CLICKABLE);
@@ -221,5 +230,11 @@ lv_obj_t *ui_plugin_block_create(lv_obj_t *parent, pb_plugin_t *plug,
 void ui_plugin_block_set_bypassed(lv_obj_t *block, bool bypassed)
 {
     lv_obj_set_style_border_color(block,
-        bypassed ? UI_COLOR_TEXT_DIM : UI_COLOR_PRIMARY, 0);
+        bypassed ? UI_COLOR_BYPASS : UI_COLOR_PRIMARY, 0);
+    lv_obj_set_style_shadow_width(block, bypassed ? 0 : 20, 0);
+    lv_obj_set_style_shadow_color(block, UI_COLOR_PRIMARY, 0);
+    lv_obj_set_style_shadow_spread(block, 3, 0);
+    lv_obj_set_style_shadow_opa(block, LV_OPA_20, 0);
+    lv_obj_set_style_shadow_ofs_x(block, 0, 0);
+    lv_obj_set_style_shadow_ofs_y(block, 0, 0);
 }

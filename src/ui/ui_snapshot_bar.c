@@ -223,8 +223,13 @@ static void open_popup(void)
     lv_obj_align(panel, LV_ALIGN_BOTTOM_MID, 0, -(UI_SNAPSHOT_BAR_H + 4));
     lv_obj_set_style_bg_color(panel, UI_COLOR_SURFACE, 0);
     lv_obj_set_style_border_color(panel, UI_COLOR_PRIMARY, 0);
-    lv_obj_set_style_border_width(panel, 2, 0);
-    lv_obj_set_style_radius(panel, 8, 0);
+    lv_obj_set_style_border_width(panel, 1, 0);
+    lv_obj_set_style_border_opa(panel, LV_OPA_40, 0);
+    lv_obj_set_style_radius(panel, 12, 0);
+    lv_obj_set_style_shadow_color(panel, lv_color_black(), 0);
+    lv_obj_set_style_shadow_width(panel, 32, 0);
+    lv_obj_set_style_shadow_spread(panel, 4, 0);
+    lv_obj_set_style_shadow_opa(panel, LV_OPA_80, 0);
     lv_obj_set_style_pad_all(panel, 8, 0);
     lv_obj_set_style_pad_row(panel, 4, 0);
     lv_obj_set_flex_flow(panel, LV_FLEX_FLOW_COLUMN);
@@ -320,10 +325,12 @@ void ui_snapshot_bar_init(lv_obj_t *parent)
     lv_obj_t *tap_btn = lv_btn_create(parent);
     lv_obj_set_flex_grow(tap_btn, 1);
     lv_obj_set_height(tap_btn, 44);
-    lv_obj_set_style_bg_color(tap_btn, UI_COLOR_BG, 0);
-    lv_obj_set_style_border_color(tap_btn, UI_COLOR_TEXT_DIM, 0);
+    lv_obj_set_style_bg_color(tap_btn, UI_COLOR_SURFACE, 0);
+    lv_obj_set_style_border_color(tap_btn, UI_COLOR_PRIMARY, 0);
     lv_obj_set_style_border_width(tap_btn, 1, 0);
-    lv_obj_set_style_radius(tap_btn, 6, 0);
+    lv_obj_set_style_border_opa(tap_btn, LV_OPA_40, 0);
+    lv_obj_set_style_radius(tap_btn, 22, 0);
+    lv_obj_set_style_shadow_width(tap_btn, 0, 0);
     lv_obj_set_style_pad_hor(tap_btn, 10, 0);
 
     g_cur_label = lv_label_create(tap_btn);
@@ -346,6 +353,13 @@ void ui_snapshot_bar_init(lv_obj_t *parent)
     lv_obj_t *btn_add = lv_btn_create(parent);
     lv_obj_set_size(btn_add, 44, 44);
     lv_obj_set_style_bg_color(btn_add, UI_COLOR_ACCENT, 0);
+    lv_obj_set_style_radius(btn_add, 22, 0);
+    lv_obj_set_style_shadow_color(btn_add, UI_COLOR_ACCENT, 0);
+    lv_obj_set_style_shadow_width(btn_add, 14, 0);
+    lv_obj_set_style_shadow_spread(btn_add, 2, 0);
+    lv_obj_set_style_shadow_opa(btn_add, LV_OPA_40, 0);
+    lv_obj_set_style_shadow_ofs_x(btn_add, 0, 0);
+    lv_obj_set_style_shadow_ofs_y(btn_add, 0, 0);
     lv_obj_t *lbl_add = lv_label_create(btn_add);
     lv_label_set_text(lbl_add, LV_SYMBOL_PLUS);
     lv_obj_center(lbl_add);

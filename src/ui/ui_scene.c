@@ -15,7 +15,7 @@
 
 /* ─── Constants ──────────────────────────────────────────────────────────────── */
 #define SLOT_COUNT 4
-#define GLOW_COLOR  lv_color_hex(0x2ECC71)
+#define GLOW_COLOR  lv_color_hex(0x34D399)
 #define GLOW_W      24
 #define GLOW_SPREAD 8
 
@@ -290,7 +290,7 @@ static void slot_apply_style(int idx)
                         ? pb_find_plugin(pb, sl->instance_id) : NULL;
 
     if (g_learning_slot == idx) {
-        lv_obj_set_style_bg_color(sl->card, lv_color_hex(0x1A3A5C), 0);
+        lv_obj_set_style_bg_color(sl->card, lv_color_hex(0x0F1D3A), 0);
         lv_obj_set_style_shadow_color(sl->card, UI_COLOR_ACCENT, 0);
         lv_obj_set_style_shadow_width(sl->card, 18, 0);
         lv_obj_set_style_shadow_spread(sl->card, 6, 0);
@@ -332,7 +332,7 @@ static void slot_apply_style(int idx)
             lv_obj_set_style_text_color(sl->state_lbl, GLOW_COLOR, 0);
         }
     } else {
-        lv_obj_set_style_bg_color(sl->card, lv_color_hex(0x222222), 0);
+        lv_obj_set_style_bg_color(sl->card, UI_COLOR_SURFACE, 0);
         lv_obj_set_style_shadow_width(sl->card, 0, 0);
         if (sl->name_lbl) lv_label_set_text(sl->name_lbl, pl->label);
         if (sl->state_lbl) {
@@ -557,7 +557,7 @@ static void open_slot_menu(int slot_idx)
 } while(0)
 
     MENU_BTN(UI_COLOR_ACCENT,            TR(TR_SCENE_LEARN_MIDI), slot_learn_again_cb);
-    MENU_BTN(lv_color_hex(0xC0392B),     TR(TR_SCENE_UNASSIGN),   slot_unassign_cb);
+    MENU_BTN(UI_COLOR_DANGER,            TR(TR_SCENE_UNASSIGN),   slot_unassign_cb);
 
 #undef MENU_BTN
 }
@@ -650,7 +650,7 @@ static void build_pedals_tab(lv_obj_t *parent)
         /* Cancel MIDI learn button (hidden by default) */
         lv_obj_t *cancel_btn = lv_btn_create(card);
         lv_obj_set_size(cancel_btn, LV_PCT(75), 46);
-        lv_obj_set_style_bg_color(cancel_btn, lv_color_hex(0xC0392B), 0);
+        lv_obj_set_style_bg_color(cancel_btn, UI_COLOR_DANGER, 0);
         lv_obj_set_style_radius(cancel_btn, 8, 0);
         lv_obj_set_style_shadow_width(cancel_btn, 0, 0);
         lv_obj_add_event_cb(cancel_btn, cancel_learn_cb, LV_EVENT_CLICKED, (void *)(intptr_t)i);
@@ -838,9 +838,9 @@ static void snap_item_cb(lv_event_t *e)
         bool cur = (i == pb->current_snapshot);
         lv_obj_set_height(card, cur ? SNAP_H_CUR : SNAP_H_BASE);
         lv_obj_set_style_bg_color(card,
-            cur ? lv_color_hex(0x252525) : UI_COLOR_SURFACE, 0);
+            cur ? UI_COLOR_SURFACE_2 : UI_COLOR_SURFACE, 0);
         lv_obj_set_style_border_color(card,
-            cur ? UI_COLOR_PRIMARY : lv_color_hex(0x444444), 0);
+            cur ? UI_COLOR_PRIMARY : UI_COLOR_BYPASS, 0);
         lv_obj_set_style_border_width(card, cur ? 2 : 1, 0);
         lv_obj_set_style_shadow_color(card, UI_COLOR_PRIMARY, 0);
         lv_obj_set_style_shadow_width(card,  cur ? 22 : 0, 0);
@@ -880,7 +880,7 @@ static void build_setlist_tab(lv_obj_t *parent)
     lv_obj_t *left = lv_obj_create(parent);
     lv_obj_set_width(left, LV_PCT(33));
     lv_obj_set_height(left, LV_PCT(100));
-    lv_obj_set_style_bg_color(left, lv_color_hex(0x181818), 0);
+    lv_obj_set_style_bg_color(left, UI_COLOR_SURFACE, 0);
     lv_obj_set_style_bg_opa(left, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(left, 0, 0);
     lv_obj_set_style_radius(left, 0, 0);
@@ -950,7 +950,7 @@ static void build_setlist_tab(lv_obj_t *parent)
                     lv_obj_t *row = lv_btn_create(pb_list);
                     lv_obj_set_size(row, LV_PCT(100), 60);
                     lv_obj_set_style_bg_color(row,
-                        is_cur ? lv_color_hex(0x2C2C2C) : lv_color_hex(0x1E1E1E), 0);
+                        is_cur ? UI_COLOR_SURFACE_2 : UI_COLOR_BG, 0);
                     lv_obj_set_style_border_color(row,
                         is_cur ? UI_COLOR_PRIMARY : lv_color_hex(0x333333), 0);
                     lv_obj_set_style_border_width(row, is_cur ? 2 : 1, 0);
@@ -978,7 +978,7 @@ static void build_setlist_tab(lv_obj_t *parent)
                 lv_obj_t *row = lv_btn_create(pb_list);
                 lv_obj_set_size(row, LV_PCT(100), 60);
                 lv_obj_set_style_bg_color(row,
-                    is_cur ? lv_color_hex(0x2C2C2C) : lv_color_hex(0x1E1E1E), 0);
+                    is_cur ? UI_COLOR_SURFACE_2 : UI_COLOR_BG, 0);
                 lv_obj_set_style_border_color(row,
                     is_cur ? UI_COLOR_PRIMARY : lv_color_hex(0x333333), 0);
                 lv_obj_set_style_border_width(row, is_cur ? 2 : 1, 0);
@@ -1014,7 +1014,7 @@ static void build_setlist_tab(lv_obj_t *parent)
     lv_obj_t *right = lv_obj_create(parent);
     lv_obj_set_flex_grow(right, 1);
     lv_obj_set_height(right, LV_PCT(100));
-    lv_obj_set_style_bg_color(right, lv_color_hex(0x1A1A1A), 0);
+    lv_obj_set_style_bg_color(right, UI_COLOR_BG, 0);
     lv_obj_set_style_bg_opa(right, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(right, 0, 0);
     lv_obj_set_style_radius(right, 0, 0);
@@ -1243,7 +1243,7 @@ void ui_scene_open(void)
     lv_obj_add_flag(btn_close, LV_OBJ_FLAG_FLOATING);
     lv_obj_set_size(btn_close, 44, 44);
     lv_obj_align(btn_close, LV_ALIGN_TOP_RIGHT, -8, 8);
-    lv_obj_set_style_bg_color(btn_close, lv_color_hex(0x2A2A2A), 0);
+    lv_obj_set_style_bg_color(btn_close, UI_COLOR_SURFACE_2, 0);
     lv_obj_set_style_bg_opa(btn_close, LV_OPA_80, 0);
     lv_obj_set_style_radius(btn_close, 22, 0);
     lv_obj_set_style_border_color(btn_close, UI_COLOR_TEXT_DIM, 0);

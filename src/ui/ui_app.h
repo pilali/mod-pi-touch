@@ -71,9 +71,11 @@ void ui_app_keyboard_apply_lang(lv_obj_t *kbd);
 /* Global theme colors */
 extern lv_color_t UI_COLOR_BG;
 extern lv_color_t UI_COLOR_SURFACE;
+extern lv_color_t UI_COLOR_SURFACE_2;
 extern lv_color_t UI_COLOR_PRIMARY;
 extern lv_color_t UI_COLOR_ACCENT;
 extern lv_color_t UI_COLOR_TEXT;
 extern lv_color_t UI_COLOR_TEXT_DIM;
 extern lv_color_t UI_COLOR_BYPASS;
 extern lv_color_t UI_COLOR_ACTIVE;
+extern lv_color_t UI_COLOR_DANGER;
