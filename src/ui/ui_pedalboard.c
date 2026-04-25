@@ -1995,15 +1995,28 @@ void ui_pedalboard_refresh(void)
 
 /* ─── MOD-UI active placeholder ──────────────────────────────────────────────── */
 
+static void modui_disable_async(void *ud)
+{
+    (void)ud;
+    ui_app_show_screen(UI_SCREEN_PEDALBOARD);
+}
+
+static void *modui_disable_thread(void *arg)
+{
+    (void)arg;
+    system("sudo systemctl stop mod-ui");
+    settings_get()->mod_ui_active = false;
+    host_comm_reconnect();
+    lv_async_call(modui_disable_async, NULL);
+    return NULL;
+}
+
 static void modui_disable_cb(lv_event_t *e)
 {
     (void)e;
-    mpt_settings_t *s = settings_get();
-    system("sudo systemctl stop mod-ui");
-    s->mod_ui_active = false;
-    host_comm_reconnect();
-    /* Re-init pedalboard screen — will auto-load last state */
-    ui_app_show_screen(UI_SCREEN_PEDALBOARD);
+    pthread_t tid;
+    pthread_create(&tid, NULL, modui_disable_thread, NULL);
+    pthread_detach(tid);
 }
 
 static void build_modui_placeholder(lv_obj_t *parent)
