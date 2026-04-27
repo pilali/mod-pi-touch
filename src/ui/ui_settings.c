@@ -780,57 +780,6 @@ static void write_modui_last_json(const char *pb_path)
     fprintf(stderr, "[modui] wrote %s → %s\n", last_path, pb_path);
 }
 
-/* lv_async_call target — must run on the LVGL main thread */
-static void modui_show_pedalboard_async(void *ud)
-{
-    (void)ud;
-    ui_app_show_screen(UI_SCREEN_PEDALBOARD);
-}
-
-/* Background thread: start mod-ui, disconnect from mod-host, then
- * post the screen switch back to the LVGL thread. */
-static void *activate_modui_thread(void *arg)
-{
-    (void)arg;
-    system("sudo systemctl start mod-ui");
-    host_comm_disconnect();
-    settings_get()->mod_ui_active = true;
-    /* Fetch IP here (background thread) — avoids blocking popen on LVGL thread */
-    char ip[64] = "", ssid[64] = "";
-    wifi_get_status(ssid, sizeof(ssid), ip, sizeof(ip));
-    ui_pedalboard_set_modui_ip(ip);
-    lv_async_call(modui_show_pedalboard_async, NULL);
-    return NULL;
-}
-
-/* Background thread: stop mod-ui, reconnect to mod-host (up to 60 s retry),
- * then post the screen switch back to the LVGL thread. */
-static void *deactivate_modui_thread(void *arg)
-{
-    (void)arg;
-    system("sudo systemctl stop mod-ui");
-
-    /* mod-ui holds a TCP connection to mod-host; give it a moment to close
-     * so mod-host is ready to accept our connection. */
-    sleep(3);
-
-    mpt_settings_t *s = settings_get();
-    s->mod_ui_active = false;
-    settings_save_prefs(s);
-
-    if (host_comm_reconnect() != 0) {
-        fprintf(stderr, "[settings] deactivate mod-ui: mod-host reconnect timed out\n");
-        lv_async_call(modui_show_pedalboard_async, NULL);
-        return NULL;
-    }
-
-    pre_fx_init();
-    pre_fx_reload();
-
-    lv_async_call(modui_show_pedalboard_async, NULL);
-    return NULL;
-}
-
 static void spawn_detached(void *(*fn)(void *))
 {
     pthread_t tid;
@@ -838,31 +787,55 @@ static void spawn_detached(void *(*fn)(void *))
     pthread_detach(tid);
 }
 
-static void do_activate_modui(lv_event_t *e)
+/* ─── MOD-UI activation (settings → button) ─────────────────────────────────── */
+
+/* Step 3 — runs on LVGL thread via lv_async_call: switch to pedalboard
+ * screen which will show the placeholder (mod_ui_active is already true). */
+static void modui_activate_async(void *ud)
+{
+    (void)ud;
+    ui_app_show_screen(UI_SCREEN_PEDALBOARD);
+}
+
+/* Step 2 — background thread: slow operations that must NOT block LVGL. */
+static void *modui_activate_thread(void *arg)
+{
+    (void)arg;
+    fprintf(stderr, "[modui] starting mod-ui service...\n");
+    system("sudo systemctl start mod-ui");
+
+    host_comm_disconnect();
+
+    mpt_settings_t *s = settings_get();
+    s->mod_ui_active = true;
+    settings_save_prefs(s);
+
+    /* Fetch WiFi IP in background — avoids blocking popen() on LVGL thread. */
+    char ip[64] = "", ssid[64] = "";
+    wifi_get_status(ssid, sizeof(ssid), ip, sizeof(ip));
+    ui_pedalboard_set_modui_ip(ip);
+    fprintf(stderr, "[modui] mod-ui active, ip=%s\n", ip);
+
+    lv_async_call(modui_activate_async, NULL);
+    return NULL;
+}
+
+/* Step 1 — confirm callback (LVGL thread): save pedalboard then spawn thread. */
+static void modui_activate_confirm_cb(lv_event_t *e)
 {
     (void)e;
-    /* Fast: save pedalboard + write last.json — on the LVGL thread */
     pedalboard_t *pb = ui_pedalboard_get();
     if (pb && pb->path[0]) {
         ui_pedalboard_save();
         write_modui_last_json(pb->path);
     }
-    /* Slow: systemctl start + disconnect — in a background thread */
-    spawn_detached(activate_modui_thread);
+    spawn_detached(modui_activate_thread);
 }
 
-static void modui_toggle_cb(lv_event_t *e)
+static void modui_activate_btn_cb(lv_event_t *e)
 {
-    lv_obj_t *sw = lv_event_get_target(e);
-    bool activate = lv_obj_has_state(sw, LV_STATE_CHECKED);
-
-    if (activate) {
-        /* Ask user to save/load pedalboard in mod-ui before switching */
-        show_confirm(TR(TR_MODUI_SAVE_CONFIRM), do_activate_modui, NULL);
-    } else {
-        /* Slow: systemctl stop + reconnect — in a background thread */
-        spawn_detached(deactivate_modui_thread);
-    }
+    (void)e;
+    show_confirm(TR(TR_MODUI_SAVE_CONFIRM), modui_activate_confirm_cb, NULL);
 }
 
 static void build_modui_section(lv_obj_t *parent)
@@ -870,14 +843,17 @@ static void build_modui_section(lv_obj_t *parent)
     lv_obj_t *row = make_row(parent);
 
     lv_obj_t *lbl = lv_label_create(row);
-    lv_label_set_text(lbl, TR(TR_SETTINGS_MODUI_ACTIVATE));
+    lv_label_set_text(lbl, TR(TR_SETTINGS_MODUI));
     lv_obj_set_style_text_color(lbl, UI_COLOR_TEXT, 0);
     lv_obj_set_flex_grow(lbl, 1);
 
-    lv_obj_t *sw = lv_switch_create(row);
-    if (settings_get()->mod_ui_active)
-        lv_obj_add_state(sw, LV_STATE_CHECKED);
-    lv_obj_add_event_cb(sw, modui_toggle_cb, LV_EVENT_VALUE_CHANGED, NULL);
+    lv_obj_t *btn = lv_btn_create(row);
+    lv_obj_set_size(btn, 200, 40);
+    lv_obj_set_style_bg_color(btn, UI_COLOR_ACCENT, 0);
+    lv_obj_add_event_cb(btn, modui_activate_btn_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *btn_lbl = lv_label_create(btn);
+    lv_label_set_text(btn_lbl, TR(TR_SETTINGS_MODUI_ACTIVATE));
+    lv_obj_center(btn_lbl);
 }
 
 static void build_power_section(lv_obj_t *parent)

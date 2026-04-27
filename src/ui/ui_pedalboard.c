@@ -2132,40 +2132,48 @@ void ui_pedalboard_refresh(void)
 
 /* ─── MOD-UI active placeholder ──────────────────────────────────────────────── */
 
+/* ─── MOD-UI placeholder — shown when mod_ui_active == true ─────────────────── */
+
+/* Step 3 — LVGL thread: rebuild pedalboard screen (now mod_ui_active == false). */
 static void modui_disable_async(void *ud)
 {
     (void)ud;
     ui_app_show_screen(UI_SCREEN_PEDALBOARD);
 }
 
+/* Step 2 — background thread: stop service, wait for mod-host, reconnect. */
 static void *modui_disable_thread(void *arg)
 {
     (void)arg;
-    fprintf(stderr, "[modui_disable] stopping mod-ui service...\n");
-    int rc = system("sudo systemctl stop mod-ui");
-    fprintf(stderr, "[modui_disable] systemctl stop returned %d — sleeping 3s\n", rc);
-    sleep(3);
+    fprintf(stderr, "[modui] stopping mod-ui service...\n");
+    system("sudo systemctl stop mod-ui");
+
+    /* mod-host stops with mod-ui (Requires=), then restarts (RestartSec=2).
+     * Wait long enough for it to come back and accept connections. */
+    fprintf(stderr, "[modui] waiting for mod-host to restart...\n");
+    sleep(5);
 
     mpt_settings_t *s = settings_get();
     s->mod_ui_active = false;
     settings_save_prefs(s);
 
-    fprintf(stderr, "[modui_disable] reconnecting to mod-host...\n");
+    fprintf(stderr, "[modui] reconnecting to mod-host...\n");
     if (host_comm_reconnect() != 0) {
-        fprintf(stderr, "[modui_disable] mod-host reconnect timed out\n");
+        fprintf(stderr, "[modui] reconnect timed out — showing empty pedalboard\n");
         lv_async_call(modui_disable_async, NULL);
         return NULL;
     }
-    fprintf(stderr, "[modui_disable] connected — init pre-fx\n");
 
+    fprintf(stderr, "[modui] connected — initializing pre-fx\n");
     pre_fx_init();
     pre_fx_reload();
 
-    fprintf(stderr, "[modui_disable] done — switching to pedalboard screen\n");
+    fprintf(stderr, "[modui] done\n");
     lv_async_call(modui_disable_async, NULL);
     return NULL;
 }
 
+/* Step 1 — button callback (LVGL thread): spawn the disable thread. */
 static void modui_disable_cb(lv_event_t *e)
 {
     (void)e;
