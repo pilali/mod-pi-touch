@@ -2,6 +2,12 @@
 #include <lvgl.h>
 #include "../pedalboard.h"
 
+/* ── Block geometry (shared with ui_plugin_block) ────────────────────────────── */
+#define LAYOUT_BLOCK_W  160
+#define LAYOUT_BLOCK_H  160
+#define LAYOUT_H_GAP     80
+#define LAYOUT_V_GAP     40
+
 /* Initialize the pedalboard canvas view inside parent. */
 void ui_pedalboard_init(lv_obj_t *parent);
 

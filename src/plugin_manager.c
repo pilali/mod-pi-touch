@@ -146,6 +146,23 @@ static void extract_port(LilvPlugin *plugin, LilvPort *port, pm_port_info_t *pi)
     }
 }
 
+/* ─── modgui widget type parser ─────────────────────────────────────────────── */
+
+static pm_modgui_widget_t parse_modgui_widget(const char *uri)
+{
+    if (!uri || !uri[0]) return PM_WIDGET_KNOB;
+    const char *frag = strrchr(uri, '#');
+    if (!frag) frag = strrchr(uri, '/');
+    if (!frag) return PM_WIDGET_KNOB;
+    frag++;
+    if (strcmp(frag, "Knob") == 0) return PM_WIDGET_KNOB;
+    if (strcmp(frag, "Switch") == 0 || strcmp(frag, "Bypass") == 0 ||
+        strcmp(frag, "MomentaryButton") == 0) return PM_WIDGET_SWITCH;
+    if (strcmp(frag, "SelectBox") == 0 || strcmp(frag, "CustomSelect") == 0)
+        return PM_WIDGET_SELECT;
+    return PM_WIDGET_OTHER;
+}
+
 /* ─── Direct TTL name reader (manifest.ttl → rdfs:seeAlso → doap:name) ────────
  * More reliable than lilv_plugin_get_name() which can return the URI or an
  * empty string for plugins whose doap:name lives only in the bundle TTL. */
@@ -433,27 +450,61 @@ static void extract_plugin(const LilvPlugin *plugin, pm_plugin_info_t *pi)
         lilv_node_free(mod_ft);
     }
 
-    /* modgui:thumbnail — path to plugin preview PNG */
+    /* modgui: thumbnail + curated port list */
     {
-        LilvNode *modgui_gui  = lilv_new_uri(g_world, "http://moddevices.com/ns/modgui#gui");
-        LilvNode *modgui_thumb = lilv_new_uri(g_world, "http://moddevices.com/ns/modgui#thumbnail");
-        LilvNodes *guis = lilv_plugin_get_value(plugin, modgui_gui);
+        LilvNode *mg_gui   = lilv_new_uri(g_world, NS_MODGUI "gui");
+        LilvNode *mg_thumb = lilv_new_uri(g_world, NS_MODGUI "thumbnail");
+        LilvNode *mg_port  = lilv_new_uri(g_world, NS_MODGUI "port");
+        LilvNode *mg_wgt   = lilv_new_uri(g_world, NS_MODGUI "widget");
+        LilvNode *lv2_sym  = lilv_new_uri(g_world, NS_LV2 "symbol");
+
+        LilvNodes *guis = lilv_plugin_get_value(plugin, mg_gui);
         if (guis) {
             LILV_FOREACH(nodes, it, guis) {
                 const LilvNode *gui = lilv_nodes_get(guis, it);
-                LilvNode *thumb = lilv_world_get(g_world, gui, modgui_thumb, NULL);
+
+                /* thumbnail */
+                LilvNode *thumb = lilv_world_get(g_world, gui, mg_thumb, NULL);
                 if (thumb) {
-                    const char *uri = lilv_str(thumb);
-                    if (strncmp(uri, "file://", 7) == 0)
-                        snprintf(pi->thumbnail_path, sizeof(pi->thumbnail_path), "%s", uri + 7);
+                    const char *tpath = lilv_str(thumb);
+                    if (strncmp(tpath, "file://", 7) == 0)
+                        snprintf(pi->thumbnail_path, sizeof(pi->thumbnail_path),
+                                 "%s", tpath + 7);
                     lilv_node_free(thumb);
-                    break;
                 }
+
+                /* modgui:port — curated control list */
+                LilvNodes *ports = lilv_world_find_nodes(g_world, gui, mg_port, NULL);
+                if (ports) {
+                    LILV_FOREACH(nodes, pit, ports) {
+                        if (pi->modgui_port_count >= PM_MODGUI_PORT_MAX) break;
+                        const LilvNode *pn  = lilv_nodes_get(ports, pit);
+                        LilvNode *sym_n     = lilv_world_get(g_world, pn, lv2_sym, NULL);
+                        LilvNode *wgt_n     = lilv_world_get(g_world, pn, mg_wgt,  NULL);
+                        const char *sym_str = lilv_str(sym_n);
+                        if (sym_str[0]) {
+                            pm_modgui_port_t *mp =
+                                &pi->modgui_ports[pi->modgui_port_count++];
+                            snprintf(mp->symbol, sizeof(mp->symbol), "%s", sym_str);
+                            mp->widget = parse_modgui_widget(
+                            (wgt_n && lilv_node_is_uri(wgt_n))
+                                ? lilv_node_as_uri(wgt_n) : NULL);
+                        }
+                        if (sym_n) lilv_node_free(sym_n);
+                        if (wgt_n) lilv_node_free(wgt_n);
+                    }
+                    lilv_nodes_free(ports);
+                }
+                break; /* use only the first GUI node */
             }
             lilv_nodes_free(guis);
         }
-        lilv_node_free(modgui_thumb);
-        lilv_node_free(modgui_gui);
+
+        lilv_node_free(mg_gui);
+        lilv_node_free(mg_thumb);
+        lilv_node_free(mg_port);
+        lilv_node_free(mg_wgt);
+        lilv_node_free(lv2_sym);
     }
 
     /* Ports */
@@ -479,7 +530,7 @@ static void extract_plugin(const LilvPlugin *plugin, pm_plugin_info_t *pi)
 /* ─── JSON cache ─────────────────────────────────────────────────────────────── */
 
 /* Bump this when the cache schema changes to force automatic regeneration */
-#define CACHE_VERSION 9
+#define CACHE_VERSION 10
 
 static void save_cache(const char *cache_path)
 {
@@ -545,6 +596,18 @@ static void save_cache(const char *cache_path)
         }
 
         cJSON_AddStringToObject(obj, "thumbnail_path", p->thumbnail_path);
+
+        if (p->modgui_port_count > 0) {
+            cJSON *mgports = cJSON_CreateArray();
+            for (int j = 0; j < p->modgui_port_count; j++) {
+                cJSON *mpo = cJSON_CreateObject();
+                cJSON_AddStringToObject(mpo, "symbol", p->modgui_ports[j].symbol);
+                cJSON_AddNumberToObject(mpo, "widget", (double)p->modgui_ports[j].widget);
+                cJSON_AddItemToArray(mgports, mpo);
+            }
+            cJSON_AddItemToObject(obj, "modgui_ports", mgports);
+        }
+
         cJSON_AddItemToArray(arr, obj);
     }
 
@@ -609,6 +672,21 @@ static bool load_cache(const char *cache_path)
         if (cJSON_IsBool(cvmid)) p->is_midi_plugin  = cJSON_IsTrue(cvmid);
         cJSON *tp = cJSON_GetObjectItem(obj, "thumbnail_path");
         if (cJSON_IsString(tp)) snprintf(p->thumbnail_path, sizeof(p->thumbnail_path), "%s", tp->valuestring);
+
+        cJSON *mgports = cJSON_GetObjectItem(obj, "modgui_ports");
+        if (cJSON_IsArray(mgports)) {
+            int nmp = cJSON_GetArraySize(mgports);
+            for (int j = 0; j < nmp && p->modgui_port_count < PM_MODGUI_PORT_MAX; j++) {
+                cJSON *mpo = cJSON_GetArrayItem(mgports, j);
+                pm_modgui_port_t *mp = &p->modgui_ports[p->modgui_port_count++];
+                cJSON *ms = cJSON_GetObjectItem(mpo, "symbol");
+                cJSON *mw = cJSON_GetObjectItem(mpo, "widget");
+                if (cJSON_IsString(ms))
+                    snprintf(mp->symbol, sizeof(mp->symbol), "%s", ms->valuestring);
+                if (cJSON_IsNumber(mw))
+                    mp->widget = (pm_modgui_widget_t)(int)mw->valuedouble;
+            }
+        }
 
         cJSON *ports = cJSON_GetObjectItem(obj, "ports");
         if (cJSON_IsArray(ports)) {

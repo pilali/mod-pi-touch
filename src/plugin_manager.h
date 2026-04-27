@@ -7,7 +7,21 @@
 #define PM_NAME_MAX   256
 #define PM_CAT_MAX    128
 #define PM_PORT_MAX   64
-#define PM_PATCH_MAX  8   /* max patch:writable parameters per plugin */
+#define PM_PATCH_MAX      8   /* max patch:writable parameters per plugin */
+#define PM_MODGUI_PORT_MAX 16 /* max modgui:port entries per plugin */
+
+/* ─── modgui curated port entry ──────────────────────────────────────────────── */
+typedef enum {
+    PM_WIDGET_KNOB = 0, /* modgui:Knob — rotary control */
+    PM_WIDGET_SWITCH,   /* modgui:Switch / modgui:Bypass / modgui:MomentaryButton */
+    PM_WIDGET_SELECT,   /* modgui:SelectBox / modgui:CustomSelect */
+    PM_WIDGET_OTHER,    /* any other type — render like knob */
+} pm_modgui_widget_t;
+
+typedef struct {
+    char               symbol[PM_NAME_MAX];
+    pm_modgui_widget_t widget;
+} pm_modgui_port_t;
 
 /* ─── Port descriptor (for display purposes) ─────────────────────────────────── */
 typedef enum {
@@ -74,6 +88,10 @@ typedef struct {
     int              patch_param_count;
 
     char thumbnail_path[PM_URI_MAX]; /* absolute fs path to modgui thumbnail PNG, or "" */
+
+    /* modgui curated control list (empty = no modgui.ttl, fall back to all ctrl ports) */
+    pm_modgui_port_t modgui_ports[PM_MODGUI_PORT_MAX];
+    int              modgui_port_count;
 } pm_plugin_info_t;
 
 /* ─── API ─────────────────────────────────────────────────────────────────────── */

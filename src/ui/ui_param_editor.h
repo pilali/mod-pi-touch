@@ -37,7 +37,8 @@ void ui_param_editor_show(int instance_id,
                           patch_change_cb_t patch_cb, void *patch_ud,
                           midi_map_cb_t midi_cb, void *midi_ud,
                           pb_cv_source_t *cv_sources, int cv_source_count,
-                          cv_map_cb_t cv_cb, void *cv_ud);
+                          cv_map_cb_t cv_cb, void *cv_ud,
+                          bypass_toggle_cb_t remove_cb, void *remove_ud);
 
 void ui_param_editor_close(void);
 

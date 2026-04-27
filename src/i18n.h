@@ -87,10 +87,11 @@ typedef enum {
     TR_SNAP_DELETE_BTN,
     TR_SNAP_DELETE_TITLE,
 
-    /* Plugin block context menu */
+    /* Plugin block / param editor */
     TR_PLUG_BYPASS,
     TR_PLUG_ENABLE,
     TR_PLUG_REMOVE,
+    TR_PLUG_REMOVE_CONFIRM,
 
     /* Param editor */
     TR_PARAM_BYPASS_LABEL,

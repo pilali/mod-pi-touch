@@ -75,6 +75,7 @@ static const char * const g_en[TR_COUNT] = {
     /* TR_PLUG_BYPASS */           "Bypass",
     /* TR_PLUG_ENABLE */           "Enable",
     /* TR_PLUG_REMOVE */           "Remove",
+    /* TR_PLUG_REMOVE_CONFIRM */   "Remove this plugin?",
 
     /* TR_PARAM_BYPASS_LABEL */    "bypass",
     /* TR_PARAM_ENABLED */         "Enabled",
@@ -287,6 +288,7 @@ static const char * const g_fr[TR_COUNT] = {
     /* TR_PLUG_BYPASS */           "Bypass",
     /* TR_PLUG_ENABLE */           "Activer",
     /* TR_PLUG_REMOVE */           "Supprimer",
+    /* TR_PLUG_REMOVE_CONFIRM */   "Supprimer ce plugin\xc2\xa0?",
 
     /* TR_PARAM_BYPASS_LABEL */    "bypass",
     /* TR_PARAM_ENABLED */         "Activ\xc3\xa9",

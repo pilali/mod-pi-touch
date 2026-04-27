@@ -76,10 +76,7 @@ typedef struct {
 } io_port_desc_t;
 
 /* Layout constants — also used by connection drawing code */
-#define LAYOUT_BLOCK_W  160
-#define LAYOUT_BLOCK_H  160
-#define LAYOUT_H_GAP     80
-#define LAYOUT_V_GAP     40
+/* LAYOUT_BLOCK_W/H, LAYOUT_H_GAP, LAYOUT_V_GAP are in ui_pedalboard.h */
 #define LAYOUT_STEP_X   (LAYOUT_BLOCK_W + LAYOUT_H_GAP)
 #define LAYOUT_STEP_Y   (LAYOUT_BLOCK_H + LAYOUT_V_GAP)
 #define LAYOUT_MAX_COLS  32
@@ -182,6 +179,12 @@ static int         g_canvas_h_c           = UI_CANVAS_H;
 static int         g_band_y_c[PLUG_BAND_COUNT] = {0, 0, 0};
 static plug_band_t g_plug_band[PB_MAX_PLUGINS];
 
+/* Per-plugin actual block widths (set before layout, used by drawing code) */
+static int         g_block_w[PB_MAX_PLUGINS];
+
+/* Per-plugin LVGL block objects (NULL when canvas is not built) */
+static lv_obj_t   *g_block_obj[PB_MAX_PLUGINS];
+
 /* Choose-input popup state */
 static conn_port_info_t s_choose_ports[CONN_PORT_MAX];
 static int              s_choose_count = 0;
@@ -213,7 +216,7 @@ static void elem_right_center(int idx, lv_coord_t *cx, lv_coord_t *cy)
         *cx = (lv_coord_t)(IO_LINE_X + IO_LINE_W);
         *cy = (lv_coord_t)(g_canvas_h_c / 2);
     } else if (idx >= 0 && idx < g_pedalboard.plugin_count) {
-        *cx = g_layout_x[idx] + LAYOUT_BLOCK_W;
+        *cx = g_layout_x[idx] + g_block_w[idx];
         *cy = g_layout_y[idx] + LAYOUT_BLOCK_H / 2;
     } else { *cx = 0; *cy = 0; }
 }
@@ -1139,14 +1142,14 @@ static void redraw_connections(void)
             y1 = sysport_y(fsys, true);
         } else {
             int n = src_cnt[si]; int k = src_ki[c];
-            y1 = (lv_coord_t)(g_layout_y[si] + LAYOUT_BLOCK_H / 2.0f
+            y1 = (lv_coord_t)(g_layout_y[si] + LAYOUT_BLOCK_H / 2
                               + (k - (n - 1) / 2.0f) * CONN_SPREAD_PX);
         }
         if (di == -2 && tsys) {
             y2 = sysport_y(tsys, false);
         } else {
             int n = dst_cnt[di]; int k = dst_ki[c];
-            y2 = (lv_coord_t)(g_layout_y[di] + LAYOUT_BLOCK_H / 2.0f
+            y2 = (lv_coord_t)(g_layout_y[di] + LAYOUT_BLOCK_H / 2
                               + (k - (n - 1) / 2.0f) * CONN_SPREAD_PX);
         }
 
@@ -1276,7 +1279,7 @@ static void draw_conn_squares(void)
 
     /* One square per plugin, centered in the horizontal gap to the right */
     for (int i = 0; i < g_pedalboard.plugin_count; i++) {
-        lv_coord_t sx = g_layout_x[i] + LAYOUT_BLOCK_W + LAYOUT_H_GAP / 2 - CONN_SQ_SIZE / 2;
+        lv_coord_t sx = g_layout_x[i] + g_block_w[i] + LAYOUT_H_GAP / 2 - CONN_SQ_SIZE / 2;
         lv_coord_t sy = g_layout_y[i] + LAYOUT_BLOCK_H / 2 - CONN_SQ_SIZE / 2;
 
         lv_obj_t *sq = lv_obj_create(g_canvas_scroll);
@@ -1311,7 +1314,10 @@ bool ui_pedalboard_intercept_plugin_click(int instance_id)
 
 /* ─── Block event handlers ───────────────────────────────────────────────────── */
 
-static void on_block_bypass(void *userdata);   /* forward declaration */
+static void on_block_bypass(void *userdata);                                    /* forward */
+static void on_block_remove(void *userdata);                                    /* forward */
+static void on_block_param(void *userdata, const char *symbol, float value);    /* forward */
+static void on_block_param_changed(int, const char *, float, void *);           /* forward */
 static void pb_load_ui_refresh(void *arg);     /* forward declaration */
 static void pb_snapshot_ui_refresh(void *arg); /* forward declaration */
 static void pb_apply_midi_mapped(int instance_id, const char *symbol,
@@ -1456,11 +1462,12 @@ static void on_block_tap(void *userdata)
                          plug->patch_params, plug->patch_param_count,
                          plug->enabled,
                          on_block_bypass, (void *)(intptr_t)instance_id,
-                         NULL, NULL,
+                         on_block_param_changed, NULL,
                          on_patch_changed, NULL,
                          on_midi_mapped, NULL,
                          g_cv_sources, g_cv_source_count,
-                         on_cv_mapped, NULL);
+                         on_cv_mapped, NULL,
+                         on_block_remove, (void *)(intptr_t)instance_id);
 }
 
 static void on_block_bypass(void *userdata)
@@ -1483,6 +1490,49 @@ static void on_block_remove(void *userdata)
     g_pedalboard.modified = true;
     ui_app_update_title(g_pedalboard.name, true);
     ui_pedalboard_refresh();
+}
+
+/* Called by block widget cells when a param is changed directly (arc drag, toggle tap, enum cycle).
+ * Sends to host AND updates the pedalboard model so the editor shows the correct value on open. */
+static void on_block_param(void *userdata, const char *symbol, float value)
+{
+    int instance_id = (int)(intptr_t)userdata;
+    host_param_set(instance_id, symbol, value);
+    pb_plugin_t *plug = pb_find_plugin(&g_pedalboard, instance_id);
+    if (!plug) return;
+    for (int i = 0; i < plug->port_count; i++) {
+        if (strcmp(plug->ports[i].symbol, symbol) == 0) {
+            plug->ports[i].value = value;
+            break;
+        }
+    }
+    g_pedalboard.modified = true;
+    ui_app_update_title(g_pedalboard.name, true);
+}
+
+/* Called by the param editor when a value changes (editor already sent to host).
+ * Updates the pedalboard model and the corresponding block widget. */
+static void on_block_param_changed(int instance_id, const char *symbol,
+                                   float value, void *userdata)
+{
+    (void)userdata;
+    pb_plugin_t *plug = pb_find_plugin(&g_pedalboard, instance_id);
+    if (!plug) return;
+    for (int i = 0; i < plug->port_count; i++) {
+        if (strcmp(plug->ports[i].symbol, symbol) == 0) {
+            plug->ports[i].value = value;
+            break;
+        }
+    }
+    /* Refresh the block widget so it reflects the new value immediately. */
+    for (int i = 0; i < g_pedalboard.plugin_count; i++) {
+        if (g_pedalboard.plugins[i].instance_id == instance_id && g_block_obj[i]) {
+            ui_plugin_block_set_param(g_block_obj[i], symbol, value);
+            break;
+        }
+    }
+    g_pedalboard.modified = true;
+    ui_app_update_title(g_pedalboard.name, true);
 }
 
 /* ─── Automatic graph layout ─────────────────────────────────────────────────
@@ -1853,6 +1903,7 @@ void ui_pedalboard_refresh(void)
     /* Remove all block children, redraw */
     lv_obj_clean(g_canvas_scroll);
     g_canvas = NULL; /* canvas removed — scroll events must reach g_canvas_scroll */
+    memset(g_block_obj, 0, sizeof(g_block_obj));
 
     /* Close any open connection panel before rebuilding the canvas */
     conn_panel_close();
@@ -1863,17 +1914,82 @@ void ui_pedalboard_refresh(void)
 
     g_left_offset_c = (g_n_in_c > 0) ? IO_COL_W : 16;
 
-    /* ── Classify plugins into bands and compute layout ── */
+    /* ── Classify plugins into bands, compute block widths, layout ── */
     memset(g_layout_x, 0, sizeof(g_layout_x));
     memset(g_layout_y, 0, sizeof(g_layout_y));
-    for (int i = 0; i < g_pedalboard.plugin_count; i++)
+    for (int i = 0; i < g_pedalboard.plugin_count; i++) {
         g_plug_band[i] = classify_plugin(&g_pedalboard.plugins[i]);
+        g_block_w[i]   = ui_plugin_block_width(&g_pedalboard.plugins[i]);
+    }
     g_canvas_h_c = compute_layout(&g_pedalboard, g_plug_band, g_layout_x, g_layout_y);
+
+    /* ── Post-process: redistribute column X positions using actual block widths.
+     * compute_layout outputs col * LAYOUT_STEP_X + 20.  We extract the column
+     * index and recompute absolute X so that wide blocks don't overlap their
+     * right-hand neighbour. ── */
+    {
+        int max_c = 0;
+        int col_of[PB_MAX_PLUGINS];
+        for (int i = 0; i < g_pedalboard.plugin_count; i++) {
+            col_of[i] = (int)(g_layout_x[i] - 20) / LAYOUT_STEP_X;
+            if (col_of[i] > max_c) max_c = col_of[i];
+        }
+
+        int col_max_w[LAYOUT_MAX_COLS + 1];
+        memset(col_max_w, 0, sizeof(col_max_w));
+        for (int i = 0; i < g_pedalboard.plugin_count; i++) {
+            int c = col_of[i];
+            if (c <= max_c && g_block_w[i] > col_max_w[c])
+                col_max_w[c] = g_block_w[i];
+        }
+
+        int col_x[LAYOUT_MAX_COLS + 1];
+        col_x[0] = 20;
+        for (int c = 1; c <= max_c; c++) {
+            int prev_w = col_max_w[c - 1] > 0 ? col_max_w[c - 1] : LAYOUT_BLOCK_W;
+            col_x[c] = col_x[c - 1] + prev_w + LAYOUT_H_GAP;
+        }
+
+        for (int i = 0; i < g_pedalboard.plugin_count; i++)
+            g_layout_x[i] = (lv_coord_t)col_x[col_of[i]];
+
+        /* ── Sub-grid: pair 1X blocks side-by-side within 2X columns ──────────
+         * When a column's widest block is 2X, 1X blocks in that column are
+         * paired horizontally: even index → sub-col 0, odd index → sub-col 1.
+         * Both blocks in a pair share the same Y so they appear on the same row.
+         * Sub-col 0 = col_x[c], sub-col 1 = col_x[c] + LAYOUT_BLOCK_W + LAYOUT_H_GAP
+         * (the two halves exactly fill the 2X footprint). */
+        for (int c = 0; c <= max_c; c++) {
+            if (col_max_w[c] <= LAYOUT_BLOCK_W) continue; /* only 2X columns */
+
+            /* Collect 1X plugin indices in this column */
+            int idx1x[PB_MAX_PLUGINS], n1x = 0;
+            for (int i = 0; i < g_pedalboard.plugin_count; i++) {
+                if (col_of[i] == c && g_block_w[i] == LAYOUT_BLOCK_W)
+                    idx1x[n1x++] = i;
+            }
+            if (n1x < 2) continue;
+
+            /* Insertion sort by Y ascending */
+            for (int a = 1; a < n1x; a++) {
+                int tmp = idx1x[a]; int b = a - 1;
+                while (b >= 0 && g_layout_y[idx1x[b]] > g_layout_y[tmp])
+                    { idx1x[b + 1] = idx1x[b]; b--; }
+                idx1x[b + 1] = tmp;
+            }
+
+            /* Pair: even → sub-col 0 (unchanged), odd → sub-col 1, same Y as partner */
+            for (int j = 1; j < n1x; j += 2) {
+                g_layout_x[idx1x[j]] = (lv_coord_t)(col_x[c] + LAYOUT_BLOCK_W + LAYOUT_H_GAP);
+                g_layout_y[idx1x[j]] = g_layout_y[idx1x[j - 1]];
+            }
+        }
+    }
 
     lv_coord_t max_right = 0;
     for (int i = 0; i < g_pedalboard.plugin_count; i++) {
         g_layout_x[i] += (lv_coord_t)g_left_offset_c;
-        lv_coord_t right = g_layout_x[i] + LAYOUT_BLOCK_W;
+        lv_coord_t right = g_layout_x[i] + (lv_coord_t)g_block_w[i];
         if (right > max_right) max_right = right;
     }
 
@@ -1908,9 +2024,10 @@ void ui_pedalboard_refresh(void)
         pb_plugin_t *plug = &g_pedalboard.plugins[i];
         lv_obj_t *block = ui_plugin_block_create(
             g_canvas_scroll, plug,
-            on_block_tap, on_block_bypass, on_block_remove,
+            on_block_tap, on_block_bypass, on_block_remove, on_block_param,
             (void *)(intptr_t)plug->instance_id);
         lv_obj_set_pos(block, g_layout_x[i], g_layout_y[i]);
+        g_block_obj[i] = block;
     }
 
     /* ── Draw right I/O column (outputs) ── */
@@ -2282,13 +2399,19 @@ void ui_pedalboard_apply_snapshot(int idx)
     /* Update in-memory state after all commands are sent. */
     pb_snapshot_load(&g_pedalboard, idx);
 
-    /* Marshal LVGL call to main thread (may be called from background thread). */
-    lv_async_call(pb_snapshot_ui_refresh, NULL);
-}
-
-static void pb_snapshot_ui_refresh(void *arg)
-{
-    (void)arg;
+    /* Synchronously update block widgets — snapshots never change topology
+     * (no plugin add/remove, no connection changes), so a full canvas rebuild
+     * is unnecessary.  Direct style updates are cheaper and reliable from
+     * within a LVGL event callback (no lv_async_call timing issues). */
+    for (int i = 0; i < g_pedalboard.plugin_count; i++) {
+        if (!g_block_obj[i]) continue;
+        pb_plugin_t *plug = &g_pedalboard.plugins[i];
+        ui_plugin_block_set_bypassed(g_block_obj[i], !plug->enabled);
+        for (int j = 0; j < plug->port_count; j++)
+            ui_plugin_block_set_param(g_block_obj[i],
+                                      plug->ports[j].symbol,
+                                      plug->ports[j].value);
+    }
     ui_snapshot_bar_refresh();
     last_state_save();
 }

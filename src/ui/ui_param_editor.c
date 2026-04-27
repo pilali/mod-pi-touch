@@ -161,6 +161,10 @@ static cv_map_cb_t         g_cv_cb      = NULL;
 static void               *g_cv_ud      = NULL;
 static pb_cv_source_t     *g_cv_sources = NULL;
 static int                 g_cv_source_count = 0;
+static bypass_toggle_cb_t  g_remove_cb  = NULL;
+static void               *g_remove_ud  = NULL;
+
+static lv_obj_t           *g_confirm_overlay = NULL;
 
 /* Bypass MIDI state */
 static lv_obj_t           *g_bypass_midi_lbl = NULL;
@@ -881,6 +885,114 @@ static void on_browse_btn(lv_event_t *e)
                          on_file_selected, reg);
 }
 
+/* ─── Delete with confirmation ───────────────────────────────────────────────── */
+
+static void remove_cancel_cb(lv_event_t *e)
+{
+    (void)e;
+    if (g_confirm_overlay) {
+        lv_obj_delete_async(g_confirm_overlay);
+        g_confirm_overlay = NULL;
+    }
+}
+
+static void remove_confirmed_cb(lv_event_t *e)
+{
+    (void)e;
+    bypass_toggle_cb_t cb = g_remove_cb;
+    void              *ud = g_remove_ud;
+
+    if (g_confirm_overlay) {
+        lv_obj_delete_async(g_confirm_overlay);
+        g_confirm_overlay = NULL;
+    }
+    /* Close param editor using async pattern (called from inside lv_layer_top child) */
+    if (g_modal) {
+        if (g_meter_timer) { lv_timer_pause(g_meter_timer); }
+        if (g_cv_picker.popup) { lv_obj_del(g_cv_picker.popup); g_cv_picker.popup = NULL; }
+        if (g_tempo_picker.popup) { lv_obj_del(g_tempo_picker.popup); g_tempo_picker.popup = NULL; }
+        lv_obj_delete_async(g_modal);
+        g_modal               = NULL;
+        g_instance            = -1;
+        atomic_store(&g_active_instance, -1);
+        g_ctrl_count          = 0;
+        g_patch_param_count   = 0;
+        g_midi_chip_ud_count  = 0;
+        g_cv_chip_ud_count       = 0;
+        g_cv_out_toggle_ud_count = 0;
+        g_tempo_chip_ud_count    = 0;
+        g_bypass_midi_lbl        = NULL;
+        g_learning_symbol[0]     = '\0';
+        g_cv_sources             = NULL;
+        g_cv_source_count        = 0;
+    }
+    if (cb) cb(ud);
+}
+
+static void delete_btn_cb(lv_event_t *e)
+{
+    (void)e;
+    if (!g_remove_cb) return;
+
+    g_confirm_overlay = lv_obj_create(lv_layer_top());
+    lv_obj_set_size(g_confirm_overlay, LV_PCT(100), LV_PCT(100));
+    lv_obj_set_style_bg_color(g_confirm_overlay, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(g_confirm_overlay, LV_OPA_50, 0);
+    lv_obj_set_style_border_width(g_confirm_overlay, 0, 0);
+    lv_obj_set_style_pad_all(g_confirm_overlay, 0, 0);
+    lv_obj_set_style_radius(g_confirm_overlay, 0, 0);
+    lv_obj_clear_flag(g_confirm_overlay, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *box = lv_obj_create(g_confirm_overlay);
+    lv_obj_set_size(box, 380, 140);
+    lv_obj_center(box);
+    lv_obj_set_style_bg_color(box, UI_COLOR_SURFACE, 0);
+    lv_obj_set_style_border_color(box, UI_COLOR_DANGER, 0);
+    lv_obj_set_style_border_width(box, 2, 0);
+    lv_obj_set_style_radius(box, 10, 0);
+    lv_obj_set_style_pad_all(box, 16, 0);
+    lv_obj_set_flex_flow(box, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(box, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_row(box, 16, 0);
+    lv_obj_clear_flag(box, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *msg = lv_label_create(box);
+    lv_label_set_text(msg, TR(TR_PLUG_REMOVE_CONFIRM));
+    lv_obj_set_style_text_color(msg, UI_COLOR_TEXT, 0);
+    lv_obj_set_style_text_font(msg, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_align(msg, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_width(msg, LV_PCT(100));
+
+    lv_obj_t *btn_row = lv_obj_create(box);
+    lv_obj_set_size(btn_row, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(btn_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(btn_row, LV_FLEX_ALIGN_SPACE_BETWEEN,
+                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_bg_opa(btn_row, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(btn_row, 0, 0);
+    lv_obj_set_style_pad_all(btn_row, 0, 0);
+    lv_obj_clear_flag(btn_row, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *btn_cancel = lv_btn_create(btn_row);
+    lv_obj_set_size(btn_cancel, 150, 44);
+    lv_obj_set_style_bg_color(btn_cancel, UI_COLOR_BYPASS, 0);
+    lv_obj_add_event_cb(btn_cancel, remove_cancel_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *lbl_cancel = lv_label_create(btn_cancel);
+    lv_label_set_text(lbl_cancel, TR(TR_CANCEL));
+    lv_obj_center(lbl_cancel);
+    lv_obj_set_style_text_font(lbl_cancel, &lv_font_montserrat_14, 0);
+
+    lv_obj_t *btn_confirm = lv_btn_create(btn_row);
+    lv_obj_set_size(btn_confirm, 150, 44);
+    lv_obj_set_style_bg_color(btn_confirm, UI_COLOR_DANGER, 0);
+    lv_obj_add_event_cb(btn_confirm, remove_confirmed_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *lbl_confirm = lv_label_create(btn_confirm);
+    lv_label_set_text(lbl_confirm, TR(TR_PLUG_REMOVE));
+    lv_obj_center(lbl_confirm);
+    lv_obj_set_style_text_font(lbl_confirm, &lv_font_montserrat_14, 0);
+}
+
 /* ─── Close ──────────────────────────────────────────────────────────────────── */
 
 static void close_cb(lv_event_t *e)
@@ -988,7 +1100,8 @@ void ui_param_editor_show(int instance_id,
                           patch_change_cb_t patch_cb, void *patch_ud,
                           midi_map_cb_t midi_cb, void *midi_ud,
                           pb_cv_source_t *cv_sources, int cv_source_count,
-                          cv_map_cb_t cv_cb, void *cv_ud)
+                          cv_map_cb_t cv_cb, void *cv_ud,
+                          bypass_toggle_cb_t remove_cb, void *remove_ud)
 {
     if (g_modal) ui_param_editor_close();
 
@@ -1008,6 +1121,9 @@ void ui_param_editor_show(int instance_id,
     g_cv_ud             = cv_ud;
     g_cv_sources        = cv_sources;
     g_cv_source_count   = cv_source_count;
+    g_remove_cb         = remove_cb;
+    g_remove_ud         = remove_ud;
+    g_confirm_overlay   = NULL;
     g_ctrl_count        = 0;
     g_patch_param_count = 0;
     g_midi_chip_ud_count = 0;
@@ -1097,6 +1213,32 @@ void ui_param_editor_show(int instance_id,
     lv_obj_set_style_pad_row(scroll, 12, 0);
     lv_obj_set_style_pad_column(scroll, 12, 0);
     lv_obj_add_flag(scroll, LV_OBJ_FLAG_SCROLLABLE);
+
+    /* ── Footer: Delete button (only if remove callback provided) ── */
+    if (remove_cb) {
+        lv_obj_t *footer = lv_obj_create(panel);
+        lv_obj_set_size(footer, LV_PCT(100), 52);
+        lv_obj_set_flex_flow(footer, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(footer, LV_FLEX_ALIGN_END,
+                              LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+        lv_obj_set_style_bg_opa(footer, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_side(footer, LV_BORDER_SIDE_TOP, 0);
+        lv_obj_set_style_border_width(footer, 1, 0);
+        lv_obj_set_style_border_color(footer, UI_COLOR_BYPASS, 0);
+        lv_obj_set_style_pad_all(footer, 0, 0);
+        lv_obj_set_style_pad_top(footer, 8, 0);
+        lv_obj_clear_flag(footer, LV_OBJ_FLAG_SCROLLABLE);
+
+        lv_obj_t *btn_del = lv_btn_create(footer);
+        lv_obj_set_size(btn_del, 160, 36);
+        lv_obj_set_style_bg_color(btn_del, UI_COLOR_DANGER, 0);
+        lv_obj_set_style_radius(btn_del, 6, 0);
+        lv_obj_add_event_cb(btn_del, delete_btn_cb, LV_EVENT_CLICKED, NULL);
+        lv_obj_t *lbl_del = lv_label_create(btn_del);
+        lv_label_set_text(lbl_del, TR(TR_PLUG_REMOVE));
+        lv_obj_center(lbl_del);
+        lv_obj_set_style_text_font(lbl_del, &lv_font_montserrat_14, 0);
+    }
 
     /* ── Bypass toggle — always first ── */
     {
@@ -1526,6 +1668,7 @@ void ui_param_editor_close(void)
         if (g_meter_timer) { lv_timer_pause(g_meter_timer); }
         if (g_cv_picker.popup) { lv_obj_del(g_cv_picker.popup); g_cv_picker.popup = NULL; }
         if (g_tempo_picker.popup) { lv_obj_del(g_tempo_picker.popup); g_tempo_picker.popup = NULL; }
+        if (g_confirm_overlay) { lv_obj_del(g_confirm_overlay); g_confirm_overlay = NULL; }
         lv_obj_del(g_modal);
         g_modal               = NULL;
         g_instance            = -1;
