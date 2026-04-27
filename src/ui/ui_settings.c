@@ -39,6 +39,10 @@ static volatile bool       g_wifi_bg_done  = false; /* set by bg thread, cleared
 static wifi_network_t      g_wifi_nets[WIFI_MAX_NETWORKS];
 static int                 g_wifi_net_count = 0;
 
+/* Cached wifi status — written by background thread, read on LVGL thread */
+static char g_wifi_cached_ssid[WIFI_MAX_SSID_LEN] = "";
+static char g_wifi_cached_ip[32]                  = "";
+
 static lv_obj_t *g_wifi_ssid_lbl    = NULL;
 static lv_obj_t *g_wifi_ip_lbl      = NULL;
 static lv_obj_t *g_wifi_scan_btn    = NULL;
@@ -426,6 +430,8 @@ static void wifi_update_pw_visibility(void)
         lv_obj_add_flag(g_wifi_pw_row, LV_OBJ_FLAG_HIDDEN);
 }
 
+static void wifi_status_async(void *ud); /* forward declaration */
+
 /* Poll timer — checks whether the background WiFi operation has completed. */
 static void wifi_poll_cb(lv_timer_t *tmr)
 {
@@ -450,14 +456,8 @@ static void wifi_poll_cb(lv_timer_t *tmr)
 
     case WIFI_OP_CONNECT:
         if (g_wifi_result == 0) {
-            char ssid[WIFI_MAX_SSID_LEN] = "";
-            char ip[32] = "";
-            wifi_get_status(ssid, sizeof(ssid), ip, sizeof(ip));
-            if (g_wifi_ssid_lbl)
-                lv_label_set_text(g_wifi_ssid_lbl,
-                                  ssid[0] ? ssid : TR(TR_SETTINGS_WIFI_NO_CONNECTION));
-            if (g_wifi_ip_lbl)
-                lv_label_set_text(g_wifi_ip_lbl, ip[0] ? ip : "--");
+            /* Cache already filled by wifi_connect_thread — just update labels */
+            wifi_status_async(NULL);
             ui_app_show_toast(TR(TR_SETTINGS_WIFI_CONNECTED_OK));
         } else {
             ui_app_show_toast(TR(TR_SETTINGS_WIFI_CONNECT_FAIL));
@@ -480,6 +480,28 @@ static void wifi_poll_cb(lv_timer_t *tmr)
     default:
         break;
     }
+}
+
+/* Called on LVGL thread via lv_async_call — updates wifi status labels from cache. */
+static void wifi_status_async(void *ud)
+{
+    (void)ud;
+    if (g_wifi_ssid_lbl)
+        lv_label_set_text(g_wifi_ssid_lbl,
+                          g_wifi_cached_ssid[0] ? g_wifi_cached_ssid
+                                                : TR(TR_SETTINGS_WIFI_NO_CONNECTION));
+    if (g_wifi_ip_lbl)
+        lv_label_set_text(g_wifi_ip_lbl, g_wifi_cached_ip[0] ? g_wifi_cached_ip : "--");
+}
+
+/* Background thread: fetch wifi status without blocking the LVGL thread. */
+static void *wifi_status_fetch_thread(void *arg)
+{
+    (void)arg;
+    wifi_get_status(g_wifi_cached_ssid, sizeof(g_wifi_cached_ssid),
+                    g_wifi_cached_ip,   sizeof(g_wifi_cached_ip));
+    lv_async_call(wifi_status_async, NULL);
+    return NULL;
 }
 
 static void *wifi_scan_thread(void *arg)
@@ -522,6 +544,9 @@ static void *wifi_connect_thread(void *arg)
     const char *pw = g_wifi_connect_args.password[0]
                      ? g_wifi_connect_args.password : NULL;
     g_wifi_result  = wifi_connect(g_wifi_connect_args.ssid, pw);
+    if (g_wifi_result == 0)
+        wifi_get_status(g_wifi_cached_ssid, sizeof(g_wifi_cached_ssid),
+                        g_wifi_cached_ip,   sizeof(g_wifi_cached_ip));
     g_wifi_bg_done = true;
     return NULL;
 }
@@ -892,19 +917,22 @@ static void wifi_hotspot_pw_save_cb(lv_event_t *e)
 static void build_wifi_section(lv_obj_t *parent)
 {
     /* ── Current network status ── */
-    char ssid[WIFI_MAX_SSID_LEN] = "";
-    char ip[32] = "";
-    wifi_get_status(ssid, sizeof(ssid), ip, sizeof(ip));
-
-    /* SSID row */
+    /* Show cached values immediately; background thread fetches fresh status
+     * via wifi_status_fetch_thread to avoid blocking the LVGL thread. */
     g_wifi_ssid_lbl = add_info_row(parent,
                                    TR(TR_SETTINGS_WIFI_CURRENT),
-                                   ssid[0] ? ssid : TR(TR_SETTINGS_WIFI_NO_CONNECTION));
+                                   g_wifi_cached_ssid[0] ? g_wifi_cached_ssid
+                                                         : TR(TR_SETTINGS_WIFI_NO_CONNECTION));
 
     /* IP row */
     g_wifi_ip_lbl = add_info_row(parent,
                                  TR(TR_SETTINGS_WIFI_IP),
-                                 ip[0] ? ip : "--");
+                                 g_wifi_cached_ip[0] ? g_wifi_cached_ip : "--");
+
+    /* Spawn background fetch — updates labels via lv_async_call when done */
+    pthread_t tid;
+    pthread_create(&tid, NULL, wifi_status_fetch_thread, NULL);
+    pthread_detach(tid);
 
     /* ── Scan button ── */
     lv_obj_t *scan_row = make_row(parent);
