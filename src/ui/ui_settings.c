@@ -770,6 +770,10 @@ static void *activate_modui_thread(void *arg)
     system("sudo systemctl start mod-ui");
     host_comm_disconnect();
     settings_get()->mod_ui_active = true;
+    /* Fetch IP here (background thread) — avoids blocking popen on LVGL thread */
+    char ip[64] = "", ssid[64] = "";
+    wifi_get_status(ssid, sizeof(ssid), ip, sizeof(ip));
+    ui_pedalboard_set_modui_ip(ip);
     lv_async_call(modui_show_pedalboard_async, NULL);
     return NULL;
 }

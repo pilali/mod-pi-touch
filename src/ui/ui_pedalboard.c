@@ -26,6 +26,7 @@
 /* ─── Global pedalboard state ────────────────────────────────────────────────── */
 static pedalboard_t     g_pedalboard;
 static bool             g_pb_loaded = false;
+static char             g_modui_ip[64] = ""; /* cached by background thread before placeholder is shown */
 /* Protects g_pedalboard from concurrent access by the feedback thread
  * (which calls ui_pedalboard_update_param) and the main LVGL thread. */
 static pthread_mutex_t  g_pb_mutex  = PTHREAD_MUTEX_INITIALIZER;
@@ -2140,24 +2141,27 @@ static void modui_disable_async(void *ud)
 static void *modui_disable_thread(void *arg)
 {
     (void)arg;
-    system("sudo systemctl stop mod-ui");
-
-    /* Give mod-host time to release the TCP connection held by mod-ui. */
+    fprintf(stderr, "[modui_disable] stopping mod-ui service...\n");
+    int rc = system("sudo systemctl stop mod-ui");
+    fprintf(stderr, "[modui_disable] systemctl stop returned %d — sleeping 3s\n", rc);
     sleep(3);
 
     mpt_settings_t *s = settings_get();
     s->mod_ui_active = false;
     settings_save_prefs(s);
 
+    fprintf(stderr, "[modui_disable] reconnecting to mod-host...\n");
     if (host_comm_reconnect() != 0) {
-        fprintf(stderr, "[pedalboard] disable mod-ui: mod-host reconnect timed out\n");
+        fprintf(stderr, "[modui_disable] mod-host reconnect timed out\n");
         lv_async_call(modui_disable_async, NULL);
         return NULL;
     }
+    fprintf(stderr, "[modui_disable] connected — init pre-fx\n");
 
     pre_fx_init();
     pre_fx_reload();
 
+    fprintf(stderr, "[modui_disable] done — switching to pedalboard screen\n");
     lv_async_call(modui_disable_async, NULL);
     return NULL;
 }
@@ -2168,6 +2172,11 @@ static void modui_disable_cb(lv_event_t *e)
     pthread_t tid;
     pthread_create(&tid, NULL, modui_disable_thread, NULL);
     pthread_detach(tid);
+}
+
+void ui_pedalboard_set_modui_ip(const char *ip)
+{
+    snprintf(g_modui_ip, sizeof(g_modui_ip), "%s", ip ? ip : "");
 }
 
 static void build_modui_placeholder(lv_obj_t *parent)
@@ -2199,14 +2208,12 @@ static void build_modui_placeholder(lv_obj_t *parent)
     lv_obj_set_width(body, 600);
     lv_obj_set_style_text_align(body, LV_TEXT_ALIGN_CENTER, 0);
 
-    /* IP URL */
-    char ip[32] = "";
-    char ssid[64] = "";
-    wifi_get_status(ssid, sizeof(ssid), ip, sizeof(ip));
+    /* IP URL — g_modui_ip was fetched by the background thread to avoid
+     * blocking popen(nmcli) on the LVGL main thread. */
     lv_obj_t *url_lbl = lv_label_create(box);
-    if (ip[0]) {
+    if (g_modui_ip[0]) {
         lv_label_set_text_fmt(url_lbl,
-            "http://%s/\n" LV_SYMBOL_FILE "  http://%s:8081/", ip, ip);
+            "http://%s/\n" LV_SYMBOL_FILE "  http://%s:8081/", g_modui_ip, g_modui_ip);
     } else {
         lv_label_set_text(url_lbl, "http://<IP>/\n" LV_SYMBOL_FILE "  http://<IP>:8081/");
     }
