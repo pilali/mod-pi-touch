@@ -780,8 +780,24 @@ static void *deactivate_modui_thread(void *arg)
 {
     (void)arg;
     system("sudo systemctl stop mod-ui");
-    settings_get()->mod_ui_active = false;
-    host_comm_reconnect();
+
+    /* mod-ui holds a TCP connection to mod-host; give it a moment to close
+     * so mod-host is ready to accept our connection. */
+    sleep(3);
+
+    mpt_settings_t *s = settings_get();
+    s->mod_ui_active = false;
+    settings_save_prefs(s);
+
+    if (host_comm_reconnect() != 0) {
+        fprintf(stderr, "[settings] deactivate mod-ui: mod-host reconnect timed out\n");
+        lv_async_call(modui_show_pedalboard_async, NULL);
+        return NULL;
+    }
+
+    pre_fx_init();
+    pre_fx_reload();
+
     lv_async_call(modui_show_pedalboard_async, NULL);
     return NULL;
 }
