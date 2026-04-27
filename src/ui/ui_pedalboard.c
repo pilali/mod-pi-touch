@@ -1319,7 +1319,6 @@ static void on_block_remove(void *userdata);                                    
 static void on_block_param(void *userdata, const char *symbol, float value);    /* forward */
 static void on_block_param_changed(int, const char *, float, void *);           /* forward */
 static void pb_load_ui_refresh(void *arg);     /* forward declaration */
-static void pb_snapshot_ui_refresh(void *arg); /* forward declaration */
 static void pb_apply_midi_mapped(int instance_id, const char *symbol,
                                  int ch, int cc, float min, float max); /* fwd */
 
@@ -1943,26 +1942,48 @@ void ui_pedalboard_refresh(void)
                 col_max_w[c] = g_block_w[i];
         }
 
-        int col_x[LAYOUT_MAX_COLS + 1];
-        col_x[0] = 20;
+        /* Compute column X positions.
+         * col_eff_w[c]: effective width used to space the next column.
+         * When a column is a "sub-grid" (folded under a previous 2X block),
+         * it inherits the 2X width so subsequent columns clear the full footprint. */
+        int  col_x[LAYOUT_MAX_COLS + 1];
+        bool col_is_subgrid[LAYOUT_MAX_COLS + 1];
+        int  col_eff_w[LAYOUT_MAX_COLS + 1];
+        memset(col_is_subgrid, 0, sizeof(col_is_subgrid));
+        col_x[0]     = 20;
+        col_eff_w[0] = col_max_w[0] > 0 ? col_max_w[0] : LAYOUT_BLOCK_W;
+
         for (int c = 1; c <= max_c; c++) {
-            int prev_w = col_max_w[c - 1] > 0 ? col_max_w[c - 1] : LAYOUT_BLOCK_W;
-            col_x[c] = col_x[c - 1] + prev_w + LAYOUT_H_GAP;
+            bool prev_2x       = col_eff_w[c - 1] > LAYOUT_BLOCK_W;
+            bool prev_subgrid  = col_is_subgrid[c - 1];
+            bool cur_only_1x   = col_max_w[c] <= LAYOUT_BLOCK_W && col_max_w[c] > 0;
+
+            if (prev_2x && !prev_subgrid && cur_only_1x) {
+                /* Fold this column into the previous 2X footprint */
+                col_x[c]          = col_x[c - 1];
+                col_is_subgrid[c] = true;
+                col_eff_w[c]      = col_eff_w[c - 1]; /* inherit 2X width */
+            } else {
+                col_x[c]     = col_x[c - 1] + col_eff_w[c - 1] + LAYOUT_H_GAP;
+                col_eff_w[c] = col_max_w[c] > 0 ? col_max_w[c] : LAYOUT_BLOCK_W;
+            }
         }
 
         for (int i = 0; i < g_pedalboard.plugin_count; i++)
             g_layout_x[i] = (lv_coord_t)col_x[col_of[i]];
 
-        /* ── Sub-grid: pair 1X blocks side-by-side within 2X columns ──────────
-         * When a column's widest block is 2X, 1X blocks in that column are
-         * paired horizontally: even index → sub-col 0, odd index → sub-col 1.
-         * Both blocks in a pair share the same Y so they appear on the same row.
-         * Sub-col 0 = col_x[c], sub-col 1 = col_x[c] + LAYOUT_BLOCK_W + LAYOUT_H_GAP
-         * (the two halves exactly fill the 2X footprint). */
+        /* ── Sub-grid pairing ──────────────────────────────────────────────────
+         * Two cases trigger side-by-side pairing of 1X blocks:
+         *   a) A column natively contains a 2X block (col_max_w > LAYOUT_BLOCK_W):
+         *      its 1X blocks are paired within the 2X footprint.
+         *   b) A column is a sub-grid (downstream of a 2X, folded into its X):
+         *      its 1X blocks are also paired within the inherited 2X footprint.
+         * Even-indexed block: stays at col_x[c].
+         * Odd-indexed block:  moves to col_x[c] + LAYOUT_BLOCK_W + LAYOUT_H_GAP,
+         *                     and shares the same Y as its pair partner. */
         for (int c = 0; c <= max_c; c++) {
-            if (col_max_w[c] <= LAYOUT_BLOCK_W) continue; /* only 2X columns */
+            if (col_max_w[c] <= LAYOUT_BLOCK_W && !col_is_subgrid[c]) continue;
 
-            /* Collect 1X plugin indices in this column */
             int idx1x[PB_MAX_PLUGINS], n1x = 0;
             for (int i = 0; i < g_pedalboard.plugin_count; i++) {
                 if (col_of[i] == c && g_block_w[i] == LAYOUT_BLOCK_W)
@@ -1970,7 +1991,6 @@ void ui_pedalboard_refresh(void)
             }
             if (n1x < 2) continue;
 
-            /* Insertion sort by Y ascending */
             for (int a = 1; a < n1x; a++) {
                 int tmp = idx1x[a]; int b = a - 1;
                 while (b >= 0 && g_layout_y[idx1x[b]] > g_layout_y[tmp])
@@ -1978,7 +1998,6 @@ void ui_pedalboard_refresh(void)
                 idx1x[b + 1] = tmp;
             }
 
-            /* Pair: even → sub-col 0 (unchanged), odd → sub-col 1, same Y as partner */
             for (int j = 1; j < n1x; j += 2) {
                 g_layout_x[idx1x[j]] = (lv_coord_t)(col_x[c] + LAYOUT_BLOCK_W + LAYOUT_H_GAP);
                 g_layout_y[idx1x[j]] = g_layout_y[idx1x[j - 1]];
@@ -2399,19 +2418,9 @@ void ui_pedalboard_apply_snapshot(int idx)
     /* Update in-memory state after all commands are sent. */
     pb_snapshot_load(&g_pedalboard, idx);
 
-    /* Synchronously update block widgets — snapshots never change topology
-     * (no plugin add/remove, no connection changes), so a full canvas rebuild
-     * is unnecessary.  Direct style updates are cheaper and reliable from
-     * within a LVGL event callback (no lv_async_call timing issues). */
-    for (int i = 0; i < g_pedalboard.plugin_count; i++) {
-        if (!g_block_obj[i]) continue;
-        pb_plugin_t *plug = &g_pedalboard.plugins[i];
-        ui_plugin_block_set_bypassed(g_block_obj[i], !plug->enabled);
-        for (int j = 0; j < plug->port_count; j++)
-            ui_plugin_block_set_param(g_block_obj[i],
-                                      plug->ports[j].symbol,
-                                      plug->ports[j].value);
-    }
+    /* Full canvas rebuild — same path as on_block_bypass(), the only approach
+     * proven to reliably trigger a framebuffer redraw from this context. */
+    ui_pedalboard_refresh();
     ui_snapshot_bar_refresh();
     last_state_save();
 }

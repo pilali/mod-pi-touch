@@ -11,6 +11,7 @@
 extern pedalboard_t *ui_pedalboard_get(void);
 extern bool          ui_pedalboard_is_loaded(void);
 extern void          ui_pedalboard_save_last_state(void);
+extern void          ui_pedalboard_apply_snapshot(int idx);
 extern int           host_param_set(int, const char *, float);
 extern int           host_bypass(int, bool);
 extern int           host_patch_set(int, const char *, const char *);
@@ -31,25 +32,7 @@ static void apply_snapshot(int idx)
 {
     pedalboard_t *pb = ui_pedalboard_get();
     if (!pb || idx < 0 || idx >= pb->snapshot_count) return;
-
-    pb_snapshot_load(pb, idx);
-
-    pb_snapshot_t *snap = &pb->snapshots[idx];
-    for (int i = 0; i < snap->plugin_count; i++) {
-        snap_plugin_t *sp = &snap->plugins[i];
-        pb_plugin_t *plug = pb_find_plugin_by_symbol(pb, sp->symbol);
-        if (!plug) continue;
-        host_bypass(plug->instance_id, sp->bypassed);
-        for (int j = 0; j < sp->param_count; j++)
-            host_param_set(plug->instance_id, sp->params[j].symbol, sp->params[j].value);
-        for (int j = 0; j < sp->patch_param_count; j++)
-            if (sp->patch_params[j].path[0])
-                host_patch_set(plug->instance_id,
-                               sp->patch_params[j].uri,
-                               sp->patch_params[j].path);
-    }
-    ui_snapshot_bar_refresh();
-    ui_pedalboard_save_last_state();
+    ui_pedalboard_apply_snapshot(idx);
 }
 
 /* ─── Context menu (long press) ──────────────────────────────────────────────── */
