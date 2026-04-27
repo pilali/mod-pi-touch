@@ -2141,8 +2141,23 @@ static void *modui_disable_thread(void *arg)
 {
     (void)arg;
     system("sudo systemctl stop mod-ui");
-    settings_get()->mod_ui_active = false;
-    host_comm_reconnect();
+
+    /* Give mod-host time to release the TCP connection held by mod-ui. */
+    sleep(3);
+
+    mpt_settings_t *s = settings_get();
+    s->mod_ui_active = false;
+    settings_save_prefs(s);
+
+    if (host_comm_reconnect() != 0) {
+        fprintf(stderr, "[pedalboard] disable mod-ui: mod-host reconnect timed out\n");
+        lv_async_call(modui_disable_async, NULL);
+        return NULL;
+    }
+
+    pre_fx_init();
+    pre_fx_reload();
+
     lv_async_call(modui_disable_async, NULL);
     return NULL;
 }
