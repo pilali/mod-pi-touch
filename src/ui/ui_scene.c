@@ -409,16 +409,17 @@ static void slot_build_controls(int idx)
     int n_ports = 0;
 
     if (sl->has_custom) {
-        for (int k = 0; k < SCENE_CTRL_COUNT && n_ports < SCENE_CTRL_COUNT; k++) {
-            if (!sl->custom_syms[k][0]) { n_ports++; continue; }
+        for (int k = 0; k < SCENE_CTRL_COUNT; k++) {
+            if (!sl->custom_syms[k][0]) continue;  /* skip empty entries */
+            if (n_ports >= SCENE_CTRL_COUNT) break;
             for (int j = 0; j < info->port_count; j++) {
                 if (info->ports[j].type == PM_PORT_CONTROL_IN &&
                     strcmp(info->ports[j].symbol, sl->custom_syms[k]) == 0) {
-                    ports[n_ports] = &info->ports[j];
+                    ports[n_ports++] = &info->ports[j];
                     break;
                 }
             }
-            n_ports++;
+            /* symbol not found in ports → silently skipped */
         }
     } else if (info->modgui_port_count > 0) {
         for (int k = 0; k < info->modgui_port_count && n_ports < SCENE_CTRL_COUNT; k++) {
@@ -1116,7 +1117,7 @@ static void open_slot_menu(int slot_idx)
     lv_obj_center(l); \
 } while(0)
 
-    MENU_BTN(UI_COLOR_SURFACE, TR(TR_SCENE_PARAMS),     slot_params_cb);
+    MENU_BTN(UI_COLOR_PRIMARY, TR(TR_SCENE_PARAMS),     slot_params_cb);
     MENU_BTN(UI_COLOR_ACCENT,  TR(TR_SCENE_LEARN_MIDI), slot_learn_again_cb);
     MENU_BTN(UI_COLOR_DANGER,  TR(TR_SCENE_UNASSIGN),   slot_unassign_cb);
 
@@ -1193,9 +1194,11 @@ static void build_pedals_tab(lv_obj_t *parent)
         lv_obj_set_style_bg_opa(ctrl_area, LV_OPA_TRANSP, 0);
         lv_obj_set_style_border_width(ctrl_area, 0, 0);
         lv_obj_set_style_pad_all(ctrl_area, 0, 0);
+        lv_obj_set_style_pad_column(ctrl_area, 0, 0);
+        lv_obj_set_style_pad_row(ctrl_area, 0, 0);
         lv_obj_set_flex_flow(ctrl_area, LV_FLEX_FLOW_ROW_WRAP);
         lv_obj_set_flex_align(ctrl_area, LV_FLEX_ALIGN_START,
-                              LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+                              LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
         lv_obj_clear_flag(ctrl_area, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
         sl->ctrl_area = ctrl_area;
 
