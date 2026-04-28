@@ -14,6 +14,7 @@
 #include <time.h>
 #include <stdarg.h>
 #include <sys/time.h>
+#include <stdatomic.h>
 
 /* ─── Internal types ────────────────────────────────────────────────────────── */
 
@@ -42,7 +43,7 @@ typedef struct {
 
     /* Feedback thread */
     pthread_t          fb_thread;
-    bool               fb_running;
+    _Atomic bool       fb_running;
     host_feedback_cb_t feedback_cb;
     void              *feedback_ud;
 
@@ -177,7 +178,7 @@ static void *fb_thread_func(void *arg)
     int  buf_len = 0;
     unsigned long msg_count = 0;
     int idle_ticks = 0; /* 100ms ticks without data — for heartbeat */
-    while (h->fb_running) {
+    while (atomic_load(&h->fb_running)) {
         fd_set rfds;
         FD_ZERO(&rfds);
         FD_SET(h->fb_fd, &rfds);
@@ -300,7 +301,7 @@ int host_comm_try_connect(const char *addr, int cmd_port, int fb_port,
     pthread_mutex_init(&g_host.cmd_mutex, NULL);
     g_host.feedback_cb  = feedback_cb;
     g_host.feedback_ud  = feedback_ud;
-    g_host.fb_running   = true;
+    atomic_store(&g_host.fb_running, true);
     g_host.connected    = true;
     g_host.pending_head = 0;
     g_host.pending_tail = 0;
@@ -334,7 +335,7 @@ int host_comm_connect(const char *addr, int cmd_port, int fb_port,
 void host_comm_disconnect(void)
 {
     if (!g_host.connected) return;
-    g_host.fb_running = false;
+    atomic_store(&g_host.fb_running, false);
     pthread_join(g_host.fb_thread, NULL);
 
     if (g_host.fb_fd  >= 0) { close(g_host.fb_fd);  g_host.fb_fd  = -1; }

@@ -126,7 +126,7 @@ void settings_init(mpt_settings_t *s)
         fseek(f, 0, SEEK_END);
         long len = ftell(f);
         rewind(f);
-        char *buf = malloc(len + 1);
+        char *buf = len > 0 ? malloc(len + 1) : NULL;
         if (buf) {
             fread(buf, 1, len, f);
             buf[len] = '\0';

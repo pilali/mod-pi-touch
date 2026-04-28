@@ -91,6 +91,7 @@ void widget_prefs_load(const char *data_dir, const char *pb_path)
     fseek(f, 0, SEEK_END);
     long sz = ftell(f);
     rewind(f);
+    if (sz <= 0) { fclose(f); return; }
     char *buf = malloc((size_t)sz + 1);
     if (!buf) { fclose(f); return; }
     fread(buf, 1, (size_t)sz, f);

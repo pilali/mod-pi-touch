@@ -18,6 +18,7 @@ int bank_load(const char *path, bank_list_t *list)
     fseek(f, 0, SEEK_END);
     long len = ftell(f);
     rewind(f);
+    if (len <= 0) { fclose(f); return -1; }
     char *buf = malloc(len + 1);
     if (!buf) { fclose(f); return -1; }
     fread(buf, 1, len, f);

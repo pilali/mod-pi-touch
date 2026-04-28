@@ -624,7 +624,7 @@ int pb_load(pedalboard_t *pb, const char *bundle_dir)
         FILE *af = fopen(addr_path, "r");
         if (af) {
             fseek(af, 0, SEEK_END); long asz = ftell(af); rewind(af);
-            char *abuf = malloc((size_t)asz + 1);
+            char *abuf = asz > 0 ? malloc((size_t)asz + 1) : NULL;
             if (abuf) {
                 fread(abuf, 1, (size_t)asz, af); abuf[asz] = '\0';
                 cJSON *aroot = cJSON_Parse(abuf);

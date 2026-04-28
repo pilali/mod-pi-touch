@@ -627,6 +627,7 @@ static bool load_cache(const char *cache_path)
     fseek(f, 0, SEEK_END);
     long len = ftell(f);
     rewind(f);
+    if (len <= 0) { fclose(f); return false; }
     char *buf = malloc(len + 1);
     if (!buf) { fclose(f); return false; }
     fread(buf, 1, len, f);

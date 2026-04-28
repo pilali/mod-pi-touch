@@ -167,7 +167,7 @@ static void *connect_and_load_thread(void *arg)
     fseek(f, 0, SEEK_END);
     long sz = ftell(f);
     rewind(f);
-    char *buf = malloc(sz + 1);
+    char *buf = sz > 0 ? malloc(sz + 1) : NULL;
     if (buf) {
         fread(buf, 1, sz, f);
         buf[sz] = '\0';

@@ -60,7 +60,7 @@ static void shell_quote(const char *src, char *dst, size_t dstsz)
             dst[i++] = *p;
         }
     }
-    if (i < dstsz) dst[i++] = '\'';
+    if (i + 1 < dstsz) dst[i++] = '\'';
     dst[i] = '\0';
 }
 
