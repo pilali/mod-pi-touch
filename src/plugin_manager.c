@@ -4,12 +4,14 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <sys/stat.h>
 
 #include <lilv/lilv.h>
 #include <lv2/atom/atom.h>
 #include <lv2/midi/midi.h>
 #include <lv2/patch/patch.h>
 #include "cJSON.h"
+#include "lv2_utils.h"
 
 /* ─── Internal state ─────────────────────────────────────────────────────────── */
 
@@ -36,6 +38,7 @@ static void extract_port(LilvPlugin *plugin, LilvPort *port, pm_port_info_t *pi)
     /* Name */
     LilvNode *name_n = lilv_port_get_name(plugin, port);
     snprintf(pi->name, sizeof(pi->name), "%s", lilv_str(name_n));
+    lv2u_normalize_quotes(pi->name);
     lilv_node_free(name_n);
 
     /* Type */
@@ -80,15 +83,49 @@ static void extract_port(LilvPlugin *plugin, LilvPort *port, pm_port_info_t *pi)
         if (min_n) { pi->min         = (float)lilv_node_as_float(min_n); lilv_node_free(min_n); }
         if (max_n) { pi->max         = (float)lilv_node_as_float(max_n); lilv_node_free(max_n); }
 
-        /* Properties: toggled, integer, enumeration */
+        /* Properties: toggled, integer, enumeration, tempo-related */
         LilvNode *toggled_uri = lilv_new_uri(w, LV2_CORE__toggled);
         LilvNode *integer_uri = lilv_new_uri(w, LV2_CORE__integer);
+        LilvNode *tempo_uri   = lilv_new_uri(w,
+            "http://moddevices.com/ns/mod#tempoRelatedDynamicScalePoints");
         LilvNodes *props = lilv_port_get_properties(plugin, port);
-        pi->toggled    = lilv_nodes_contains(props, toggled_uri);
-        pi->integer    = lilv_nodes_contains(props, integer_uri);
+        pi->toggled          = lilv_nodes_contains(props, toggled_uri);
+        pi->integer          = lilv_nodes_contains(props, integer_uri);
+        pi->is_tempo_related = lilv_nodes_contains(props, tempo_uri);
         lilv_nodes_free(props);
         lilv_node_free(toggled_uri);
         lilv_node_free(integer_uri);
+        lilv_node_free(tempo_uri);
+
+        /* Unit symbol (for tempo-related ports) */
+        if (pi->is_tempo_related) {
+            LilvNode *units_unit_prop = lilv_new_uri(w,
+                "http://lv2plug.in/ns/extensions/units#unit");
+            LilvNodes *uunits = lilv_port_get_value(plugin, port, units_unit_prop);
+            if (uunits) {
+                LILV_FOREACH(nodes, it, uunits) {
+                    const LilvNode *un = lilv_nodes_get(uunits, it);
+                    if (!un || !lilv_node_is_uri(un)) continue;
+                    const char *uuri = lilv_node_as_uri(un);
+                    /* Map lv2plug.in units prefix to symbol strings */
+                    const char *pfx = "http://lv2plug.in/ns/extensions/units#";
+                    size_t pfxlen = 38;
+                    if (strncmp(uuri, pfx, pfxlen) == 0) {
+                        const char *suf = uuri + pfxlen;
+                        if      (strcmp(suf, "s")   == 0) snprintf(pi->unit_symbol, 8, "s");
+                        else if (strcmp(suf, "ms")  == 0) snprintf(pi->unit_symbol, 8, "ms");
+                        else if (strcmp(suf, "min") == 0) snprintf(pi->unit_symbol, 8, "min");
+                        else if (strcmp(suf, "hz")  == 0) snprintf(pi->unit_symbol, 8, "Hz");
+                        else if (strcmp(suf, "khz") == 0) snprintf(pi->unit_symbol, 8, "kHz");
+                        else if (strcmp(suf, "mhz") == 0) snprintf(pi->unit_symbol, 8, "MHz");
+                        else if (strcmp(suf, "bpm") == 0) snprintf(pi->unit_symbol, 8, "BPM");
+                    }
+                    break;
+                }
+                lilv_nodes_free(uunits);
+            }
+            lilv_node_free(units_unit_prop);
+        }
 
         /* Enumeration scale points */
         LilvScalePoints *sps = lilv_port_get_scale_points(plugin, port);
@@ -109,6 +146,185 @@ static void extract_port(LilvPlugin *plugin, LilvPort *port, pm_port_info_t *pi)
     }
 }
 
+/* ─── modgui widget type parser ─────────────────────────────────────────────── */
+
+static pm_modgui_widget_t parse_modgui_widget(const char *uri)
+{
+    if (!uri || !uri[0]) return PM_WIDGET_KNOB;
+    const char *frag = strrchr(uri, '#');
+    if (!frag) frag = strrchr(uri, '/');
+    if (!frag) return PM_WIDGET_KNOB;
+    frag++;
+    if (strcmp(frag, "Knob") == 0) return PM_WIDGET_KNOB;
+    if (strcmp(frag, "Switch") == 0 || strcmp(frag, "Bypass") == 0 ||
+        strcmp(frag, "MomentaryButton") == 0) return PM_WIDGET_SWITCH;
+    if (strcmp(frag, "SelectBox") == 0 || strcmp(frag, "CustomSelect") == 0)
+        return PM_WIDGET_SELECT;
+    return PM_WIDGET_OTHER;
+}
+
+/* ─── Direct TTL name reader (manifest.ttl → rdfs:seeAlso → doap:name) ────────
+ * More reliable than lilv_plugin_get_name() which can return the URI or an
+ * empty string for plugins whose doap:name lives only in the bundle TTL. */
+
+static bool bundle_uri_to_path(const char *uri, char *out, size_t outsz)
+{
+    const char *p = uri;
+    if (strncmp(p, "file://", 7) == 0) p += 7;
+    size_t len = strlen(p);
+    if (len > 0 && p[len-1] == '/') len--;
+    if (len == 0 || len >= outsz) return false;
+    memcpy(out, p, len);
+    out[len] = '\0';
+    return true;
+}
+
+/* Scan manifest.ttl for local .ttl <refs>, skip modgui.ttl, deduplicate. */
+static int collect_seealso_ttls(const char *bundle_path, char names[][256], int max)
+{
+    char path[1024];
+    snprintf(path, sizeof(path), "%s/manifest.ttl", bundle_path);
+    FILE *f = fopen(path, "r");
+    if (!f) return 0;
+
+    char buf[32768];
+    size_t n = fread(buf, 1, sizeof(buf)-1, f);
+    fclose(f);
+    buf[n] = '\0';
+
+    int count = 0;
+    const char *p = buf;
+    while (count < max) {
+        p = strchr(p, '<');
+        if (!p) break;
+        p++;
+        const char *end = strchr(p, '>');
+        if (!end) break;
+        size_t len = (size_t)(end - p);
+        /* Local .ttl filename: no '/' (path), no ':' (URI scheme) */
+        if (len >= 5 && len < 256 &&
+            !memchr(p, '/', len) && !memchr(p, ':', len) &&
+            memcmp(end - 4, ".ttl", 4) == 0) {
+            char name[256];
+            memcpy(name, p, len);
+            name[len] = '\0';
+            if (strcmp(name, "modgui.ttl") != 0) {
+                bool dup = false;
+                for (int i = 0; i < count; i++)
+                    if (strcmp(names[i], name) == 0) { dup = true; break; }
+                if (!dup)
+                    snprintf(names[count++], 256, "%s", name);
+            }
+        }
+        p = end + 1;
+    }
+    return count;
+}
+
+/* Return the first doap:name "..." found in a TTL file. */
+static bool ttl_read_doap_name(const char *ttl_path, char *out, size_t outsz)
+{
+    FILE *f = fopen(ttl_path, "r");
+    if (!f) return false;
+    char line[1024];
+    bool found = false;
+    while (fgets(line, sizeof(line), f)) {
+        char *p = strstr(line, "doap:name");
+        if (!p) continue;
+        p = strchr(p, '"');
+        if (!p) continue;
+        p++;
+        char *end = strchr(p, '"');
+        if (!end) continue;
+        size_t len = (size_t)(end - p);
+        if (len >= outsz) len = outsz - 1;
+        memcpy(out, p, len);
+        out[len] = '\0';
+        found = true;
+        break;
+    }
+    fclose(f);
+    return found;
+}
+
+/* Read plugin display name via manifest.ttl → rdfs:seeAlso → doap:name. */
+static bool plugin_name_from_bundle(const LilvPlugin *plugin, char *out, size_t outsz)
+{
+    const LilvNode *buri = lilv_plugin_get_bundle_uri(plugin);
+    if (!buri) return false;
+
+    char bundle_path[1024];
+    if (!bundle_uri_to_path(lilv_str(buri), bundle_path, sizeof(bundle_path)))
+        return false;
+
+    char ttl_names[8][256];
+    int n = collect_seealso_ttls(bundle_path, ttl_names, 8);
+    for (int i = 0; i < n; i++) {
+        char ttl_path[1280];
+        snprintf(ttl_path, sizeof(ttl_path), "%s/%s", bundle_path, ttl_names[i]);
+        if (ttl_read_doap_name(ttl_path, out, outsz)) {
+            lv2u_normalize_quotes(out);
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Map a fully-qualified rdf:type URI to a human-readable category label.
+ * Returns NULL for the root lv2:Plugin type and unknown types. */
+static const char *plugin_type_to_label(const char *uri)
+{
+    static const struct { const char *uri; const char *label; } MAP[] = {
+        /* LV2 core plugin types (http://lv2plug.in/ns/lv2core#) */
+        { "http://lv2plug.in/ns/lv2core#AllpassPlugin",    "Allpass"         },
+        { "http://lv2plug.in/ns/lv2core#AmplifierPlugin",  "Amplifier"       },
+        { "http://lv2plug.in/ns/lv2core#AnalyserPlugin",   "Analyser"        },
+        { "http://lv2plug.in/ns/lv2core#BandpassPlugin",   "Bandpass"        },
+        { "http://lv2plug.in/ns/lv2core#ChorusPlugin",     "Chorus"          },
+        { "http://lv2plug.in/ns/lv2core#CombPlugin",       "Comb"            },
+        { "http://lv2plug.in/ns/lv2core#CompressorPlugin", "Compressor"      },
+        { "http://lv2plug.in/ns/lv2core#ConstantPlugin",   "Constant"        },
+        { "http://lv2plug.in/ns/lv2core#ConverterPlugin",  "Converter"       },
+        { "http://lv2plug.in/ns/lv2core#DelayPlugin",      "Delay"           },
+        { "http://lv2plug.in/ns/lv2core#DistortionPlugin", "Distortion"      },
+        { "http://lv2plug.in/ns/lv2core#DynamicsPlugin",   "Dynamics"        },
+        { "http://lv2plug.in/ns/lv2core#EQPlugin",         "EQ"              },
+        { "http://lv2plug.in/ns/lv2core#EnvelopePlugin",   "Envelope"        },
+        { "http://lv2plug.in/ns/lv2core#ExpanderPlugin",   "Expander"        },
+        { "http://lv2plug.in/ns/lv2core#FilterPlugin",     "Filter"          },
+        { "http://lv2plug.in/ns/lv2core#FlangerPlugin",    "Flanger"         },
+        { "http://lv2plug.in/ns/lv2core#FunctionPlugin",   "Function"        },
+        { "http://lv2plug.in/ns/lv2core#GatePlugin",       "Gate"            },
+        { "http://lv2plug.in/ns/lv2core#GeneratorPlugin",  "Generator"       },
+        { "http://lv2plug.in/ns/lv2core#HighpassPlugin",   "Highpass"        },
+        { "http://lv2plug.in/ns/lv2core#InstrumentPlugin", "Instrument"      },
+        { "http://lv2plug.in/ns/lv2core#LimiterPlugin",    "Limiter"         },
+        { "http://lv2plug.in/ns/lv2core#LowpassPlugin",    "Lowpass"         },
+        { "http://lv2plug.in/ns/lv2core#MixerPlugin",      "Mixer"           },
+        { "http://lv2plug.in/ns/lv2core#ModulatorPlugin",  "Modulator"       },
+        { "http://lv2plug.in/ns/lv2core#MultiEQPlugin",    "Multi EQ"        },
+        { "http://lv2plug.in/ns/lv2core#OscillatorPlugin", "Oscillator"      },
+        { "http://lv2plug.in/ns/lv2core#ParaEQPlugin",     "Para EQ"         },
+        { "http://lv2plug.in/ns/lv2core#PhaserPlugin",     "Phaser"          },
+        { "http://lv2plug.in/ns/lv2core#PitchPlugin",      "Pitch"           },
+        { "http://lv2plug.in/ns/lv2core#ReverbPlugin",     "Reverb"          },
+        { "http://lv2plug.in/ns/lv2core#SimulatorPlugin",  "Simulator"       },
+        { "http://lv2plug.in/ns/lv2core#SpatialPlugin",    "Spatial"         },
+        { "http://lv2plug.in/ns/lv2core#SpectralPlugin",   "Spectral"        },
+        { "http://lv2plug.in/ns/lv2core#UtilityPlugin",    "Utility"         },
+        { "http://lv2plug.in/ns/lv2core#WaveshaperPlugin", "Waveshaper"      },
+        /* MOD-specific types */
+        { "http://moddevices.com/ns/mod#ControlVoltagePlugin", "Control Voltage" },
+        { "http://moddevices.com/ns/mod#MIDIPlugin",           "MIDI"            },
+        { "http://moddevices.com/ns/mod#AmbisonicsPlugin",     "Ambisonics"      },
+        { NULL, NULL }
+    };
+    if (!uri) return NULL;
+    for (int i = 0; MAP[i].uri; i++)
+        if (strcmp(uri, MAP[i].uri) == 0) return MAP[i].label;
+    return NULL;
+}
+
 static void extract_plugin(const LilvPlugin *plugin, pm_plugin_info_t *pi)
 {
     memset(pi, 0, sizeof(*pi));
@@ -116,23 +332,58 @@ static void extract_plugin(const LilvPlugin *plugin, pm_plugin_info_t *pi)
     snprintf(pi->uri,  sizeof(pi->uri),
              "%s", lilv_str(lilv_plugin_get_uri(plugin)));
 
-    LilvNode *name = lilv_plugin_get_name(plugin);
-    snprintf(pi->name, sizeof(pi->name), "%s", lilv_str(name));
-    lilv_node_free(name);
+    /* Prefer doap:name from the bundle TTL; fall back to lilv if not found. */
+    if (!plugin_name_from_bundle(plugin, pi->name, sizeof(pi->name))) {
+        LilvNode *name = lilv_plugin_get_name(plugin);
+        snprintf(pi->name, sizeof(pi->name), "%s", lilv_str(name));
+        lv2u_normalize_quotes(pi->name);
+        lilv_node_free(name);
+    }
 
     /* Author */
     LilvNode *author = lilv_plugin_get_author_name(plugin);
     snprintf(pi->author, sizeof(pi->author), "%s", lilv_str(author));
     lilv_node_free(author);
 
-    /* Category */
-    const LilvPluginClass *cls = lilv_plugin_get_class(plugin);
-    if (cls) {
-        LilvNode *cls_label = lilv_plugin_class_get_label(cls);
-        snprintf(pi->category, sizeof(pi->category), "%s", lilv_str(cls_label));
-        /* Sub-category from parent */
-        const LilvPluginClass *parent = lilv_plugin_class_get_parent_uri(cls) ? NULL : NULL;
-        (void)parent;
+    /* Category + CV/MIDI flags from rdf:type declarations in the TTL */
+    {
+        LilvNode *rdf_type = lilv_new_uri(g_world,
+            "http://www.w3.org/1999/02/22-rdf-syntax-ns#type");
+        LilvNodes *types = lilv_plugin_get_value(plugin, rdf_type);
+        if (types) {
+            LILV_FOREACH(nodes, it, types) {
+                const LilvNode *tn = lilv_nodes_get(types, it);
+                if (!tn || !lilv_node_is_uri(tn)) continue;
+                const char *turi = lilv_node_as_uri(tn);
+                /* CV/MIDI plugin type flags */
+                if (strcmp(turi,
+                    "http://moddevices.com/ns/mod#ControlVoltagePlugin") == 0)
+                    pi->is_cv_plugin = true;
+                if (strcmp(turi,
+                    "http://moddevices.com/ns/mod#MIDIPlugin") == 0)
+                    pi->is_midi_plugin = true;
+                /* Category: first specific (non-root) type wins */
+                if (!pi->category[0]) {
+                    const char *lbl = plugin_type_to_label(turi);
+                    if (lbl)
+                        snprintf(pi->category, sizeof(pi->category), "%s", lbl);
+                }
+            }
+            lilv_nodes_free(types);
+        }
+        lilv_node_free(rdf_type);
+
+        /* Fallback: lilv class label when rdf:type gave no match */
+        if (!pi->category[0]) {
+            const LilvPluginClass *cls = lilv_plugin_get_class(plugin);
+            if (cls) {
+                const char *lbl = lilv_str(lilv_plugin_class_get_label(cls));
+                if (lbl && lbl[0] && strcmp(lbl, "Plugin") != 0)
+                    snprintf(pi->category, sizeof(pi->category), "%s", lbl);
+            }
+        }
+        if (!pi->category[0])
+            snprintf(pi->category, sizeof(pi->category), "Other");
     }
 
     /* patch:writable parameters (e.g. file path params) */
@@ -199,27 +450,61 @@ static void extract_plugin(const LilvPlugin *plugin, pm_plugin_info_t *pi)
         lilv_node_free(mod_ft);
     }
 
-    /* modgui:thumbnail — path to plugin preview PNG */
+    /* modgui: thumbnail + curated port list */
     {
-        LilvNode *modgui_gui  = lilv_new_uri(g_world, "http://moddevices.com/ns/modgui#gui");
-        LilvNode *modgui_thumb = lilv_new_uri(g_world, "http://moddevices.com/ns/modgui#thumbnail");
-        LilvNodes *guis = lilv_plugin_get_value(plugin, modgui_gui);
+        LilvNode *mg_gui   = lilv_new_uri(g_world, NS_MODGUI "gui");
+        LilvNode *mg_thumb = lilv_new_uri(g_world, NS_MODGUI "thumbnail");
+        LilvNode *mg_port  = lilv_new_uri(g_world, NS_MODGUI "port");
+        LilvNode *mg_wgt   = lilv_new_uri(g_world, NS_MODGUI "widget");
+        LilvNode *lv2_sym  = lilv_new_uri(g_world, NS_LV2 "symbol");
+
+        LilvNodes *guis = lilv_plugin_get_value(plugin, mg_gui);
         if (guis) {
             LILV_FOREACH(nodes, it, guis) {
                 const LilvNode *gui = lilv_nodes_get(guis, it);
-                LilvNode *thumb = lilv_world_get(g_world, gui, modgui_thumb, NULL);
+
+                /* thumbnail */
+                LilvNode *thumb = lilv_world_get(g_world, gui, mg_thumb, NULL);
                 if (thumb) {
-                    const char *uri = lilv_str(thumb);
-                    if (strncmp(uri, "file://", 7) == 0)
-                        snprintf(pi->thumbnail_path, sizeof(pi->thumbnail_path), "%s", uri + 7);
+                    const char *tpath = lilv_str(thumb);
+                    if (strncmp(tpath, "file://", 7) == 0)
+                        snprintf(pi->thumbnail_path, sizeof(pi->thumbnail_path),
+                                 "%s", tpath + 7);
                     lilv_node_free(thumb);
-                    break;
                 }
+
+                /* modgui:port — curated control list */
+                LilvNodes *ports = lilv_world_find_nodes(g_world, gui, mg_port, NULL);
+                if (ports) {
+                    LILV_FOREACH(nodes, pit, ports) {
+                        if (pi->modgui_port_count >= PM_MODGUI_PORT_MAX) break;
+                        const LilvNode *pn  = lilv_nodes_get(ports, pit);
+                        LilvNode *sym_n     = lilv_world_get(g_world, pn, lv2_sym, NULL);
+                        LilvNode *wgt_n     = lilv_world_get(g_world, pn, mg_wgt,  NULL);
+                        const char *sym_str = lilv_str(sym_n);
+                        if (sym_str[0]) {
+                            pm_modgui_port_t *mp =
+                                &pi->modgui_ports[pi->modgui_port_count++];
+                            snprintf(mp->symbol, sizeof(mp->symbol), "%s", sym_str);
+                            mp->widget = parse_modgui_widget(
+                            (wgt_n && lilv_node_is_uri(wgt_n))
+                                ? lilv_node_as_uri(wgt_n) : NULL);
+                        }
+                        if (sym_n) lilv_node_free(sym_n);
+                        if (wgt_n) lilv_node_free(wgt_n);
+                    }
+                    lilv_nodes_free(ports);
+                }
+                break; /* use only the first GUI node */
             }
             lilv_nodes_free(guis);
         }
-        lilv_node_free(modgui_thumb);
-        lilv_node_free(modgui_gui);
+
+        lilv_node_free(mg_gui);
+        lilv_node_free(mg_thumb);
+        lilv_node_free(mg_port);
+        lilv_node_free(mg_wgt);
+        lilv_node_free(lv2_sym);
     }
 
     /* Ports */
@@ -235,6 +520,8 @@ static void extract_plugin(const LilvPlugin *plugin, pm_plugin_info_t *pi)
             case PM_PORT_MIDI_IN:     pi->midi_in_count++;   break;
             case PM_PORT_MIDI_OUT:    pi->midi_out_count++;  break;
             case PM_PORT_CONTROL_IN:  pi->ctrl_in_count++;   break;
+            case PM_PORT_CV_IN:       pi->cv_in_count++;     break;
+            case PM_PORT_CV_OUT:      pi->cv_out_count++;    break;
             default: break;
         }
     }
@@ -243,7 +530,7 @@ static void extract_plugin(const LilvPlugin *plugin, pm_plugin_info_t *pi)
 /* ─── JSON cache ─────────────────────────────────────────────────────────────── */
 
 /* Bump this when the cache schema changes to force automatic regeneration */
-#define CACHE_VERSION 4
+#define CACHE_VERSION 10
 
 static void save_cache(const char *cache_path)
 {
@@ -259,6 +546,8 @@ static void save_cache(const char *cache_path)
         cJSON_AddStringToObject(obj, "name",     p->name);
         cJSON_AddStringToObject(obj, "author",   p->author);
         cJSON_AddStringToObject(obj, "category", p->category);
+        cJSON_AddBoolToObject(obj,   "is_cv_plugin",   p->is_cv_plugin);
+        cJSON_AddBoolToObject(obj,   "is_midi_plugin",  p->is_midi_plugin);
 
         cJSON *ports = cJSON_CreateArray();
         for (int j = 0; j < p->port_count; j++) {
@@ -273,6 +562,8 @@ static void save_cache(const char *cache_path)
             cJSON_AddBoolToObject(po, "toggled",   pt->toggled);
             cJSON_AddBoolToObject(po, "integer",   pt->integer);
             cJSON_AddBoolToObject(po, "enumeration", pt->enumeration);
+            cJSON_AddBoolToObject(po,   "tempo_related", pt->is_tempo_related);
+            cJSON_AddStringToObject(po, "unit_symbol",   pt->unit_symbol);
             if (pt->enum_count > 0) {
                 cJSON *elabels = cJSON_CreateArray();
                 cJSON *evalues = cJSON_CreateArray();
@@ -305,6 +596,18 @@ static void save_cache(const char *cache_path)
         }
 
         cJSON_AddStringToObject(obj, "thumbnail_path", p->thumbnail_path);
+
+        if (p->modgui_port_count > 0) {
+            cJSON *mgports = cJSON_CreateArray();
+            for (int j = 0; j < p->modgui_port_count; j++) {
+                cJSON *mpo = cJSON_CreateObject();
+                cJSON_AddStringToObject(mpo, "symbol", p->modgui_ports[j].symbol);
+                cJSON_AddNumberToObject(mpo, "widget", (double)p->modgui_ports[j].widget);
+                cJSON_AddItemToArray(mgports, mpo);
+            }
+            cJSON_AddItemToObject(obj, "modgui_ports", mgports);
+        }
+
         cJSON_AddItemToArray(arr, obj);
     }
 
@@ -363,8 +666,27 @@ static bool load_cache(const char *cache_path)
         if (cJSON_IsString(nm))  snprintf(p->name,     sizeof(p->name),     "%s", nm->valuestring);
         if (cJSON_IsString(au))  snprintf(p->author,   sizeof(p->author),   "%s", au->valuestring);
         if (cJSON_IsString(cat)) snprintf(p->category, sizeof(p->category), "%s", cat->valuestring);
+        cJSON *cvcv  = cJSON_GetObjectItem(obj, "is_cv_plugin");
+        cJSON *cvmid = cJSON_GetObjectItem(obj, "is_midi_plugin");
+        if (cJSON_IsBool(cvcv))  p->is_cv_plugin   = cJSON_IsTrue(cvcv);
+        if (cJSON_IsBool(cvmid)) p->is_midi_plugin  = cJSON_IsTrue(cvmid);
         cJSON *tp = cJSON_GetObjectItem(obj, "thumbnail_path");
         if (cJSON_IsString(tp)) snprintf(p->thumbnail_path, sizeof(p->thumbnail_path), "%s", tp->valuestring);
+
+        cJSON *mgports = cJSON_GetObjectItem(obj, "modgui_ports");
+        if (cJSON_IsArray(mgports)) {
+            int nmp = cJSON_GetArraySize(mgports);
+            for (int j = 0; j < nmp && p->modgui_port_count < PM_MODGUI_PORT_MAX; j++) {
+                cJSON *mpo = cJSON_GetArrayItem(mgports, j);
+                pm_modgui_port_t *mp = &p->modgui_ports[p->modgui_port_count++];
+                cJSON *ms = cJSON_GetObjectItem(mpo, "symbol");
+                cJSON *mw = cJSON_GetObjectItem(mpo, "widget");
+                if (cJSON_IsString(ms))
+                    snprintf(mp->symbol, sizeof(mp->symbol), "%s", ms->valuestring);
+                if (cJSON_IsNumber(mw))
+                    mp->widget = (pm_modgui_widget_t)(int)mw->valuedouble;
+            }
+        }
 
         cJSON *ports = cJSON_GetObjectItem(obj, "ports");
         if (cJSON_IsArray(ports)) {
@@ -390,6 +712,12 @@ static bool load_cache(const char *cache_path)
                 if (cJSON_IsBool(tog))  pt->toggled     = cJSON_IsTrue(tog);
                 if (cJSON_IsBool(itg))  pt->integer     = cJSON_IsTrue(itg);
                 if (cJSON_IsBool(enu))  pt->enumeration = cJSON_IsTrue(enu);
+                cJSON *trel = cJSON_GetObjectItem(po, "tempo_related");
+                cJSON *usym = cJSON_GetObjectItem(po, "unit_symbol");
+                if (cJSON_IsBool(trel)) pt->is_tempo_related = cJSON_IsTrue(trel);
+                if (cJSON_IsString(usym))
+                    snprintf(pt->unit_symbol, sizeof(pt->unit_symbol),
+                             "%s", usym->valuestring);
                 cJSON *elabels = cJSON_GetObjectItem(po, "enum_labels");
                 cJSON *evalues = cJSON_GetObjectItem(po, "enum_values");
                 if (cJSON_IsArray(elabels) && cJSON_IsArray(evalues)) {
@@ -406,6 +734,12 @@ static bool load_cache(const char *cache_path)
                     pt->enum_count = nc;
                 }
             }
+        }
+
+        /* Derive CV counts from port types (not stored in cache, computed here) */
+        for (int j = 0; j < p->port_count; j++) {
+            if (p->ports[j].type == PM_PORT_CV_IN)  p->cv_in_count++;
+            if (p->ports[j].type == PM_PORT_CV_OUT) p->cv_out_count++;
         }
 
         /* patch:writable parameters */
@@ -435,30 +769,76 @@ static bool load_cache(const char *cache_path)
 
 /* ─── Public API ─────────────────────────────────────────────────────────────── */
 
+/* Return true only if cache_path exists AND is newer than every directory in
+ * the colon-separated lv2_paths list and /usr/lib/lv2 (and LV2_PATH env).
+ * A newly installed plugin updates its parent directory's mtime, which makes
+ * the cache stale and forces a lilv rescan on the next startup. */
+static bool cache_is_fresh(const char *cache_path, const char *lv2_paths)
+{
+    struct stat cs;
+    if (stat(cache_path, &cs) != 0) return false;
+    time_t cache_mtime = cs.st_mtime;
+
+    const char *sources[3] = { "/usr/lib/lv2", lv2_paths, getenv("LV2_PATH") };
+    for (int s = 0; s < 3; s++) {
+        if (!sources[s]) continue;
+        char buf[4096];
+        snprintf(buf, sizeof(buf), "%s", sources[s]);
+        char *save = NULL;
+        char *tok  = strtok_r(buf, ":", &save);
+        while (tok) {
+            if (tok[0]) {
+                struct stat ds;
+                if (stat(tok, &ds) == 0 && ds.st_mtime > cache_mtime) {
+                    printf("[plugin_manager] '%s' newer than cache — rescanning\n", tok);
+                    return false;
+                }
+            }
+            tok = strtok_r(NULL, ":", &save);
+        }
+    }
+    return true;
+}
+
 int pm_init(const char *lv2_paths, const char *cache_path)
 {
     /* Cleanup previous state if reinitializing */
     if (g_plugins) { free(g_plugins); g_plugins = NULL; g_count = 0; }
     if (g_world)   { lilv_world_free(g_world); g_world = NULL; }
 
-    /* Try cache first */
-    if (cache_path && load_cache(cache_path)) return 0;
+    /* Try cache only if it is newer than all LV2 directories being scanned.
+     * A new plugin installation updates the parent directory mtime and
+     * automatically triggers a full lilv rescan. */
+    if (cache_path && cache_is_fresh(cache_path, lv2_paths) && load_cache(cache_path))
+        return 0;
 
     g_world = lilv_world_new();
     if (!g_world) return -1;
 
-    /* Load paths */
-    if (lv2_paths) {
-        char *paths = strdup(lv2_paths);
-        if (!paths) { lilv_world_free(g_world); g_world = NULL; return -1; }
-        char *tok = strtok(paths, ":");
-        while (tok) {
-            LilvNode *path = lilv_new_file_uri(g_world, NULL, tok);
-            lilv_world_load_bundle(g_world, path);
-            lilv_node_free(path);
-            tok = strtok(NULL, ":");
+    /* Ensure system LV2 bundles are on the path.
+     * The service may set LV2_PATH to only the user plugin directory, which
+     * omits /usr/lib/lv2 where lv2core.lv2 lives.  Without lv2core the
+     * plugin class hierarchy (lv2:ReverbPlugin, etc.) is not loaded and
+     * lilv_plugin_get_class() falls back to the root "Plugin" for everything.
+     * We prepend the system path so the class definitions load before plugins. */
+    {
+        const char *env = getenv("LV2_PATH");
+        const char *sys = "/usr/lib/lv2";
+        if (!env || !strstr(env, sys)) {
+            char extended[4096];
+            if (env && env[0])
+                snprintf(extended, sizeof(extended), "%s:%s", sys, env);
+            else
+                snprintf(extended, sizeof(extended), "%s", sys);
+            setenv("LV2_PATH", extended, 1);
         }
-        free(paths);
+        /* Also include any custom paths passed in as parameter */
+        if (lv2_paths) {
+            env = getenv("LV2_PATH");
+            char extended[4096];
+            snprintf(extended, sizeof(extended), "%s:%s", env ? env : "", lv2_paths);
+            setenv("LV2_PATH", extended, 1);
+        }
     }
     lilv_world_load_all(g_world);
 

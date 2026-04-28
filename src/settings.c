@@ -163,13 +163,16 @@ void settings_init(mpt_settings_t *s)
                         cJSON *mp = cJSON_GetArrayItem(jmidi, i);
                         if (!cJSON_IsObject(mp)) continue;
                         mpt_midi_port_t *p = &s->midi_ports[s->midi_port_count++];
-                        cJSON *mdev = cJSON_GetObjectItem(mp, "dev");
-                        cJSON *mlbl = cJSON_GetObjectItem(mp, "label");
-                        cJSON *min  = cJSON_GetObjectItem(mp, "input");
-                        cJSON *mout = cJSON_GetObjectItem(mp, "output");
-                        cJSON *men  = cJSON_GetObjectItem(mp, "enabled");
+                        cJSON *mdev  = cJSON_GetObjectItem(mp, "dev");
+                        cJSON *mdout = cJSON_GetObjectItem(mp, "dev_out");
+                        cJSON *mlbl  = cJSON_GetObjectItem(mp, "label");
+                        cJSON *min   = cJSON_GetObjectItem(mp, "input");
+                        cJSON *mout  = cJSON_GetObjectItem(mp, "output");
+                        cJSON *men   = cJSON_GetObjectItem(mp, "enabled");
                         if (cJSON_IsString(mdev))
                             snprintf(p->dev, sizeof(p->dev), "%s", mdev->valuestring);
+                        if (cJSON_IsString(mdout))
+                            snprintf(p->dev_out, sizeof(p->dev_out), "%s", mdout->valuestring);
                         if (cJSON_IsString(mlbl))
                             snprintf(p->label, sizeof(p->label), "%s", mlbl->valuestring);
                         p->is_input  = cJSON_IsTrue(min);
@@ -207,6 +210,10 @@ void settings_init(mpt_settings_t *s)
         fclose(f);
     }
 
+    /* Detect whether mod-ui.service is currently running.
+     * system() returns 0 when the unit is active. */
+    s->mod_ui_active = (system("systemctl is-active --quiet mod-ui") == 0);
+
     g_settings   = *s;
     g_initialized = true;
 }
@@ -228,18 +235,29 @@ int settings_apply_jack(const mpt_settings_t *s)
         return -1;
     }
 
-    /* Build a jackd command from current settings.
-     * -S forces 16-bit (shorts); without it jackd uses the device's native
-     * depth (typically 24 or 32 bit internally). */
-    const char *shortflag = (s->jack_bit_depth == 16) ? "-S " : "";
-    char cmd[512];
-    snprintf(cmd, sizeof(cmd),
-             "pkill -f jackd 2>/dev/null; sleep 1; "
-             "jackd -P 70 -d alsa -d %s -r 48000 -p %d -n 3 %s"
-             "> /tmp/jackd.log 2>&1 &",
-             s->jack_audio_device, s->jack_buffer_size, shortflag);
-    fprintf(stderr, "[settings] JACK restart: %s\n", cmd);
-    return system(cmd);
+    /* Write new /etc/jackdrc so the change survives reboots.
+     * Use a temp file to avoid partial writes, then sudo-copy. */
+    const char *shortflag = (s->jack_bit_depth == 16) ? " -S" : "";
+    FILE *f = fopen("/tmp/jackdrc_new", "w");
+    if (!f) {
+        fprintf(stderr, "[settings] Cannot write /tmp/jackdrc_new\n");
+        return -1;
+    }
+    fprintf(f,
+            "#!/bin/sh\n"
+            "exec env JACK_DRIVER_DIR=/usr/local/lib/jack "
+            "/usr/local/bin/jackd -t 2000 -R -P 95 -d alsa -d %s "
+            "-r 48000 -p %d -n 2 -X seq -s%s\n",
+            s->jack_audio_device, s->jack_buffer_size, shortflag);
+    fclose(f);
+
+    /* Install jackdrc and restart service */
+    int r = system("sudo cp /tmp/jackdrc_new /etc/jackdrc"
+                   " && sudo systemctl restart jack");
+    fprintf(stderr, "[settings] JACK restart (buf=%d dev=%s): %s\n",
+            s->jack_buffer_size, s->jack_audio_device,
+            r == 0 ? "ok" : "failed");
+    return r;
 }
 
 mpt_settings_t *settings_get(void)
@@ -268,6 +286,7 @@ int settings_save_prefs(const mpt_settings_t *s)
     for (int i = 0; i < s->midi_port_count; i++) {
         cJSON *mp = cJSON_CreateObject();
         cJSON_AddStringToObject(mp, "dev",     s->midi_ports[i].dev);
+        cJSON_AddStringToObject(mp, "dev_out", s->midi_ports[i].dev_out);
         cJSON_AddStringToObject(mp, "label",   s->midi_ports[i].label);
         cJSON_AddBoolToObject(mp,   "input",   s->midi_ports[i].is_input);
         cJSON_AddBoolToObject(mp,   "output",  s->midi_ports[i].is_output);

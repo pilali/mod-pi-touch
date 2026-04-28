@@ -104,6 +104,16 @@ static void *add_plugin_thread(void *arg)
 {
     add_plugin_ctx_t *ctx = arg;
     ctx->result = host_add_plugin(ctx->instance_id, ctx->uri);
+    if (ctx->result >= 0) {
+        /* Subscribe to output port monitoring so VU meters update in real time */
+        const pm_plugin_info_t *info = pm_plugin_by_uri(ctx->uri);
+        if (info) {
+            for (int i = 0; i < info->port_count; i++) {
+                if (info->ports[i].type == PM_PORT_CONTROL_OUT)
+                    host_monitor_output(ctx->instance_id, info->ports[i].symbol);
+            }
+        }
+    }
     lv_async_call(add_plugin_done, ctx);
     return NULL;
 }
@@ -349,6 +359,7 @@ void ui_plugin_browser_show(lv_obj_t *parent)
     lv_obj_set_size(g_keyboard, LV_PCT(100), LV_VER_RES / 3);
     lv_obj_align(g_keyboard, LV_ALIGN_BOTTOM_MID, 0, 0);
     lv_obj_add_flag(g_keyboard, LV_OBJ_FLAG_HIDDEN);
+    ui_app_keyboard_apply_lang(g_keyboard);
     lv_obj_add_event_cb(g_keyboard, keyboard_ready_cb, LV_EVENT_READY,  NULL);
     lv_obj_add_event_cb(g_keyboard, keyboard_ready_cb, LV_EVENT_CANCEL, NULL);
 

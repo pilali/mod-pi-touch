@@ -4,6 +4,22 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* ─── String utilities ──────────────────────────────────────────────────────── */
+
+void lv2u_normalize_quotes(char *s)
+{
+    unsigned char *r = (unsigned char *)s;
+    unsigned char *w = r;
+    while (*r) {
+        if (r[0] == 0xE2 && r[1] == 0x80) {
+            if (r[2] == 0x98 || r[2] == 0x99) { *w++ = '\''; r += 3; continue; }
+            if (r[2] == 0x9C || r[2] == 0x9D) { *w++ = '"';  r += 3; continue; }
+        }
+        *w++ = *r++;
+    }
+    *w = '\0';
+}
+
 /* ─── Global state ──────────────────────────────────────────────────────────── */
 
 static SordWorld *g_world = NULL;

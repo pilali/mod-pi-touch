@@ -18,6 +18,12 @@ typedef void (*host_resp_cb_t)(int status, const char *value, void *userdata);
 
 /* ─── Lifecycle ─────────────────────────────────────────────────────────────── */
 
+/* Store connection parameters for later use by host_comm_reconnect(), without
+ * actually connecting.  Call at startup when skipping the initial connection
+ * (e.g. when mod-ui.service is already running). */
+void host_comm_save_params(const char *addr, int cmd_port, int fb_port,
+                           host_feedback_cb_t feedback_cb, void *feedback_ud);
+
 /* Single-attempt connect — returns 0 on success, -1 if mod-host is not
  * listening yet.  Does not retry; the caller is responsible for the retry
  * loop so it can update UI progress between attempts. */
@@ -32,6 +38,10 @@ int  host_comm_connect(const char *addr, int cmd_port, int fb_port,
 
 /* Disconnect and free all resources. Blocks until the feedback thread exits. */
 void host_comm_disconnect(void);
+
+/* Disconnect then reconnect using saved addr/ports/callback (up to 60 s retry).
+ * Returns 0 on success, -1 on timeout. */
+int host_comm_reconnect(void);
 
 /* True if the command socket is connected. */
 bool host_comm_is_connected(void);
@@ -66,6 +76,12 @@ int host_preset_save(int instance, const char *name, const char *dir, const char
 int host_midi_map(int instance, const char *symbol, int channel, int cc,
                   float min, float max);
 int host_midi_unmap(int instance, const char *symbol);
+/* CV modulation: map a CV output JACK port to a control parameter.
+ * jack_port: e.g. "effect_3:Pitch" or "mod-spi2jack:cv_input_1"
+ * op_mode: '+' (unipolar+), '-' (unipolar-), 'b' (bipolar), '=' (default) */
+int host_cv_map(int instance, const char *symbol, const char *jack_port,
+                float min, float max, char op_mode);
+int host_cv_unmap(int instance, const char *symbol);
 /* Enter MIDI learn mode: mod-host will send "midi_mapped" feedback on the
  * next received MIDI CC and map it to the parameter. */
 int host_midi_learn(int instance, const char *symbol, float min, float max);
@@ -78,7 +94,19 @@ int host_cpu_load(float *out);
  * mod-host sends "output_set <instance> <symbol> <value>" on port 5556 whenever
  * the port value changes. */
 int host_monitor_output(int instance, const char *symbol);
+/* Kick-start or continue the feedback loop after all monitor_output calls. */
+int host_output_data_ready(void);
 
 /* Send a patch:writable parameter (file path) to a plugin instance.
  * Sends: patch_set <instance> <param_uri> <path> */
 int host_patch_set(int instance, const char *param_uri, const char *path);
+
+/* Expose or hide a hardware-like JACK port in the mod-host graph.
+ * symbol: short name used in the graph (e.g. "midi_loopback")
+ * is_output: 1 = MIDI output (sends into graph), 0 = MIDI input
+ * title:  display name (spaces → underscores for mod-host)
+ * index:  port index for ordering (42 for the MIDI loopback)
+ * Sends: add_hw_port /graph/<symbol> midi <is_output> <title> <index> */
+int host_add_hw_port(const char *symbol, int is_output,
+                     const char *title, int index);
+int host_remove_hw_port(const char *symbol);

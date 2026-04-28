@@ -17,6 +17,7 @@
 #include "lv2_utils.h"
 #include "ui/ui_app.h"
 #include "ui/ui_pedalboard.h"
+#include "ui/ui_scene.h"
 #include "ui/ui_splash.h"
 #include "cJSON.h"
 
@@ -41,6 +42,8 @@ static void feedback_handler(const char *msg, void *ud)
     if (sscanf(msg, "output_set %d %127s %f", &instance, symbol, &value) == 3) {
         if (instance == PRE_FX_TUNER_INSTANCE)
             pre_fx_on_feedback(instance, symbol, value);
+        else
+            ui_pedalboard_set_output(instance, symbol, value);
         return;
     }
 
@@ -52,6 +55,7 @@ static void feedback_handler(const char *msg, void *ud)
         if (sscanf(msg, "midi_mapped %d %127s %d %d %f %f %f",
                    &instance, symbol, &ch, &cc, &mval, &mmin, &mmax) == 7) {
             ui_pedalboard_on_midi_mapped(instance, symbol, ch, cc, mmin, mmax);
+            ui_scene_on_midi_mapped(instance, symbol, ch, cc, mmin, mmax);
             return;
         }
     }
@@ -100,6 +104,17 @@ static void *connect_and_load_thread(void *arg)
     (void)arg;
     mpt_settings_t *s = settings_get();
 
+    /* If mod-ui.service is running, skip mod-host connection entirely.
+     * Still save params so host_comm_reconnect() works when mod-ui is disabled. */
+    if (s->mod_ui_active) {
+        host_comm_save_params(s->host_addr, s->host_cmd_port, s->host_fb_port,
+                              feedback_handler, NULL);
+        fprintf(stderr, "[main] mod-ui.service is active — skipping mod-host connection.\n");
+        ui_splash_update(100, TR(TR_MODUI_ACTIVE_TITLE));
+        ui_splash_hide_async();
+        return NULL;
+    }
+
     printf("[main] Connecting to mod-host at %s:%d...\n",
            s->host_addr, s->host_cmd_port);
 
@@ -140,7 +155,8 @@ static void *connect_and_load_thread(void *arg)
     /* Auto-load last pedalboard + snapshot */
     FILE *f = fopen(s->last_state_file, "r");
     if (!f) {
-        /* No state file — done */
+        /* No state file — load gate directly (no pedalboard load will do it) */
+        pre_fx_reload();
         ui_splash_update(100, TR(TR_SPLASH_READY));
         ui_splash_hide_async();
         return NULL;

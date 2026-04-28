@@ -16,10 +16,11 @@
 #define NS_INGEN "http://drobilla.net/ns/ingen#"
 #define NS_PEDAL "http://moddevices.com/ns/modpedal#"
 #define NS_DOAP  "http://usefulinc.com/ns/doap#"
-#define NS_MOD   "http://moddevices.com/ns/mod#"
+#define NS_MOD    "http://moddevices.com/ns/mod#"
+#define NS_MODGUI "http://moddevices.com/ns/modgui#"
 #define NS_ATOM  "http://lv2plug.in/ns/ext/atom#"
 #define NS_MIDI  "http://lv2plug.in/ns/ext/midi#"
-#define NS_PERF  "http://moddevices.com/ns/modpedal#performance#"
+#define NS_PERF  "http://moddevices.com/ns/modperformance#"
 
 /* ─── Global sord world (shared across the app) ────────────────────────────── */
 
@@ -71,3 +72,11 @@ bool lv2u_get_string(SordModel *m, SordNode *subject, SordNode *predicate,
 
 /* Iterate all subjects with a given rdf:type. Caller iterates with sord_iter_next(). */
 SordIter *lv2u_iter_type(SordModel *m, SordNode *type_node);
+
+/* ─── String utilities ──────────────────────────────────────────────────────── */
+
+/* Replace typographic quotes with ASCII equivalents in-place:
+ *   U+2018/2019 (curly single quotes) → '
+ *   U+201C/201D (curly double quotes) → "
+ * Safe to call on any UTF-8 string; the result is always <= the input length. */
+void lv2u_normalize_quotes(char *s);

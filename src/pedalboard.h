@@ -21,6 +21,8 @@ typedef struct {
 } pb_patch_t;
 
 /* ─── Plugin port (control input) ───────────────────────────────────────────── */
+#define PB_CV_URI_MAX 300   /* /cv/graph/<inst_sym>/<port_sym> */
+
 typedef struct {
     char   symbol[PB_SYMBOL_MAX];
     float  value;
@@ -31,7 +33,27 @@ typedef struct {
     int    midi_cc;        /* -1 = none */
     float  midi_min;
     float  midi_max;
+    /* CV assignment (addressings.json) */
+    char   cv_source_uri[PB_CV_URI_MAX]; /* "/cv/graph/inst/port" or "" = none */
+    float  cv_min;
+    float  cv_max;
+    char   cv_op_mode;   /* '+' '-' 'b' '=' or '\0' = none */
+    /* Tempo sync (addressings.json /bpm) */
+    float  tempo_divider; /* 0 = not tempo-synced, >0 = current divider value */
 } pb_port_t;
+
+/* ─── CV source descriptor (pre-built for UI picker) ─────────────────────────── */
+#define PB_CV_LABEL_MAX 192
+#define CV_SOURCE_MAX    64
+
+typedef struct {
+    char  uri[PB_CV_URI_MAX];      /* /cv/graph/<inst_sym>/<port_sym> */
+    char  jack_port[256];           /* effect_N:port_sym */
+    char  label[PB_CV_LABEL_MAX];  /* "Plugin Name — Port Name" */
+    char  op_mode;                  /* '+' '-' 'b' '=' */
+    float cv_min;
+    float cv_max;
+} pb_cv_source_t;
 
 /* ─── Plugin instance ────────────────────────────────────────────────────────── */
 typedef struct {
@@ -56,6 +78,16 @@ typedef struct {
 
     int    bypass_midi_channel;
     int    bypass_midi_cc;
+
+    /* mod:performance — preserved across load/save (perf:visible, perf:index) */
+    bool   perf_visible;        /* default true */
+    int    perf_index;          /* -1 = not set */
+
+    /* CV output ports currently enabled as CV sources.
+     * Populated from addressings.json (entry present = enabled).
+     * Used by ui_pedalboard to build the CV source picker list. */
+    char cv_out_enabled[PB_MAX_PORTS][PB_SYMBOL_MAX];
+    int  cv_out_enabled_count;
 } pb_plugin_t;
 
 /* ─── Port connection ─────────────────────────────────────────────────────────── */
@@ -111,6 +143,9 @@ typedef struct {
     float  bpb;
     bool   transport_rolling;   /* true = playing */
     int    transport_sync;      /* 0=internal, 1=midi_clock_slave */
+    bool   midi_loopback;       /* true = Virtual MIDI Loopback enabled */
+    bool   midi_separated_mode; /* false = aggregated MIDI mode */
+
     bool   modified;
 } pedalboard_t;
 
@@ -135,6 +170,10 @@ int pb_save_as(pedalboard_t *pb, const char *new_dir);
 /* List all pedalboard bundles under a directory.
  * Returns count; fills paths array (each entry is a malloc'd string). */
 int pb_list(const char *base_dir, char **paths, int max_paths);
+
+/* Read the doap:name of a pedalboard bundle without loading the full TTL.
+ * Falls back to the filename stem on failure. Returns 0 on success. */
+int pb_read_name(const char *bundle_path, char *out, size_t out_size);
 
 /* Delete all files inside a bundle directory and the directory itself.
  * Returns 0 on success, -1 on error. */
@@ -161,3 +200,4 @@ int  pb_snapshot_overwrite(pedalboard_t *pb, int index);   /* update slot with l
 int  pb_snapshot_load(pedalboard_t *pb, int index);
 void pb_snapshot_delete(pedalboard_t *pb, int index);
 void pb_snapshot_rename(pedalboard_t *pb, int index, const char *name);
+void pb_snapshot_move(pedalboard_t *pb, int from_idx, int to_idx);

@@ -77,6 +77,7 @@ set(SOURCES
     src/bank.c
     src/settings.c
     src/lv2_utils.c
+    src/widget_prefs.c
     src/ui/ui_app.c
     src/ui/ui_pedalboard.c
     src/ui/ui_plugin_block.c
@@ -91,6 +92,7 @@ set(SOURCES
     src/tuner_host.c
     src/wifi_manager.c
     src/ui/ui_pre_fx.c
+    src/ui/ui_scene.c
     src/ui/ui_splash.c
     ${CJSON_SRC}
     resources/fonts/lv_font_montserrat_12.c

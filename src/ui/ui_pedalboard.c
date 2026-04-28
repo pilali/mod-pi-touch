@@ -1,5 +1,6 @@
 #include "ui_pedalboard.h"
 #include "ui_app.h"
+#include "ui_conductor.h"
 #include "ui_param_editor.h"
 #include "ui_plugin_block.h"
 #include "ui_snapshot_bar.h"
@@ -10,8 +11,10 @@
 #include "../hw_detect.h"
 #include "../i18n.h"
 #include "../pre_fx.h"
+#include "../wifi_manager.h"
 
 #include "../plugin_manager.h"
+#include "../widget_prefs.h"
 #include "cJSON.h"
 
 #include <string.h>
@@ -24,9 +27,24 @@
 /* ─── Global pedalboard state ────────────────────────────────────────────────── */
 static pedalboard_t     g_pedalboard;
 static bool             g_pb_loaded = false;
+static char             g_modui_ip[64] = ""; /* cached by background thread before placeholder is shown */
 /* Protects g_pedalboard from concurrent access by the feedback thread
  * (which calls ui_pedalboard_update_param) and the main LVGL thread. */
 static pthread_mutex_t  g_pb_mutex  = PTHREAD_MUTEX_INITIALIZER;
+
+/* ─── Output port value table ────────────────────────────────────────────────── */
+#define OUTPUT_VAL_MAX 256
+typedef struct {
+    int   instance;
+    char  symbol[PB_SYMBOL_MAX];
+    float value;
+} output_val_t;
+static output_val_t g_output_vals[OUTPUT_VAL_MAX];
+static int          g_output_val_count = 0;
+
+/* ─── CV source table (built when a pedalboard is loaded) ───────────────────── */
+static pb_cv_source_t g_cv_sources[CV_SOURCE_MAX];
+static int            g_cv_source_count = 0;
 
 /* ─── Canvas state ───────────────────────────────────────────────────────────── */
 static lv_obj_t *g_canvas_scroll = NULL; /* scrollable container */
@@ -53,19 +71,27 @@ static drag_t g_drag = {0};
 #define IO_LINE_W     2   /* thickness of the vertical bar */
 
 typedef struct {
-    char label[16]; /* "In 1", "In 2", "MIDI", "Out 1"… */
+    char label[16];       /* short canvas label: "In 1", "M2", "Out 1" */
+    char jack_port[64];   /* actual JACK port name: "system:midi_capture_2" */
+    char full_label[64];  /* full device name for chooser: "pisound", "touchosc" */
     bool is_midi;
 } io_port_desc_t;
 
 /* Layout constants — also used by connection drawing code */
-#define LAYOUT_BLOCK_W  160
-#define LAYOUT_BLOCK_H  160
-#define LAYOUT_H_GAP     80
-#define LAYOUT_V_GAP     40
+/* LAYOUT_BLOCK_W/H, LAYOUT_H_GAP, LAYOUT_V_GAP are in ui_pedalboard.h */
 #define LAYOUT_STEP_X   (LAYOUT_BLOCK_W + LAYOUT_H_GAP)
 #define LAYOUT_STEP_Y   (LAYOUT_BLOCK_H + LAYOUT_V_GAP)
 #define LAYOUT_MAX_COLS  32
 #define LAYOUT_MAX_ADJ   16
+
+/* Band-layout geometry */
+#define LAYOUT_MARGIN_TOP   40   /* top margin before first plugin row */
+#define LAYOUT_MARGIN_BOT   30   /* bottom margin after last plugin row */
+#define BAND_SEPARATOR_H    70   /* vertical gap between audio/MIDI/CV bands */
+
+/* Plugin type bands (audio on top, MIDI in middle, CV at bottom) */
+typedef enum { PLUG_AUDIO = 0, PLUG_MIDI = 1, PLUG_CV = 2 } plug_band_t;
+#define PLUG_BAND_COUNT 3
 
 /* Forward declarations — these functions are defined later in the file */
 static bool        uri_to_jack_port(const char *uri, const pedalboard_t *pb,
@@ -78,7 +104,10 @@ static int         uri_to_plugin_idx(const char *uri, const pedalboard_t *pb);
 #define CONN_PORT_MAX   32
 #define CONN_SQ_SIZE    22   /* connection square side in px — large enough for touch */
 #define CONN_PANEL_H   300   /* connection panel height in px */
-#define LINE_PTS_MAX   512   /* flat point pool: up to 4 pts per orthogonal line */
+#define LINE_PTS_MAX  1024   /* flat point pool: up to 6 pts per bent line (chamfered corners) */
+#define CORNER_R         8   /* chamfer radius in px for 90° bends */
+#define CONN_SPREAD_PX  6    /* pixels between parallel lines from the same block */
+#define CONN_DOT_D      8    /* diameter of port dot at block edge */
 
 typedef enum {
     CONN_MODE_IDLE = 0,
@@ -93,6 +122,7 @@ typedef struct {
     char label[64];
     char jack_port[256];
     bool is_midi;
+    bool is_cv;
 } conn_port_info_t;
 
 /* Persistent state */
@@ -119,10 +149,62 @@ static io_port_desc_t g_io_in_c[16];
 static io_port_desc_t g_io_out_c[16];
 static lv_obj_t      *g_parent_obj = NULL;
 
+/* JACK playback port of the ALSA Midi-Through (Virtual MIDI Loopback).
+ * Set when the loopback is enabled; empty when disabled. */
+static char        g_midi_loopback_pb_port[128] = "";
+/* True only when add_hw_port("midi_loopback") has actually been issued to mod-host.
+ * Guards against calling remove_hw_port when the port was never registered. */
+static bool        g_midi_loopback_active = false;
+
+/* Detect the Midi-Through JACK ports and cache the playback port name.
+ * "system:midi_capture_N" (capture = readable by software) is detected first,
+ * then the matching playback port is derived by replacing "capture" → "playback".
+ * The plugin chain WRITES to the playback port; software reads from the capture. */
+static void detect_midi_loopback_ports(void)
+{
+    g_midi_loopback_pb_port[0] = '\0';
+    char capture[128];
+    if (!hw_detect_midi_loopback(capture, sizeof(capture))) return;
+    /* "system:midi_capture_N" → "system:midi_playback_N" */
+    const char *tag = "midi_capture_";
+    char *p = strstr(capture, tag);
+    if (!p) return;
+    size_t prefix_len = (size_t)(p - capture);
+    snprintf(g_midi_loopback_pb_port, sizeof(g_midi_loopback_pb_port),
+             "%.*smidi_playback_%s", (int)prefix_len, capture, p + strlen(tag));
+    fprintf(stderr, "[loopback] detected: capture=%s playback=%s\n",
+            capture, g_midi_loopback_pb_port);
+}
+
+/* Dynamic canvas height and per-band Y offsets (set by compute_layout) */
+static int         g_canvas_h_c           = UI_CANVAS_H;
+static int         g_band_y_c[PLUG_BAND_COUNT] = {0, 0, 0};
+static plug_band_t g_plug_band[PB_MAX_PLUGINS];
+
+/* Per-plugin actual block widths (set before layout, used by drawing code) */
+static int         g_block_w[PB_MAX_PLUGINS];
+
+/* Per-plugin LVGL block objects (NULL when canvas is not built) */
+static lv_obj_t   *g_block_obj[PB_MAX_PLUGINS];
+
 /* Choose-input popup state */
 static conn_port_info_t s_choose_ports[CONN_PORT_MAX];
 static int              s_choose_count = 0;
 static int              s_choose_dst_idx = -99;
+
+/* Disconnect chooser popup state */
+typedef struct {
+    char from_jack[256];
+    char to_jack[256];
+    char from_uri[PB_URI_MAX];
+    char to_uri[PB_URI_MAX];
+    char to_label[80];
+} disc_choice_t;
+
+#define DISC_MAX 32
+static disc_choice_t s_disc_choices[DISC_MAX];
+static int           s_disc_count = 0;
+static lv_obj_t     *g_disc_popup = NULL;
 
 /* lv_line needs persistent point arrays — flat pool, up to 4 pts per line */
 static lv_point_precise_t s_pts[LINE_PTS_MAX];
@@ -134,9 +216,9 @@ static void elem_right_center(int idx, lv_coord_t *cx, lv_coord_t *cy)
 {
     if (idx == -1) { /* system input column */
         *cx = (lv_coord_t)(IO_LINE_X + IO_LINE_W);
-        *cy = (lv_coord_t)(UI_CANVAS_H / 2);
+        *cy = (lv_coord_t)(g_canvas_h_c / 2);
     } else if (idx >= 0 && idx < g_pedalboard.plugin_count) {
-        *cx = g_layout_x[idx] + LAYOUT_BLOCK_W;
+        *cx = g_layout_x[idx] + g_block_w[idx];
         *cy = g_layout_y[idx] + LAYOUT_BLOCK_H / 2;
     } else { *cx = 0; *cy = 0; }
 }
@@ -145,7 +227,7 @@ static void elem_left_center(int idx, lv_coord_t *cx, lv_coord_t *cy)
 {
     if (idx == -2) { /* system output column */
         *cx = (lv_coord_t)(g_right_col_x_c + IO_LINE_X);
-        *cy = (lv_coord_t)(UI_CANVAS_H / 2);
+        *cy = (lv_coord_t)(g_canvas_h_c / 2);
     } else if (idx >= 0 && idx < g_pedalboard.plugin_count) {
         *cx = g_layout_x[idx];
         *cy = g_layout_y[idx] + LAYOUT_BLOCK_H / 2;
@@ -158,20 +240,32 @@ static int collect_src_ports(int src_idx, conn_port_info_t *out, int max)
 {
     int count = 0;
     if (src_idx == -1) { /* system audio/MIDI inputs */
-        int ai = 0, mi = 0;
+        int ai = 0;
         for (int i = 0; i < g_n_in_c && count < max; i++) {
             conn_port_info_t *p = &out[count];
             if (g_io_in_c[i].is_midi) {
-                mi++;
-                snprintf(p->symbol,    sizeof(p->symbol),    "midi_capture_%d", mi);
-                snprintf(p->label,     sizeof(p->label),     "%s", g_io_in_c[i].label);
-                snprintf(p->jack_port, sizeof(p->jack_port), "system:midi_capture_%d", mi);
+                /* Use actual JACK port from io_port_desc_t to avoid sequential counter bug */
+                const char *jp = g_io_in_c[i].jack_port;
+                const char *sym = (strncmp(jp, "system:", 7) == 0) ? jp + 7 : jp;
+                const char *lbl = g_io_in_c[i].full_label[0]
+                                      ? g_io_in_c[i].full_label
+                                      : g_io_in_c[i].label;
+                snprintf(p->symbol,    sizeof(p->symbol),    "%s", sym);
+                snprintf(p->label,     sizeof(p->label),     "%s", lbl);
+                snprintf(p->jack_port, sizeof(p->jack_port), "%s", jp);
                 p->is_midi = true;
             } else {
                 ai++;
-                snprintf(p->symbol,    sizeof(p->symbol),    "capture_%d", ai);
-                snprintf(p->label,     sizeof(p->label),     "%s", g_io_in_c[i].label);
-                snprintf(p->jack_port, sizeof(p->jack_port), "system:capture_%d", ai);
+                snprintf(p->symbol, sizeof(p->symbol), "capture_%d", ai);
+                snprintf(p->label,  sizeof(p->label),  "%s", g_io_in_c[i].label);
+                /* Mirror uri_to_jack_port: when pre-fx gate is loaded, audio
+                 * captures are redirected through it (capture_N → Output_N). */
+                if (pre_fx_is_loaded() && ai >= 1 && ai <= 8)
+                    snprintf(p->jack_port, sizeof(p->jack_port),
+                             "effect_%d:Output_%d", PRE_FX_GATE_INSTANCE, ai);
+                else
+                    snprintf(p->jack_port, sizeof(p->jack_port),
+                             "system:capture_%d", ai);
                 p->is_midi = false;
             }
             count++;
@@ -182,13 +276,17 @@ static int collect_src_ports(int src_idx, conn_port_info_t *out, int max)
         if (info) {
             for (int j = 0; j < info->port_count && count < max; j++) {
                 pm_port_type_t t = info->ports[j].type;
-                if (t != PM_PORT_AUDIO_OUT && t != PM_PORT_MIDI_OUT) continue;
+                if (t != PM_PORT_AUDIO_OUT && t != PM_PORT_MIDI_OUT && t != PM_PORT_CV_OUT) continue;
                 conn_port_info_t *p = &out[count];
                 snprintf(p->symbol,    sizeof(p->symbol),    "%s", info->ports[j].symbol);
-                snprintf(p->label,     sizeof(p->label),     "%s", info->ports[j].name);
+                if (t == PM_PORT_CV_OUT)
+                    snprintf(p->label, sizeof(p->label), "%s [CV]", info->ports[j].name);
+                else
+                    snprintf(p->label, sizeof(p->label), "%s", info->ports[j].name);
                 snprintf(p->jack_port, sizeof(p->jack_port), "effect_%d:%s",
                          plug->instance_id, info->ports[j].symbol);
                 p->is_midi = (t == PM_PORT_MIDI_OUT);
+                p->is_cv   = (t == PM_PORT_CV_OUT);
                 count++;
             }
         }
@@ -196,26 +294,44 @@ static int collect_src_ports(int src_idx, conn_port_info_t *out, int max)
     return count;
 }
 
-static int collect_dst_ports(int dst_idx, conn_port_info_t *out, int max, bool want_midi)
+static int collect_dst_ports(int dst_idx, conn_port_info_t *out, int max,
+                             bool want_midi, bool want_cv)
 {
     int count = 0;
-    if (dst_idx == -2) { /* system audio/MIDI outputs */
-        int ai = 0, mi = 0;
+    if (dst_idx == -2) { /* system audio/MIDI outputs — no CV */
+        if (want_cv) return 0;
+        int ai = 0;
         for (int i = 0; i < g_n_out_c && count < max; i++) {
             bool is_m = g_io_out_c[i].is_midi;
-            if (is_m) mi++; else ai++;
+            /* Detect the loopback entry (added last in collect_io_descs) */
+            bool is_lb = (is_m && strcmp(g_io_out_c[i].label, "Loopback") == 0);
+            if (!is_m) ai++;
             if (is_m != want_midi) continue;
             conn_port_info_t *p = &out[count];
-            if (is_m) {
-                snprintf(p->symbol,    sizeof(p->symbol),    "midi_playback_%d", mi);
-                snprintf(p->label,     sizeof(p->label),     "%s", g_io_out_c[i].label);
-                snprintf(p->jack_port, sizeof(p->jack_port), "system:midi_playback_%d", mi);
+            if (is_lb) {
+                /* Virtual MIDI Loopback: use the actual Midi-Through playback port */
+                if (!g_midi_loopback_pb_port[0]) continue;
+                snprintf(p->symbol,    sizeof(p->symbol),    "midi_loopback");
+                snprintf(p->label,     sizeof(p->label),     "MIDI Loopback");
+                snprintf(p->jack_port, sizeof(p->jack_port), "%s",
+                         g_midi_loopback_pb_port);
+            } else if (is_m) {
+                /* Use actual JACK port from io_port_desc_t to avoid sequential counter bug */
+                const char *jp = g_io_out_c[i].jack_port;
+                const char *sym = (strncmp(jp, "system:", 7) == 0) ? jp + 7 : jp;
+                const char *lbl = g_io_out_c[i].full_label[0]
+                                      ? g_io_out_c[i].full_label
+                                      : g_io_out_c[i].label;
+                snprintf(p->symbol,    sizeof(p->symbol),    "%s", sym);
+                snprintf(p->label,     sizeof(p->label),     "%s", lbl);
+                snprintf(p->jack_port, sizeof(p->jack_port), "%s", jp);
             } else {
                 snprintf(p->symbol,    sizeof(p->symbol),    "playback_%d", ai);
                 snprintf(p->label,     sizeof(p->label),     "%s", g_io_out_c[i].label);
                 snprintf(p->jack_port, sizeof(p->jack_port), "system:playback_%d", ai);
             }
             p->is_midi = is_m;
+            p->is_cv   = false;
             count++;
         }
     } else if (dst_idx >= 0 && dst_idx < g_pedalboard.plugin_count) {
@@ -224,15 +340,17 @@ static int collect_dst_ports(int dst_idx, conn_port_info_t *out, int max, bool w
         if (info) {
             for (int j = 0; j < info->port_count && count < max; j++) {
                 pm_port_type_t t = info->ports[j].type;
-                if (t != PM_PORT_AUDIO_IN && t != PM_PORT_MIDI_IN) continue;
+                if (t != PM_PORT_AUDIO_IN && t != PM_PORT_MIDI_IN && t != PM_PORT_CV_IN) continue;
                 bool is_m = (t == PM_PORT_MIDI_IN);
-                if (is_m != want_midi) continue;
+                bool is_c = (t == PM_PORT_CV_IN);
+                if (is_m != want_midi || is_c != want_cv) continue;
                 conn_port_info_t *p = &out[count];
                 snprintf(p->symbol,    sizeof(p->symbol),    "%s", info->ports[j].symbol);
                 snprintf(p->label,     sizeof(p->label),     "%s", info->ports[j].name);
                 snprintf(p->jack_port, sizeof(p->jack_port), "effect_%d:%s",
                          plug->instance_id, info->ports[j].symbol);
                 p->is_midi = is_m;
+                p->is_cv   = is_c;
                 count++;
             }
         }
@@ -282,6 +400,11 @@ static void conn_panel_close(void)
         lv_obj_add_flag(g_choose_popup, LV_OBJ_FLAG_HIDDEN);
         lv_obj_delete_async(g_choose_popup);
         g_choose_popup = NULL;
+    }
+    if (g_disc_popup) {
+        lv_obj_add_flag(g_disc_popup, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_delete_async(g_disc_popup);
+        g_disc_popup = NULL;
     }
     conn_panel_hide();
     g_conn_mode      = CONN_MODE_IDLE;
@@ -388,11 +511,15 @@ static void conn_target_selected(int dst_plugin_idx)
     }
 
     bool src_is_midi = g_src_ports[g_conn_sel_port].is_midi;
+    bool src_is_cv   = g_src_ports[g_conn_sel_port].is_cv;
     conn_port_info_t dst_ports[CONN_PORT_MAX];
-    int n_dst = collect_dst_ports(dst_plugin_idx, dst_ports, CONN_PORT_MAX, src_is_midi);
+    int n_dst = collect_dst_ports(dst_plugin_idx, dst_ports, CONN_PORT_MAX, src_is_midi, src_is_cv);
 
     if (n_dst == 0) {
-        ui_app_show_toast_error(src_is_midi ? "No MIDI input on target." : "No audio input on target.");
+        const char *err = src_is_midi ? "No MIDI input on target."
+                        : src_is_cv   ? "No CV input on target."
+                        :               "No audio input on target.";
+        ui_app_show_toast_error(err);
         conn_panel_close();
         return;
     }
@@ -447,6 +574,183 @@ static void conn_btn_connect_cb(lv_event_t *e)
     show_toast("Tap a plugin to connect...");
 }
 
+/* Resolve a JACK port name to a short human-readable label for the disconnect chooser.
+ * Returns a pointer into buf (always non-NULL). */
+static const char *jack_port_to_display(const char *jp, char *buf, size_t bufsz)
+{
+    /* system:capture_N → "In N" (source side) */
+    if (strncmp(jp, "system:capture_", 15) == 0) {
+        snprintf(buf, bufsz, "In %s", jp + 15);
+        return buf;
+    }
+    /* system:midi_capture_N → full device label from g_io_in_c (source side) */
+    if (strncmp(jp, "system:midi_capture_", 20) == 0) {
+        for (int i = 0; i < g_n_in_c; i++) {
+            if (strcmp(g_io_in_c[i].jack_port, jp) == 0) {
+                snprintf(buf, bufsz, "%s", g_io_in_c[i].full_label[0]
+                                              ? g_io_in_c[i].full_label
+                                              : g_io_in_c[i].label);
+                return buf;
+            }
+        }
+        snprintf(buf, bufsz, "%s", jp + 20);
+        return buf;
+    }
+    /* system:playback_N → "Out N" */
+    if (strncmp(jp, "system:playback_", 16) == 0) {
+        snprintf(buf, bufsz, "Out %s", jp + 16);
+        return buf;
+    }
+    /* system:midi_playback_N → full device label from g_io_out_c */
+    if (strncmp(jp, "system:midi_playback_", 21) == 0) {
+        for (int i = 0; i < g_n_out_c; i++) {
+            if (strcmp(g_io_out_c[i].jack_port, jp) == 0) {
+                snprintf(buf, bufsz, "%s", g_io_out_c[i].full_label[0]
+                                              ? g_io_out_c[i].full_label
+                                              : g_io_out_c[i].label);
+                return buf;
+            }
+        }
+        snprintf(buf, bufsz, "%s", jp + 21);
+        return buf;
+    }
+    /* Midi-Through loopback playback port */
+    if (g_midi_loopback_pb_port[0] && strcmp(jp, g_midi_loopback_pb_port) == 0) {
+        snprintf(buf, bufsz, "MIDI Loopback");
+        return buf;
+    }
+    /* effect_NNN:sym → plugin label, with pre-fx instances handled specially */
+    if (strncmp(jp, "effect_", 7) == 0) {
+        const char *colon = strchr(jp + 7, ':');
+        if (colon) {
+            int iid = atoi(jp + 7);
+            if (iid == PRE_FX_GATE_INSTANCE) {
+                snprintf(buf, bufsz, "Gate:%s", colon + 1);
+                return buf;
+            }
+            if (iid == PRE_FX_TUNER_INSTANCE) {
+                snprintf(buf, bufsz, "Tuner:%s", colon + 1);
+                return buf;
+            }
+            for (int i = 0; i < g_pedalboard.plugin_count; i++) {
+                if (g_pedalboard.plugins[i].instance_id == iid) {
+                    snprintf(buf, bufsz, "%s:%s",
+                             g_pedalboard.plugins[i].label, colon + 1);
+                    return buf;
+                }
+            }
+        }
+    }
+    snprintf(buf, bufsz, "%s", jp);
+    return buf;
+}
+
+/* ── Disconnect chooser callbacks ──────────────────────────────────────────────── */
+
+static void disc_choice_btn_cb(lv_event_t *e)
+{
+    int idx = (int)(intptr_t)lv_event_get_user_data(e);
+    if (idx < 0 || idx >= s_disc_count) return;
+    disc_choice_t *dc = &s_disc_choices[idx];
+
+    host_disconnect(dc->from_jack, dc->to_jack);
+    pb_remove_connection(&g_pedalboard, dc->from_uri, dc->to_uri);
+    g_pedalboard.modified = true;
+    ui_app_update_title(g_pedalboard.name, true);
+
+    if (g_disc_popup) {
+        lv_obj_add_flag(g_disc_popup, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_delete_async(g_disc_popup);
+        g_disc_popup = NULL;
+    }
+    conn_panel_close();
+    ui_pedalboard_refresh();
+}
+
+static void disc_all_btn_cb(lv_event_t *e)
+{
+    (void)e;
+    for (int i = 0; i < s_disc_count; i++) {
+        disc_choice_t *dc = &s_disc_choices[i];
+        host_disconnect(dc->from_jack, dc->to_jack);
+        pb_remove_connection(&g_pedalboard, dc->from_uri, dc->to_uri);
+    }
+    if (s_disc_count > 0) {
+        g_pedalboard.modified = true;
+        ui_app_update_title(g_pedalboard.name, true);
+    }
+    if (g_disc_popup) {
+        lv_obj_add_flag(g_disc_popup, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_delete_async(g_disc_popup);
+        g_disc_popup = NULL;
+    }
+    conn_panel_close();
+    ui_pedalboard_refresh();
+}
+
+static void show_disconnect_chooser(void)
+{
+    int n = s_disc_count;
+    int popup_h = 50 + (n + 1) * 56;  /* +1 for "All" button */
+    if (popup_h > 440) popup_h = 440;
+
+    g_disc_popup = lv_obj_create(lv_layer_top());
+    lv_obj_t *popup = g_disc_popup;
+    lv_obj_set_size(popup, 440, popup_h);
+    lv_obj_align(popup, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_set_style_bg_color(popup, UI_COLOR_SURFACE, 0);
+    lv_obj_set_style_bg_opa(popup, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_color(popup, UI_COLOR_PRIMARY, 0);
+    lv_obj_set_style_border_width(popup, 2, 0);
+    lv_obj_set_style_radius(popup, 8, 0);
+    lv_obj_set_style_pad_all(popup, 12, 0);
+    lv_obj_clear_flag(popup, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *title = lv_label_create(popup);
+    lv_label_set_text(title, TR(TR_PB_DISC_TITLE));
+    lv_obj_set_style_text_color(title, UI_COLOR_TEXT, 0);
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
+    lv_obj_align(title, LV_ALIGN_TOP_LEFT, 0, 0);
+
+    for (int i = 0; i < n; i++) {
+        lv_obj_t *btn = lv_btn_create(popup);
+        lv_obj_set_size(btn, 410, 48);
+        lv_obj_set_pos(btn, 0, 36 + i * 54);
+        lv_obj_set_style_bg_color(btn, UI_COLOR_BG, 0);
+        lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_color(btn, UI_COLOR_TEXT_DIM, 0);
+        lv_obj_set_style_border_width(btn, 1, 0);
+        lv_obj_set_style_radius(btn, 4, 0);
+        lv_obj_set_style_shadow_width(btn, 0, 0);
+
+        lv_obj_t *lbl = lv_label_create(btn);
+        lv_label_set_text(lbl, s_disc_choices[i].to_label);
+        lv_obj_set_style_text_color(lbl, UI_COLOR_TEXT, 0);
+        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_14, 0);
+        lv_obj_center(lbl);
+
+        lv_obj_add_event_cb(btn, disc_choice_btn_cb, LV_EVENT_SHORT_CLICKED,
+                            (void *)(intptr_t)i);
+    }
+
+    /* "All" / "Tout" button at the bottom */
+    lv_obj_t *all_btn = lv_btn_create(popup);
+    lv_obj_set_size(all_btn, 410, 48);
+    lv_obj_set_pos(all_btn, 0, 36 + n * 54);
+    lv_obj_set_style_bg_color(all_btn, UI_COLOR_PRIMARY, 0);
+    lv_obj_set_style_bg_opa(all_btn, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(all_btn, 0, 0);
+    lv_obj_set_style_radius(all_btn, 4, 0);
+    lv_obj_set_style_shadow_width(all_btn, 0, 0);
+
+    lv_obj_t *all_lbl = lv_label_create(all_btn);
+    lv_label_set_text(all_lbl, TR(TR_PB_DISC_ALL));
+    lv_obj_set_style_text_color(all_lbl, lv_color_white(), 0);
+    lv_obj_set_style_text_font(all_lbl, &lv_font_montserrat_14, 0);
+    lv_obj_center(all_lbl);
+    lv_obj_add_event_cb(all_btn, disc_all_btn_cb, LV_EVENT_SHORT_CLICKED, NULL);
+}
+
 static void conn_btn_disconnect_cb(lv_event_t *e)
 {
     (void)e;
@@ -456,30 +760,46 @@ static void conn_btn_disconnect_cb(lv_event_t *e)
     }
 
     const char *src_jack = g_src_ports[g_conn_sel_port].jack_port;
-    int removed = 0;
 
-    /* Remove ALL connections originating from the selected source port */
-    for (int i = 0; i < g_pedalboard.connection_count; ) {
+    /* Collect all connections from this source port */
+    s_disc_count = 0;
+    for (int i = 0; i < g_pedalboard.connection_count && s_disc_count < DISC_MAX; i++) {
         pb_connection_t *conn = &g_pedalboard.connections[i];
         char from_jack[256], to_jack[256];
         bool fok = uri_to_jack_port(conn->from, &g_pedalboard, from_jack, sizeof(from_jack));
         bool tok = uri_to_jack_port(conn->to,   &g_pedalboard, to_jack,   sizeof(to_jack));
+        if (!fok || !tok || strcmp(from_jack, src_jack) != 0) continue;
 
-        if (fok && tok && strcmp(from_jack, src_jack) == 0) {
-            host_disconnect(from_jack, to_jack);
-            pb_remove_connection(&g_pedalboard, conn->from, conn->to);
-            g_pedalboard.modified = true;
-            removed++;
-            continue; /* entry removed — don't advance i */
-        }
-        i++;
+        disc_choice_t *dc = &s_disc_choices[s_disc_count];
+        snprintf(dc->from_jack, sizeof(dc->from_jack), "%s", from_jack);
+        snprintf(dc->to_jack,   sizeof(dc->to_jack),   "%s", to_jack);
+        snprintf(dc->from_uri,  sizeof(dc->from_uri),  "%s", conn->from);
+        snprintf(dc->to_uri,    sizeof(dc->to_uri),    "%s", conn->to);
+        char lbuf[80];
+        snprintf(dc->to_label, sizeof(dc->to_label), "%s",
+                 jack_port_to_display(to_jack, lbuf, sizeof(lbuf)));
+        s_disc_count++;
     }
 
-    if (removed > 0)
-        ui_app_update_title(g_pedalboard.name, true);
+    if (s_disc_count == 0) {
+        conn_panel_close();
+        return;
+    }
 
-    conn_panel_close();
-    ui_pedalboard_refresh();
+    if (s_disc_count == 1) {
+        /* Single connection — disconnect directly */
+        host_disconnect(s_disc_choices[0].from_jack, s_disc_choices[0].to_jack);
+        pb_remove_connection(&g_pedalboard,
+                             s_disc_choices[0].from_uri, s_disc_choices[0].to_uri);
+        g_pedalboard.modified = true;
+        ui_app_update_title(g_pedalboard.name, true);
+        conn_panel_close();
+        ui_pedalboard_refresh();
+        return;
+    }
+
+    /* Multiple connections — show chooser popup */
+    show_disconnect_chooser();
 }
 
 static void conn_panel_close_btn_cb(lv_event_t *e) { (void)e; conn_panel_close(); }
@@ -656,25 +976,96 @@ static lv_coord_t sysport_y(const char *port_sym, bool is_input)
 {
     io_port_desc_t *descs = is_input ? g_io_in_c : g_io_out_c;
     int n              = is_input ? g_n_in_c  : g_n_out_c;
-    if (n == 0) return (lv_coord_t)(UI_CANVAS_H / 2);
+    if (n == 0) return (lv_coord_t)(g_canvas_h_c / 2);
 
-    bool is_midi = (strncmp(port_sym, "midi", 4) == 0);
-    const char *p = strrchr(port_sym, '_');
-    int num = (p && *(p+1)) ? atoi(p + 1) : 1;   /* 1-based number in port name */
+    int idx = -1;
 
-    int idx;
-    if (!is_midi) {
-        idx = num - 1;
+    if (strncmp(port_sym, "midi", 4) == 0) {
+        /* MIDI port: look up by actual JACK port name stored in jack_port field.
+         * Cannot use the port number directly because Midi-Through filtering makes
+         * port numbers non-contiguous (e.g. pisound may be midi_capture_2 = idx 0). */
+        if (strcmp(port_sym, "midi_loopback") == 0) {
+            /* Virtual loopback: find the entry labeled "Loopback" */
+            for (int i = 0; i < n; i++)
+                if (descs[i].is_midi && strcmp(descs[i].label, "Loopback") == 0)
+                    { idx = i; break; }
+        } else {
+            /* Real MIDI port: match by full JACK name "system:<port_sym>" */
+            char full[80];
+            snprintf(full, sizeof(full), "system:%s", port_sym);
+            for (int i = 0; i < n; i++)
+                if (descs[i].is_midi && strcmp(descs[i].jack_port, full) == 0)
+                    { idx = i; break; }
+        }
+        /* Fallback: first MIDI row */
+        if (idx < 0)
+            for (int i = 0; i < n; i++)
+                if (descs[i].is_midi) { idx = i; break; }
     } else {
-        int audio_cnt = 0;
-        for (int i = 0; i < n; i++) if (!descs[i].is_midi) audio_cnt++;
-        idx = audio_cnt + (num - 1);
+        /* Audio port: always sequential capture_1..N / playback_1..N */
+        const char *p = strrchr(port_sym, '_');
+        int num = (p && *(p + 1)) ? atoi(p + 1) : 1;
+        idx = num - 1;
     }
-    if (idx < 0 || idx >= n) idx = 0;
 
+    if (idx < 0 || idx >= n) idx = 0;
     int total_h = n * IO_ROW_H - (IO_ROW_H - IO_DOT);
-    int start_y = (UI_CANVAS_H - total_h) / 2;
+    int start_y = (g_canvas_h_c - total_h) / 2;
     return (lv_coord_t)(start_y + idx * IO_ROW_H + IO_DOT / 2);
+}
+
+/* ── Connection type (for color coding) ──────────────────────────────────────── */
+
+typedef enum { CONN_TYPE_AUDIO = 0, CONN_TYPE_MIDI, CONN_TYPE_CV } conn_type_t;
+
+static conn_type_t classify_connection(const pb_connection_t *conn,
+                                       const pedalboard_t *pb)
+{
+    const char *fsys = uri_to_sysport(conn->from, pb);
+    if (fsys)
+        return (strncmp(fsys, "midi", 4) == 0) ? CONN_TYPE_MIDI : CONN_TYPE_AUDIO;
+
+    int pi = uri_to_plugin_idx(conn->from, pb);
+    if (pi < 0) return CONN_TYPE_AUDIO;
+
+    const char *port_sym = strrchr(conn->from, '/');
+    if (!port_sym) return CONN_TYPE_AUDIO;
+    port_sym++;
+
+    const pm_plugin_info_t *info = pm_plugin_by_uri(pb->plugins[pi].uri);
+    if (!info) return CONN_TYPE_AUDIO;
+
+    for (int k = 0; k < info->port_count; k++) {
+        if (strcmp(info->ports[k].symbol, port_sym) == 0) {
+            switch (info->ports[k].type) {
+                case PM_PORT_MIDI_OUT:
+                case PM_PORT_MIDI_IN:  return CONN_TYPE_MIDI;
+                case PM_PORT_CV_OUT:
+                case PM_PORT_CV_IN:    return CONN_TYPE_CV;
+                default:               return CONN_TYPE_AUDIO;
+            }
+        }
+    }
+    return CONN_TYPE_AUDIO;
+}
+
+static lv_color_t conn_type_color(conn_type_t type)
+{
+    switch (type) {
+        case CONN_TYPE_MIDI: return UI_COLOR_ACCENT;           /* amber  #F59E0B */
+        case CONN_TYPE_CV:   return lv_color_hex(0x10B981);   /* emerald #10B981 */
+        default:             return UI_COLOR_PRIMARY;          /* indigo #6366F1 */
+    }
+}
+
+/* Fan-out shading: each successive line from the same port darkens ~20% toward black. */
+static lv_color_t conn_color_fanned(conn_type_t type, int k, int n)
+{
+    lv_color_t base = conn_type_color(type);
+    if (n <= 1 || k == 0) return base;
+    uint8_t mix = (uint8_t)(255 - k * 55);
+    if (mix < 80) mix = 80;
+    return lv_color_mix(base, lv_color_black(), mix);
 }
 
 /* ── Draw connection lines ───────────────────────────────────────────────────── */
@@ -684,8 +1075,16 @@ static void redraw_connections(void)
     if (!g_canvas_scroll) return;
     s_pts_used = 0;
 
-    /* Gather unique (src, dst) pairs — used by draw_conn_squares for stub check */
+    /* ── Pre-pass: gather groups, cache si/di, build spread counters ── */
     g_conn_group_count = 0;
+
+    int c_si[PB_MAX_CONNECTS], c_di[PB_MAX_CONNECTS];
+    int src_cnt[PB_MAX_PLUGINS], dst_cnt[PB_MAX_PLUGINS];
+    memset(c_si,    0xFF, sizeof(c_si));   /* -1 sentinel via memset not reliable */
+    memset(c_di,    0xFF, sizeof(c_di));
+    memset(src_cnt, 0,    sizeof(src_cnt));
+    memset(dst_cnt, 0,    sizeof(dst_cnt));
+
     for (int c = 0; c < g_pedalboard.connection_count; c++) {
         const char *fu = g_pedalboard.connections[c].from;
         const char *tu = g_pedalboard.connections[c].to;
@@ -693,8 +1092,10 @@ static void redraw_connections(void)
         const char *tsys = uri_to_sysport(tu, &g_pedalboard);
         int si = fsys ? -1 : uri_to_plugin_idx(fu, &g_pedalboard);
         int di = tsys ? -2 : uri_to_plugin_idx(tu, &g_pedalboard);
-        if (!fsys && si < 0) continue;
-        if (!tsys && di < 0) continue;
+        if (!fsys && si < 0) { c_si[c] = -99; continue; }
+        if (!tsys && di < 0) { c_si[c] = -99; continue; }
+        c_si[c] = si; c_di[c] = di;
+
         bool dup = false;
         for (int k = 0; k < g_conn_group_count; k++)
             if (g_conn_groups[k].src_idx == si && g_conn_groups[k].dst_idx == di)
@@ -704,32 +1105,61 @@ static void redraw_connections(void)
             g_conn_groups[g_conn_group_count].dst_idx = di;
             g_conn_group_count++;
         }
+
+        if (si >= 0 && si < g_pedalboard.plugin_count) src_cnt[si]++;
+        if (di >= 0 && di < g_pedalboard.plugin_count) dst_cnt[di]++;
     }
 
-    /* Draw one orthogonal line per individual connection with port-accurate y */
+    /* Assign per-connection spread indices */
+    int src_ki[PB_MAX_CONNECTS], dst_ki[PB_MAX_CONNECTS];
+    int src_cur[PB_MAX_PLUGINS], dst_cur[PB_MAX_PLUGINS];
+    memset(src_ki,  0, sizeof(src_ki));
+    memset(dst_ki,  0, sizeof(dst_ki));
+    memset(src_cur, 0, sizeof(src_cur));
+    memset(dst_cur, 0, sizeof(dst_cur));
     for (int c = 0; c < g_pedalboard.connection_count; c++) {
+        if (c_si[c] == -99) continue;
+        int si = c_si[c], di = c_di[c];
+        if (si >= 0 && si < g_pedalboard.plugin_count) src_ki[c] = src_cur[si]++;
+        if (di >= 0 && di < g_pedalboard.plugin_count) dst_ki[c] = dst_cur[di]++;
+    }
+
+    /* ── Draw one orthogonal line per connection ── */
+    for (int c = 0; c < g_pedalboard.connection_count; c++) {
+        if (c_si[c] == -99) continue;
+        int si = c_si[c], di = c_di[c];
         const char *fu = g_pedalboard.connections[c].from;
         const char *tu = g_pedalboard.connections[c].to;
         const char *fsys = uri_to_sysport(fu, &g_pedalboard);
         const char *tsys = uri_to_sysport(tu, &g_pedalboard);
-        int si = fsys ? -1 : uri_to_plugin_idx(fu, &g_pedalboard);
-        int di = tsys ? -2 : uri_to_plugin_idx(tu, &g_pedalboard);
-        if (!fsys && si < 0) continue;
-        if (!tsys && di < 0) continue;
 
         /* X positions from column edges */
         lv_coord_t x1, x2, tmp;
         elem_right_center(si, &x1, &tmp);
         elem_left_center (di, &x2, &tmp);
 
-        /* Y: port-specific for system I/O, block centre for plugins */
-        lv_coord_t y1 = (si == -1 && fsys)
-            ? sysport_y(fsys, true)
-            : (lv_coord_t)(g_layout_y[si] + LAYOUT_BLOCK_H / 2);
+        /* Y: system ports use port-specific Y; plugins use spread Y */
+        lv_coord_t y1, y2;
+        if (si == -1 && fsys) {
+            y1 = sysport_y(fsys, true);
+        } else {
+            int n = src_cnt[si]; int k = src_ki[c];
+            y1 = (lv_coord_t)(g_layout_y[si] + LAYOUT_BLOCK_H / 2
+                              + (k - (n - 1) / 2.0f) * CONN_SPREAD_PX);
+        }
+        if (di == -2 && tsys) {
+            y2 = sysport_y(tsys, false);
+        } else {
+            int n = dst_cnt[di]; int k = dst_ki[c];
+            y2 = (lv_coord_t)(g_layout_y[di] + LAYOUT_BLOCK_H / 2
+                              + (k - (n - 1) / 2.0f) * CONN_SPREAD_PX);
+        }
 
-        lv_coord_t y2 = (di == -2 && tsys)
-            ? sysport_y(tsys, false)
-            : (lv_coord_t)(g_layout_y[di] + LAYOUT_BLOCK_H / 2);
+        /* Color by signal type + fan-out index (darker for each extra line) */
+        conn_type_t ctype = classify_connection(&g_pedalboard.connections[c], &g_pedalboard);
+        int fan_k = (si >= 0 && si < g_pedalboard.plugin_count) ? src_ki[c] : 0;
+        int fan_n = (si >= 0 && si < g_pedalboard.plugin_count) ? src_cnt[si] : 1;
+        lv_color_t  line_color = conn_color_fanned(ctype, fan_k, fan_n);
 
         /* Vertical segment placed close to the destination (1/4 gap before it) */
         lv_coord_t mid_x = x2 - (lv_coord_t)(LAYOUT_H_GAP / 4);
@@ -742,21 +1172,62 @@ static void redraw_connections(void)
             s_pts[s_pts_used + 1] = (lv_point_precise_t){(float)x2, (float)y1};
             n_pts = 2;
         } else {
-            if (s_pts_used + 4 > LINE_PTS_MAX) break;
-            s_pts[s_pts_used + 0] = (lv_point_precise_t){(float)x1,    (float)y1};
-            s_pts[s_pts_used + 1] = (lv_point_precise_t){(float)mid_x, (float)y1};
-            s_pts[s_pts_used + 2] = (lv_point_precise_t){(float)mid_x, (float)y2};
-            s_pts[s_pts_used + 3] = (lv_point_precise_t){(float)x2,    (float)y2};
-            n_pts = 4;
+            /* Bent line: two 90° corners at (mid_x, y1) and (mid_x, y2).
+             * Add chamfer points to soften each corner with radius CORNER_R. */
+            float dy   = (y2 > y1) ? 1.0f : -1.0f;
+            int   vdist = (int)(dy * (y2 - y1));   /* abs vertical distance */
+            if (vdist >= 2 * CORNER_R) {
+                /* Chamfered: 6 points */
+                if (s_pts_used + 6 > LINE_PTS_MAX) break;
+                s_pts[s_pts_used + 0] = (lv_point_precise_t){(float)x1,              (float)y1};
+                s_pts[s_pts_used + 1] = (lv_point_precise_t){(float)(mid_x - CORNER_R), (float)y1};
+                s_pts[s_pts_used + 2] = (lv_point_precise_t){(float)mid_x,           (float)(y1 + dy * CORNER_R)};
+                s_pts[s_pts_used + 3] = (lv_point_precise_t){(float)mid_x,           (float)(y2 - dy * CORNER_R)};
+                s_pts[s_pts_used + 4] = (lv_point_precise_t){(float)(mid_x + CORNER_R), (float)y2};
+                s_pts[s_pts_used + 5] = (lv_point_precise_t){(float)x2,              (float)y2};
+                n_pts = 6;
+            } else {
+                /* Too short to chamfer: keep sharp */
+                if (s_pts_used + 4 > LINE_PTS_MAX) break;
+                s_pts[s_pts_used + 0] = (lv_point_precise_t){(float)x1,    (float)y1};
+                s_pts[s_pts_used + 1] = (lv_point_precise_t){(float)mid_x, (float)y1};
+                s_pts[s_pts_used + 2] = (lv_point_precise_t){(float)mid_x, (float)y2};
+                s_pts[s_pts_used + 3] = (lv_point_precise_t){(float)x2,    (float)y2};
+                n_pts = 4;
+            }
         }
 
         lv_obj_t *line = lv_line_create(g_canvas_scroll);
         lv_line_set_points(line, &s_pts[s_pts_used], n_pts);
-        lv_obj_set_style_line_color(line, lv_color_hex(0x505050), 0);
+        lv_obj_set_style_line_color(line, line_color, 0);
         lv_obj_set_style_line_width(line, 2, 0);
         lv_obj_set_style_line_rounded(line, false, 0);
         lv_obj_clear_flag(line, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
         s_pts_used += n_pts;
+
+        /* Port dots at block edges (only for plugin endpoints, not system I/O) */
+        if (si >= 0) {
+            lv_obj_t *dot = lv_obj_create(g_canvas_scroll);
+            lv_obj_set_size(dot, CONN_DOT_D, CONN_DOT_D);
+            lv_obj_set_pos(dot, x1 - CONN_DOT_D / 2, y1 - CONN_DOT_D / 2);
+            lv_obj_set_style_bg_color(dot, line_color, 0);
+            lv_obj_set_style_bg_opa(dot, LV_OPA_COVER, 0);
+            lv_obj_set_style_border_width(dot, 0, 0);
+            lv_obj_set_style_radius(dot, LV_RADIUS_CIRCLE, 0);
+            lv_obj_set_style_shadow_width(dot, 0, 0);
+            lv_obj_clear_flag(dot, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+        }
+        if (di >= 0) {
+            lv_obj_t *dot = lv_obj_create(g_canvas_scroll);
+            lv_obj_set_size(dot, CONN_DOT_D, CONN_DOT_D);
+            lv_obj_set_pos(dot, x2 - CONN_DOT_D / 2, y2 - CONN_DOT_D / 2);
+            lv_obj_set_style_bg_color(dot, line_color, 0);
+            lv_obj_set_style_bg_opa(dot, LV_OPA_COVER, 0);
+            lv_obj_set_style_border_width(dot, 0, 0);
+            lv_obj_set_style_radius(dot, LV_RADIUS_CIRCLE, 0);
+            lv_obj_set_style_shadow_width(dot, 0, 0);
+            lv_obj_clear_flag(dot, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+        }
     }
 
     /* Stub line for plugins with no outgoing connections */
@@ -777,7 +1248,7 @@ static void redraw_connections(void)
 
         lv_obj_t *line = lv_line_create(g_canvas_scroll);
         lv_line_set_points(line, &s_pts[s_pts_used], 2);
-        lv_obj_set_style_line_color(line, lv_color_hex(0x404040), 0);
+        lv_obj_set_style_line_color(line, lv_color_hex(0x252840), 0);
         lv_obj_set_style_line_width(line, 2, 0);
         lv_obj_set_style_line_rounded(line, false, 0);
         lv_obj_clear_flag(line, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
@@ -810,13 +1281,13 @@ static void draw_conn_squares(void)
 
     /* One square per plugin, centered in the horizontal gap to the right */
     for (int i = 0; i < g_pedalboard.plugin_count; i++) {
-        lv_coord_t sx = g_layout_x[i] + LAYOUT_BLOCK_W + LAYOUT_H_GAP / 2 - CONN_SQ_SIZE / 2;
+        lv_coord_t sx = g_layout_x[i] + g_block_w[i] + LAYOUT_H_GAP / 2 - CONN_SQ_SIZE / 2;
         lv_coord_t sy = g_layout_y[i] + LAYOUT_BLOCK_H / 2 - CONN_SQ_SIZE / 2;
 
         lv_obj_t *sq = lv_obj_create(g_canvas_scroll);
         lv_obj_set_size(sq, CONN_SQ_SIZE, CONN_SQ_SIZE);
         lv_obj_set_pos(sq, sx, sy);
-        lv_obj_set_style_bg_color(sq, lv_color_hex(0x505878), 0);
+        lv_obj_set_style_bg_color(sq, lv_color_hex(0x252840), 0);
         lv_obj_set_style_bg_opa(sq, LV_OPA_COVER, 0);
         lv_obj_set_style_border_color(sq, UI_COLOR_PRIMARY, 0);
         lv_obj_set_style_border_width(sq, 1, 0);
@@ -845,11 +1316,104 @@ bool ui_pedalboard_intercept_plugin_click(int instance_id)
 
 /* ─── Block event handlers ───────────────────────────────────────────────────── */
 
-static void on_block_bypass(void *userdata);   /* forward declaration */
+static void on_block_bypass(void *userdata);                                    /* forward */
+static void on_block_remove(void *userdata);                                    /* forward */
+static void on_block_param(void *userdata, const char *symbol, float value);    /* forward */
+static void on_block_param_changed(int, const char *, float, void *);           /* forward */
 static void pb_load_ui_refresh(void *arg);     /* forward declaration */
-static void pb_snapshot_ui_refresh(void *arg); /* forward declaration */
 static void pb_apply_midi_mapped(int instance_id, const char *symbol,
                                  int ch, int cc, float min, float max); /* fwd */
+
+/* Resolve /cv/graph/… URI to JACK port string.
+ * Returns true if resolution succeeded, false otherwise. */
+static bool cv_uri_to_jack(const char *cv_uri, char *out, size_t outsz)
+{
+    static const char pfx[] = "/cv/graph/";
+    if (strncmp(cv_uri, pfx, sizeof(pfx) - 1) != 0) return false;
+    const char *rest  = cv_uri + sizeof(pfx) - 1;
+    const char *slash = strchr(rest, '/');
+    if (!slash) {
+        /* HW CV: mod-spi2jack:<sym> */
+        snprintf(out, outsz, "mod-spi2jack:%s", rest);
+        return true;
+    }
+    /* Plugin CV: find instance by symbol, build effect_<id>:<port_sym> */
+    char inst_sym[PB_SYMBOL_MAX];
+    snprintf(inst_sym, sizeof(inst_sym), "%.*s", (int)(slash - rest), rest);
+    pb_plugin_t *src = pb_find_plugin_by_symbol(&g_pedalboard, inst_sym);
+    if (!src) return false;
+    snprintf(out, outsz, "effect_%d:%s", src->instance_id, slash + 1);
+    return true;
+}
+
+/* Build g_cv_sources from the currently loaded pedalboard.
+ * Only includes CV output ports that are explicitly enabled (present in
+ * plug->cv_out_enabled, which is populated from addressings.json). */
+static void build_cv_sources(void)
+{
+    g_cv_source_count = 0;
+    for (int i = 0; i < g_pedalboard.plugin_count && g_cv_source_count < CV_SOURCE_MAX; i++) {
+        pb_plugin_t *plug = &g_pedalboard.plugins[i];
+        if (!plug->cv_out_enabled_count) continue;
+        const pm_plugin_info_t *pm = pm_plugin_by_uri(plug->uri);
+        if (!pm) continue;
+        for (int k = 0; k < plug->cv_out_enabled_count && g_cv_source_count < CV_SOURCE_MAX; k++) {
+            const char *port_sym = plug->cv_out_enabled[k];
+            /* Find port metadata */
+            const pm_port_info_t *pp = NULL;
+            for (int j = 0; j < pm->port_count; j++)
+                if (pm->ports[j].type == PM_PORT_CV_OUT &&
+                    strcmp(pm->ports[j].symbol, port_sym) == 0) {
+                    pp = &pm->ports[j]; break;
+                }
+            if (!pp) continue;
+            pb_cv_source_t *src = &g_cv_sources[g_cv_source_count++];
+            snprintf(src->uri, sizeof(src->uri), "/cv/graph/%s/%s",
+                     plug->symbol, port_sym);
+            snprintf(src->jack_port, sizeof(src->jack_port),
+                     "effect_%d:%s", plug->instance_id, port_sym);
+            snprintf(src->label, sizeof(src->label), "%s \xe2\x80\x94 %s",
+                     plug->label, pp->name[0] ? pp->name : port_sym);
+            src->cv_min = pp->min;
+            src->cv_max = pp->max;
+            if (src->cv_min >= 0.0f && src->cv_max > 0.0f)       src->op_mode = '+';
+            else if (src->cv_min < 0.0f && src->cv_max <= 0.0f)  src->op_mode = '-';
+            else if (src->cv_min < 0.0f && src->cv_max > 0.0f)   src->op_mode = 'b';
+            else                                                   src->op_mode = '=';
+        }
+    }
+}
+
+/* CV assignment callback — called from param editor when user picks or removes a CV source. */
+static void on_cv_mapped(int instance_id, const char *symbol,
+                         const char *cv_uri, const char *jack_port,
+                         float min, float max, char op_mode, void *userdata)
+{
+    (void)userdata;
+    pb_plugin_t *plug = pb_find_plugin(&g_pedalboard, instance_id);
+    if (!plug) return;
+
+    for (int i = 0; i < plug->port_count; i++) {
+        if (strcmp(plug->ports[i].symbol, symbol) != 0) continue;
+        pb_port_t *port = &plug->ports[i];
+
+        if (!cv_uri || !cv_uri[0]) {
+            /* Unmap */
+            host_cv_unmap(instance_id, symbol);
+            port->cv_source_uri[0] = '\0';
+            port->cv_op_mode       = '\0';
+        } else {
+            host_cv_map(instance_id, symbol, jack_port, min, max, op_mode);
+            snprintf(port->cv_source_uri, sizeof(port->cv_source_uri), "%s", cv_uri);
+            port->cv_min     = min;
+            port->cv_max     = max;
+            port->cv_op_mode = op_mode;
+        }
+        g_pedalboard.modified = true;
+        ui_app_update_title(g_pedalboard.name, true);
+        break;
+    }
+}
 
 static void on_patch_changed(int instance_id, const char *param_uri,
                              const char *path, void *userdata)
@@ -894,14 +1458,17 @@ static void on_block_tap(void *userdata)
     pb_plugin_t *plug = pb_find_plugin(&g_pedalboard, instance_id);
     if (!plug) return;
 
-    ui_param_editor_show(instance_id, plug->label, plug->uri,
+    ui_param_editor_show(instance_id, plug->label, plug->uri, plug->symbol,
                          plug->ports, plug->port_count,
                          plug->patch_params, plug->patch_param_count,
                          plug->enabled,
                          on_block_bypass, (void *)(intptr_t)instance_id,
-                         NULL, NULL,
+                         on_block_param_changed, NULL,
                          on_patch_changed, NULL,
-                         on_midi_mapped, NULL);
+                         on_midi_mapped, NULL,
+                         g_cv_sources, g_cv_source_count,
+                         on_cv_mapped, NULL,
+                         on_block_remove, (void *)(intptr_t)instance_id);
 }
 
 static void on_block_bypass(void *userdata)
@@ -924,6 +1491,49 @@ static void on_block_remove(void *userdata)
     g_pedalboard.modified = true;
     ui_app_update_title(g_pedalboard.name, true);
     ui_pedalboard_refresh();
+}
+
+/* Called by block widget cells when a param is changed directly (arc drag, toggle tap, enum cycle).
+ * Sends to host AND updates the pedalboard model so the editor shows the correct value on open. */
+static void on_block_param(void *userdata, const char *symbol, float value)
+{
+    int instance_id = (int)(intptr_t)userdata;
+    host_param_set(instance_id, symbol, value);
+    pb_plugin_t *plug = pb_find_plugin(&g_pedalboard, instance_id);
+    if (!plug) return;
+    for (int i = 0; i < plug->port_count; i++) {
+        if (strcmp(plug->ports[i].symbol, symbol) == 0) {
+            plug->ports[i].value = value;
+            break;
+        }
+    }
+    g_pedalboard.modified = true;
+    ui_app_update_title(g_pedalboard.name, true);
+}
+
+/* Called by the param editor when a value changes (editor already sent to host).
+ * Updates the pedalboard model and the corresponding block widget. */
+static void on_block_param_changed(int instance_id, const char *symbol,
+                                   float value, void *userdata)
+{
+    (void)userdata;
+    pb_plugin_t *plug = pb_find_plugin(&g_pedalboard, instance_id);
+    if (!plug) return;
+    for (int i = 0; i < plug->port_count; i++) {
+        if (strcmp(plug->ports[i].symbol, symbol) == 0) {
+            plug->ports[i].value = value;
+            break;
+        }
+    }
+    /* Refresh the block widget so it reflects the new value immediately. */
+    for (int i = 0; i < g_pedalboard.plugin_count; i++) {
+        if (g_pedalboard.plugins[i].instance_id == instance_id && g_block_obj[i]) {
+            ui_plugin_block_set_param(g_block_obj[i], symbol, value);
+            break;
+        }
+    }
+    g_pedalboard.modified = true;
+    ui_app_update_title(g_pedalboard.name, true);
 }
 
 /* ─── Automatic graph layout ─────────────────────────────────────────────────
@@ -1003,11 +1613,26 @@ static int collect_io_descs(bool want_inputs, io_port_desc_t *descs, int max)
         if (!p->enabled) continue;
         bool relevant = want_inputs ? p->is_input : p->is_output;
         if (!relevant) continue;
+        const char *jp = want_inputs ? p->dev : p->dev_out;
+        if (!jp[0]) continue;  /* port not available in this direction */
         midi_idx++;
         if (midi_idx == 1)
             snprintf(descs[count].label, sizeof(descs[0].label), "MIDI");
         else
             snprintf(descs[count].label, sizeof(descs[0].label), "M%d", midi_idx);
+        snprintf(descs[count].jack_port,  sizeof(descs[0].jack_port),  "%s", jp);
+        snprintf(descs[count].full_label, sizeof(descs[0].full_label), "%s", p->label);
+        descs[count].is_midi = true;
+        count++;
+    }
+
+    /* ── Virtual MIDI Loopback (output side only) ── */
+    if (!want_inputs && g_pedalboard.midi_loopback && g_midi_loopback_pb_port[0]
+            && count < max) {
+        snprintf(descs[count].label,      sizeof(descs[0].label),      "Loopback");
+        snprintf(descs[count].jack_port,  sizeof(descs[0].jack_port),  "%s",
+                 g_midi_loopback_pb_port);
+        snprintf(descs[count].full_label, sizeof(descs[0].full_label), "MIDI Loopback");
         descs[count].is_midi = true;
         count++;
     }
@@ -1102,15 +1727,32 @@ static int uri_to_plugin_idx(const char *uri, const pedalboard_t *pb)
     return -1;
 }
 
+/* Classify a plugin into its band.
+ * Primary: explicit LV2 type declarations (mod:ControlVoltagePlugin / mod:MIDIPlugin).
+ * Fallback: port counts — a plugin with MIDI ports but no audio ports belongs in the
+ * MIDI band even if it lacks the mod:MIDIPlugin declaration. */
+static plug_band_t classify_plugin(const pb_plugin_t *plug)
+{
+    const pm_plugin_info_t *info = pm_plugin_by_uri(plug->uri);
+    if (!info) return PLUG_AUDIO;
+    if (info->is_cv_plugin)   return PLUG_CV;
+    if (info->is_midi_plugin) return PLUG_MIDI;
+    if (info->midi_in_count + info->midi_out_count > 0 &&
+        info->audio_in_count + info->audio_out_count == 0)
+        return PLUG_MIDI;
+    return PLUG_AUDIO;
+}
+
 /* Compute display positions for each plugin in pb->plugins[].
- * out_x / out_y arrays must have at least pb->plugin_count entries.
- * canvas_h is the visible height to center into. */
-static void compute_layout(const pedalboard_t *pb,
-                            lv_coord_t *out_x, lv_coord_t *out_y,
-                            int canvas_h)
+ * Plugins are placed in three horizontal bands: Audio (top), MIDI (middle),
+ * CV (bottom). Within each band the signal-flow column layout is preserved.
+ * Returns the total required canvas height and writes g_band_y_c[]. */
+static int compute_layout(const pedalboard_t *pb,
+                           const plug_band_t *band,
+                           lv_coord_t *out_x, lv_coord_t *out_y)
 {
     int n = pb->plugin_count;
-    if (n == 0) return;
+    if (n == 0) return UI_CANVAS_H;
 
     /* ── Build directed adjacency lists ── */
     int adj_out[PB_MAX_PLUGINS][LAYOUT_MAX_ADJ], deg_out[PB_MAX_PLUGINS];
@@ -1122,7 +1764,6 @@ static void compute_layout(const pedalboard_t *pb,
         int f = uri_to_plugin_idx(pb->connections[c].from, pb);
         int t = uri_to_plugin_idx(pb->connections[c].to,   pb);
         if (f < 0 || t < 0 || f == t) continue;
-        /* Deduplicate */
         bool dup = false;
         for (int k = 0; k < deg_out[f]; k++) if (adj_out[f][k] == t) { dup = true; break; }
         if (!dup && deg_out[f] < LAYOUT_MAX_ADJ) adj_out[f][deg_out[f]++] = t;
@@ -1151,7 +1792,6 @@ static void compute_layout(const pedalboard_t *pb,
         }
     }
 
-    /* Remaining nodes (cycles / disconnected) placed in last column + 1 */
     int max_col = 0;
     for (int i = 0; i < n; i++) if (col[i] > max_col) max_col = col[i];
     for (int i = 0; i < n; i++) {
@@ -1162,78 +1802,101 @@ static void compute_layout(const pedalboard_t *pb,
     max_col = 0;
     for (int i = 0; i < n; i++) if (col[i] > max_col) max_col = col[i];
 
-    /* ── Group nodes by column in topological order → initial row assignment ── */
-    int  col_nodes[LAYOUT_MAX_COLS][PB_MAX_PLUGINS];
-    int  col_sz   [LAYOUT_MAX_COLS];
-    memset(col_sz, 0, sizeof(col_sz));
-    for (int ti = 0; ti < topo_n; ti++) {
-        int u = topo[ti], c = col[u];
-        if (c < LAYOUT_MAX_COLS) col_nodes[c][col_sz[c]++] = u;
-    }
-
-    /* row[] is floating-point: initially integer slots within each column */
+    /* ── Per-band row assignment with centering and de-collision ──
+     * For each band we run an independent centering + de-collide pass so
+     * plugins of different types never compete for the same row slot.
+     * row[i] is normalised to start at 0 after each band's pass. */
     float row[PB_MAX_PLUGINS];
-    for (int c = 0; c <= max_col; c++)
-        for (int j = 0; j < col_sz[c]; j++)
-            row[col_nodes[c][j]] = (float)j;
+    int   band_px_h[PLUG_BAND_COUNT];
+    memset(row,       0, n * sizeof(float));
+    memset(band_px_h, 0, sizeof(band_px_h));
 
-    /* ── Center each parent between its immediate successors (right to left) ── */
-    for (int c = max_col - 1; c >= 0; c--) {
-        for (int j = 0; j < col_sz[c]; j++) {
-            int u = col_nodes[c][j];
-            float sum = 0.0f; int cnt = 0;
-            for (int k = 0; k < deg_out[u]; k++) {
-                int v = adj_out[u][k];
-                if (col[v] == c + 1) { sum += row[v]; cnt++; }
+    for (int b = 0; b < PLUG_BAND_COUNT; b++) {
+        /* Per-column node lists for this band, in topological order */
+        int bcol_nodes[LAYOUT_MAX_COLS][PB_MAX_PLUGINS];
+        int bcol_sz   [LAYOUT_MAX_COLS];
+        memset(bcol_sz, 0, sizeof(bcol_sz));
+        for (int ti = 0; ti < topo_n; ti++) {
+            int u = topo[ti];
+            if ((int)band[u] != b) continue;
+            int c = col[u];
+            if (c < LAYOUT_MAX_COLS) bcol_nodes[c][bcol_sz[c]++] = u;
+        }
+
+        /* Initialise row: sequential integers within each column */
+        for (int c = 0; c <= max_col; c++)
+            for (int j = 0; j < bcol_sz[c]; j++)
+                row[bcol_nodes[c][j]] = (float)j;
+
+        /* Center parent between same-band successors (right to left) */
+        for (int c = max_col - 1; c >= 0; c--) {
+            for (int j = 0; j < bcol_sz[c]; j++) {
+                int u = bcol_nodes[c][j];
+                float sum = 0.0f; int cnt = 0;
+                for (int k = 0; k < deg_out[u]; k++) {
+                    int v = adj_out[u][k];
+                    if ((int)band[v] == b && col[v] == c + 1) { sum += row[v]; cnt++; }
+                }
+                if (cnt > 0) row[u] = sum / (float)cnt;
             }
-            if (cnt > 0) row[u] = sum / (float)cnt;
         }
-    }
 
-    /* ── De-collide: within each column sort by row then enforce 1-unit gaps ── */
-    for (int c = 0; c <= max_col; c++) {
-        if (col_sz[c] <= 1) continue;
-
-        /* Insertion sort col_nodes[c] by row value */
-        for (int a = 1; a < col_sz[c]; a++) {
-            int ua = col_nodes[c][a];
-            float ra = row[ua];
-            int b = a - 1;
-            while (b >= 0 && row[col_nodes[c][b]] > ra) {
-                col_nodes[c][b + 1] = col_nodes[c][b];
-                b--;
+        /* De-collide: sort by row, enforce ≥ 1-unit gap */
+        for (int c = 0; c <= max_col; c++) {
+            if (bcol_sz[c] <= 1) continue;
+            for (int a = 1; a < bcol_sz[c]; a++) {
+                int ua = bcol_nodes[c][a];
+                float ra = row[ua];
+                int bi = a - 1;
+                while (bi >= 0 && row[bcol_nodes[c][bi]] > ra) {
+                    bcol_nodes[c][bi + 1] = bcol_nodes[c][bi]; bi--;
+                }
+                bcol_nodes[c][bi + 1] = ua;
             }
-            col_nodes[c][b + 1] = ua;
+            for (int j = 1; j < bcol_sz[c]; j++) {
+                float needed = row[bcol_nodes[c][j - 1]] + 1.0f;
+                if (row[bcol_nodes[c][j]] < needed)
+                    row[bcol_nodes[c][j]] = needed;
+            }
         }
 
-        /* Push each node down so no two share the same row */
-        for (int j = 1; j < col_sz[c]; j++) {
-            float needed = row[col_nodes[c][j - 1]] + 1.0f;
-            if (row[col_nodes[c][j]] < needed)
-                row[col_nodes[c][j]] = needed;
+        /* Normalise row[] to [0..] and compute band pixel height */
+        float rmin = 0.0f, rmax = 0.0f;
+        bool  has  = false;
+        for (int i = 0; i < n; i++) {
+            if ((int)band[i] != b) continue;
+            if (!has || row[i] < rmin) rmin = row[i];
+            if (!has || row[i] > rmax) rmax = row[i];
+            has = true;
         }
-    }
-
-    /* ── Convert to pixel coordinates, centering each column independently ── */
-    for (int c = 0; c <= max_col; c++) {
-        if (col_sz[c] == 0) continue;
-
-        /* Find min/max row value in this column */
-        float rmin = row[col_nodes[c][0]], rmax = rmin;
-        for (int j = 1; j < col_sz[c]; j++) {
-            float r = row[col_nodes[c][j]];
-            if (r < rmin) rmin = r;
-            if (r > rmax) rmax = r;
-        }
-        float col_span_px = (rmax - rmin) * LAYOUT_STEP_Y;
-        int   start_y     = (canvas_h - LAYOUT_BLOCK_H - (int)col_span_px) / 2;
-
-        for (int j = 0; j < col_sz[c]; j++) {
-            int u = col_nodes[c][j];
-            out_x[u] = (lv_coord_t)(c * LAYOUT_STEP_X + 20);
-            out_y[u] = (lv_coord_t)(start_y + (int)((row[u] - rmin) * LAYOUT_STEP_Y));
+        if (has) {
+            for (int i = 0; i < n; i++)
+                if ((int)band[i] == b) row[i] -= rmin;
+            band_px_h[b] = (int)((rmax - rmin) * (float)LAYOUT_STEP_Y) + LAYOUT_BLOCK_H;
         }
     }
+
+    /* ── Stack bands vertically, compute Y offsets ── */
+    int cur_y = LAYOUT_MARGIN_TOP;
+    bool first_band = true;
+    for (int b = 0; b < PLUG_BAND_COUNT; b++) {
+        if (band_px_h[b] == 0) { g_band_y_c[b] = cur_y; continue; }
+        if (!first_band) cur_y += BAND_SEPARATOR_H;
+        g_band_y_c[b] = cur_y;
+        cur_y += band_px_h[b];
+        first_band = false;
+    }
+    int total_h = cur_y + LAYOUT_MARGIN_BOT;
+    if (total_h < UI_CANVAS_H) total_h = UI_CANVAS_H;
+
+    /* ── Convert to pixel coordinates ── */
+    for (int i = 0; i < n; i++) {
+        out_x[i] = (lv_coord_t)(col[i] * LAYOUT_STEP_X + 20);
+        out_y[i] = (lv_coord_t)(g_band_y_c[(int)band[i]] +
+                                (int)(row[i] * (float)LAYOUT_STEP_Y));
+    }
+
+    return total_h;
 }
 
 /* ─── Refresh (rebuild UI from state) ───────────────────────────────────────── */
@@ -1244,6 +1907,7 @@ void ui_pedalboard_refresh(void)
     /* Remove all block children, redraw */
     lv_obj_clean(g_canvas_scroll);
     g_canvas = NULL; /* canvas removed — scroll events must reach g_canvas_scroll */
+    memset(g_block_obj, 0, sizeof(g_block_obj));
 
     /* Close any open connection panel before rebuilding the canvas */
     conn_panel_close();
@@ -1254,15 +1918,84 @@ void ui_pedalboard_refresh(void)
 
     g_left_offset_c = (g_n_in_c > 0) ? IO_COL_W : 16;
 
-    /* ── Compute plugin layout into global arrays ── */
+    /* ── Classify plugins into bands, compute block widths, layout ── */
     memset(g_layout_x, 0, sizeof(g_layout_x));
     memset(g_layout_y, 0, sizeof(g_layout_y));
-    compute_layout(&g_pedalboard, g_layout_x, g_layout_y, UI_CANVAS_H);
+    for (int i = 0; i < g_pedalboard.plugin_count; i++) {
+        g_plug_band[i] = classify_plugin(&g_pedalboard.plugins[i]);
+        g_block_w[i]   = ui_plugin_block_width(&g_pedalboard.plugins[i]);
+    }
+    g_canvas_h_c = compute_layout(&g_pedalboard, g_plug_band, g_layout_x, g_layout_y);
+
+    /* ── Post-process: redistribute column X positions using actual block widths.
+     * compute_layout outputs col * LAYOUT_STEP_X + 20.  We extract the column
+     * index and recompute absolute X so that wide blocks don't overlap their
+     * right-hand neighbour. ── */
+    {
+        int max_c = 0;
+        int col_of[PB_MAX_PLUGINS];
+        for (int i = 0; i < g_pedalboard.plugin_count; i++) {
+            col_of[i] = (int)(g_layout_x[i] - 20) / LAYOUT_STEP_X;
+            if (col_of[i] > max_c) max_c = col_of[i];
+        }
+
+        int col_max_w[LAYOUT_MAX_COLS + 1];
+        memset(col_max_w, 0, sizeof(col_max_w));
+        for (int i = 0; i < g_pedalboard.plugin_count; i++) {
+            int c = col_of[i];
+            if (c <= max_c && g_block_w[i] > col_max_w[c])
+                col_max_w[c] = g_block_w[i];
+        }
+
+        /* Compute column X positions.
+         * Each column advances to the right by (prev_width + H_GAP). */
+        int col_x[LAYOUT_MAX_COLS + 1];
+        int col_eff_w[LAYOUT_MAX_COLS + 1];
+        col_x[0]     = 20;
+        col_eff_w[0] = col_max_w[0] > 0 ? col_max_w[0] : LAYOUT_BLOCK_W;
+
+        for (int c = 1; c <= max_c; c++) {
+            col_x[c]     = col_x[c - 1] + col_eff_w[c - 1] + LAYOUT_H_GAP;
+            col_eff_w[c] = col_max_w[c] > 0 ? col_max_w[c] : LAYOUT_BLOCK_W;
+        }
+
+        for (int i = 0; i < g_pedalboard.plugin_count; i++)
+            g_layout_x[i] = (lv_coord_t)col_x[col_of[i]];
+
+        /* ── Pairing : 1X blocks in a column that also contains a 2X block ──────
+         * When a column has a 2X block, its 1X siblings are placed side-by-side
+         * within the 2X footprint to avoid wasted vertical space.
+         * Even-indexed block: stays at col_x[c].
+         * Odd-indexed block:  moves to col_x[c] + LAYOUT_BLOCK_W + LAYOUT_H_GAP,
+         *                     and shares the same Y as its pair partner. */
+        for (int c = 0; c <= max_c; c++) {
+            if (col_max_w[c] <= LAYOUT_BLOCK_W) continue;
+
+            int idx1x[PB_MAX_PLUGINS], n1x = 0;
+            for (int i = 0; i < g_pedalboard.plugin_count; i++) {
+                if (col_of[i] == c && g_block_w[i] == LAYOUT_BLOCK_W)
+                    idx1x[n1x++] = i;
+            }
+            if (n1x < 2) continue;
+
+            for (int a = 1; a < n1x; a++) {
+                int tmp = idx1x[a]; int b = a - 1;
+                while (b >= 0 && g_layout_y[idx1x[b]] > g_layout_y[tmp])
+                    { idx1x[b + 1] = idx1x[b]; b--; }
+                idx1x[b + 1] = tmp;
+            }
+
+            for (int j = 1; j < n1x; j += 2) {
+                g_layout_x[idx1x[j]] = (lv_coord_t)(col_x[c] + LAYOUT_BLOCK_W + LAYOUT_H_GAP);
+                g_layout_y[idx1x[j]] = g_layout_y[idx1x[j - 1]];
+            }
+        }
+    }
 
     lv_coord_t max_right = 0;
     for (int i = 0; i < g_pedalboard.plugin_count; i++) {
         g_layout_x[i] += (lv_coord_t)g_left_offset_c;
-        lv_coord_t right = g_layout_x[i] + LAYOUT_BLOCK_W;
+        lv_coord_t right = g_layout_x[i] + (lv_coord_t)g_block_w[i];
         if (right > max_right) max_right = right;
     }
 
@@ -1276,12 +2009,12 @@ void ui_pedalboard_refresh(void)
     redraw_connections();
 
     /* ── Draw left I/O column (inputs) ── */
-    draw_io_column(g_canvas_scroll, g_io_in_c, g_n_in_c, 0, UI_CANVAS_H, false);
+    draw_io_column(g_canvas_scroll, g_io_in_c, g_n_in_c, 0, g_canvas_h_c, false);
 
     /* Transparent tap zone over the left IO column — opens connection panel */
     if (g_n_in_c > 0) {
         lv_obj_t *io_tap = lv_obj_create(g_canvas_scroll);
-        lv_obj_set_size(io_tap, g_left_offset_c, UI_CANVAS_H);
+        lv_obj_set_size(io_tap, g_left_offset_c, g_canvas_h_c);
         lv_obj_set_pos(io_tap, 0, 0);
         lv_obj_set_style_bg_opa(io_tap, LV_OPA_TRANSP, 0);
         lv_obj_set_style_border_width(io_tap, 0, 0);
@@ -1297,19 +2030,20 @@ void ui_pedalboard_refresh(void)
         pb_plugin_t *plug = &g_pedalboard.plugins[i];
         lv_obj_t *block = ui_plugin_block_create(
             g_canvas_scroll, plug,
-            on_block_tap, on_block_bypass, on_block_remove,
+            on_block_tap, on_block_bypass, on_block_remove, on_block_param,
             (void *)(intptr_t)plug->instance_id);
         lv_obj_set_pos(block, g_layout_x[i], g_layout_y[i]);
+        g_block_obj[i] = block;
     }
 
     /* ── Draw right I/O column (outputs) ── */
     draw_io_column(g_canvas_scroll, g_io_out_c, g_n_out_c,
-                   g_right_col_x_c, UI_CANVAS_H, true);
+                   g_right_col_x_c, g_canvas_h_c, true);
 
     /* Transparent tap zone over the right IO column — selects system output as target */
     if (g_n_out_c > 0) {
         lv_obj_t *io_out_tap = lv_obj_create(g_canvas_scroll);
-        lv_obj_set_size(io_out_tap, IO_COL_W, UI_CANVAS_H);
+        lv_obj_set_size(io_out_tap, IO_COL_W, g_canvas_h_c);
         lv_obj_set_pos(io_out_tap, g_right_col_x_c, 0);
         lv_obj_set_style_bg_opa(io_out_tap, LV_OPA_TRANSP, 0);
         lv_obj_set_style_border_width(io_out_tap, 0, 0);
@@ -1324,15 +2058,53 @@ void ui_pedalboard_refresh(void)
 
     /* ── Dynamic content dimensions ── */
     int content_w = g_right_col_x_c + IO_COL_W + 20;
-    int content_h = UI_CANVAS_H;
-    for (int i = 0; i < g_pedalboard.plugin_count; i++) {
-        int bot = (int)g_layout_y[i] + LAYOUT_BLOCK_H + 20;
-        if (bot > content_h) content_h = bot;
+    int content_h = g_canvas_h_c;
+
+    /* ── Band separator lines and labels (only when multiple bands present) ── */
+    {
+        bool bands_present[PLUG_BAND_COUNT] = {false, false, false};
+        for (int i = 0; i < g_pedalboard.plugin_count; i++)
+            bands_present[(int)g_plug_band[i]] = true;
+        int n_bands = 0;
+        for (int b = 0; b < PLUG_BAND_COUNT; b++) if (bands_present[b]) n_bands++;
+
+        if (n_bands > 1) {
+            static const char * const band_names[PLUG_BAND_COUNT] = { "Audio", "MIDI", "CV" };
+            bool prev_band_drawn = false;
+            for (int b = 0; b < PLUG_BAND_COUNT; b++) {
+                if (!bands_present[b]) continue;
+
+                /* Horizontal separator only between two present bands */
+                if (prev_band_drawn) {
+                    int sep_y = g_band_y_c[b] - BAND_SEPARATOR_H / 2;
+                    lv_obj_t *sep = lv_obj_create(g_canvas_scroll);
+                    lv_obj_set_size(sep, content_w, 1);
+                    lv_obj_set_pos(sep, 0, sep_y);
+                    lv_obj_set_style_bg_color(sep, lv_color_hex(0x2a3848), 0);
+                    lv_obj_set_style_bg_opa(sep, LV_OPA_COVER, 0);
+                    lv_obj_set_style_border_width(sep, 0, 0);
+                    lv_obj_clear_flag(sep, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+                }
+
+                /* Band label: above the first band, or just below the separator */
+                int lbl_y = (!prev_band_drawn)
+                    ? (g_band_y_c[b] - 22)
+                    : (g_band_y_c[b] - BAND_SEPARATOR_H / 2 + 6);
+                lv_obj_t *lbl = lv_label_create(g_canvas_scroll);
+                lv_label_set_text(lbl, band_names[b]);
+                lv_obj_set_pos(lbl, g_left_offset_c + 8, lbl_y);
+                lv_obj_set_style_text_color(lbl, lv_color_hex(0x405870), 0);
+                lv_obj_set_style_text_font(lbl, &lv_font_montserrat_14, 0);
+                lv_obj_clear_flag(lbl, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+                prev_band_drawn = true;
+            }
+        }
     }
 
+    /* Spacer at bottom-right so LVGL knows the full scrollable extent */
     lv_obj_t *spacer = lv_obj_create(g_canvas_scroll);
     lv_obj_set_size(spacer, 1, 1);
-    lv_obj_set_pos(spacer, content_w - 1, content_h / 2);
+    lv_obj_set_pos(spacer, content_w - 1, content_h - 1);
     lv_obj_set_style_bg_opa(spacer, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(spacer, 0, 0);
     lv_obj_clear_flag(spacer, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
@@ -1344,8 +2116,385 @@ void ui_pedalboard_refresh(void)
 
 /* ─── Init ───────────────────────────────────────────────────────────────────── */
 
+/* ─── MOD-UI active placeholder ──────────────────────────────────────────────── */
+
+/* ─── MOD-UI placeholder — shown when mod_ui_active == true ─────────────────── */
+
+/* Step 3 — LVGL thread: rebuild pedalboard screen (now mod_ui_active == false). */
+static void modui_disable_async(void *ud)
+{
+    (void)ud;
+    ui_app_show_screen(UI_SCREEN_PEDALBOARD);
+}
+
+/* Step 2 — background thread: stop service, wait for mod-host, reconnect. */
+static void *modui_disable_thread(void *arg)
+{
+    (void)arg;
+    fprintf(stderr, "[modui] stopping mod-ui service...\n");
+    system("sudo systemctl stop mod-ui");
+
+    /* mod-host stops with mod-ui (Requires=), then restarts (RestartSec=2).
+     * Wait long enough for it to come back and accept connections. */
+    fprintf(stderr, "[modui] waiting for mod-host to restart...\n");
+    sleep(5);
+
+    mpt_settings_t *s = settings_get();
+    s->mod_ui_active = false;
+    settings_save_prefs(s);
+
+    fprintf(stderr, "[modui] reconnecting to mod-host...\n");
+    if (host_comm_reconnect() != 0) {
+        fprintf(stderr, "[modui] reconnect timed out — showing empty pedalboard\n");
+        lv_async_call(modui_disable_async, NULL);
+        return NULL;
+    }
+
+    fprintf(stderr, "[modui] connected — initializing pre-fx\n");
+    pre_fx_init();
+    pre_fx_reload();
+
+    fprintf(stderr, "[modui] done\n");
+    lv_async_call(modui_disable_async, NULL);
+    return NULL;
+}
+
+/* Step 1 — button callback (LVGL thread): spawn the disable thread. */
+static void modui_disable_cb(lv_event_t *e)
+{
+    (void)e;
+    pthread_t tid;
+    pthread_create(&tid, NULL, modui_disable_thread, NULL);
+    pthread_detach(tid);
+}
+
+void ui_pedalboard_set_modui_ip(const char *ip)
+{
+    snprintf(g_modui_ip, sizeof(g_modui_ip), "%s", ip ? ip : "");
+}
+
+static void build_modui_placeholder(lv_obj_t *parent)
+{
+    /* Full-area container */
+    lv_obj_t *box = lv_obj_create(parent);
+    lv_obj_set_size(box, LV_PCT(100), LV_PCT(100));
+    lv_obj_set_style_bg_color(box, UI_COLOR_BG, 0);
+    lv_obj_set_style_bg_opa(box, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(box, 0, 0);
+    lv_obj_set_flex_flow(box, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(box, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_row(box, 18, 0);
+    lv_obj_clear_flag(box, LV_OBJ_FLAG_SCROLLABLE);
+
+    /* Title */
+    lv_obj_t *title = lv_label_create(box);
+    lv_label_set_text(title, TR(TR_MODUI_ACTIVE_TITLE));
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_24, 0);
+    lv_obj_set_style_text_color(title, UI_COLOR_ACCENT, 0);
+
+    /* Body message */
+    lv_obj_t *body = lv_label_create(box);
+    lv_label_set_text(body, TR(TR_MODUI_ACTIVE_BODY));
+    lv_obj_set_style_text_color(body, UI_COLOR_TEXT_DIM, 0);
+    lv_obj_set_style_text_font(body, &lv_font_montserrat_18, 0);
+    lv_label_set_long_mode(body, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(body, 600);
+    lv_obj_set_style_text_align(body, LV_TEXT_ALIGN_CENTER, 0);
+
+    /* IP URL — g_modui_ip was fetched by the background thread to avoid
+     * blocking popen(nmcli) on the LVGL main thread. */
+    lv_obj_t *url_lbl = lv_label_create(box);
+    if (g_modui_ip[0]) {
+        lv_label_set_text_fmt(url_lbl,
+            "http://%s/\n" LV_SYMBOL_FILE "  http://%s:8081/", g_modui_ip, g_modui_ip);
+    } else {
+        lv_label_set_text(url_lbl, "http://<IP>/\n" LV_SYMBOL_FILE "  http://<IP>:8081/");
+    }
+    lv_obj_set_style_text_font(url_lbl, &lv_font_montserrat_18, 0);
+    lv_obj_set_style_text_color(url_lbl, UI_COLOR_TEXT, 0);
+    lv_obj_set_style_text_align(url_lbl, LV_TEXT_ALIGN_CENTER, 0);
+
+    /* Disable button */
+    lv_obj_t *btn = lv_btn_create(box);
+    lv_obj_set_size(btn, 280, 50);
+    lv_obj_set_style_bg_color(btn, lv_palette_darken(LV_PALETTE_RED, 1), 0);
+    lv_obj_add_event_cb(btn, modui_disable_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *btn_lbl = lv_label_create(btn);
+    lv_label_set_text(btn_lbl, TR(TR_MODUI_BTN_DISABLE));
+    lv_obj_center(btn_lbl);
+}
+
+/* ── Widget prefs picker ─────────────────────────────────────────────────────── */
+
+#define WB_MAX_CTRL WIDGET_PREFS_MAX_CTRL
+
+typedef struct {
+    int      instance_id;
+    char     plug_symbol[PB_SYMBOL_MAX];
+    char     plug_uri[PB_URI_MAX];
+    char     sel[WB_MAX_CTRL][PB_SYMBOL_MAX];
+    int      sel_count;
+    lv_obj_t *backdrop;
+} wb_picker_ctx_t;
+
+/* Per-item userdata — one per port in the picker list */
+typedef struct {
+    wb_picker_ctx_t *pctx;
+    char             symbol[PB_SYMBOL_MAX];
+    lv_obj_t        *btn;
+} wb_item_ud_t;
+
+#define WB_ITEM_MAX 128
+static wb_item_ud_t  g_wb_items[WB_ITEM_MAX];
+static int           g_wb_item_count = 0;
+
+static void wb_close_picker(wb_picker_ctx_t *pctx)
+{
+    if (pctx->backdrop) {
+        lv_obj_delete_async(pctx->backdrop);
+        pctx->backdrop = NULL;
+    }
+    free(pctx);
+}
+
+static void wb_cancel_cb(lv_event_t *e)
+{
+    wb_picker_ctx_t *pctx = lv_event_get_user_data(e);
+    wb_close_picker(pctx);
+    /* Close the param editor too (safe here — we're outside its event tree) */
+    ui_param_editor_close();
+}
+
+static void wb_ok_cb(lv_event_t *e)
+{
+    wb_picker_ctx_t *pctx = lv_event_get_user_data(e);
+    mpt_settings_t  *s    = settings_get();
+
+    widget_prefs_set(pctx->plug_symbol, pctx->sel, pctx->sel_count);
+    if (s) widget_prefs_save(s->data_dir, g_pedalboard.path);
+
+    wb_close_picker(pctx);
+    /* Close param editor (safe — we're inside the picker's event tree, not the editor's) */
+    ui_param_editor_close();
+    /* Full refresh: handles width changes and connection line repositioning */
+    ui_pedalboard_refresh();
+}
+
+static void wb_item_cb(lv_event_t *e)
+{
+    wb_item_ud_t    *ud   = lv_event_get_user_data(e);
+    wb_picker_ctx_t *pctx = ud->pctx;
+
+    /* Toggle selection */
+    bool already = false;
+    int  found_at = -1;
+    for (int i = 0; i < pctx->sel_count; i++) {
+        if (strcmp(pctx->sel[i], ud->symbol) == 0) {
+            already  = true;
+            found_at = i;
+            break;
+        }
+    }
+
+    if (already) {
+        /* Deselect: compact */
+        for (int i = found_at; i < pctx->sel_count - 1; i++)
+            memcpy(pctx->sel[i], pctx->sel[i + 1], PB_SYMBOL_MAX);
+        pctx->sel_count--;
+        lv_obj_set_style_bg_color(ud->btn, lv_color_hex(0x1E2840), 0);
+    } else {
+        if (pctx->sel_count >= WB_MAX_CTRL) {
+            ui_app_show_toast(TR(TR_BLOCK_MAX_CTRL));
+            return;
+        }
+        snprintf(pctx->sel[pctx->sel_count++], PB_SYMBOL_MAX, "%s", ud->symbol);
+        lv_obj_set_style_bg_color(ud->btn, lv_color_hex(0x1E4028), 0);
+    }
+}
+
+static void open_widget_prefs_picker(int instance_id,
+                                     const char *plug_symbol,
+                                     const char *plug_uri)
+{
+    const pm_plugin_info_t *pi = pm_plugin_by_uri(plug_uri);
+    if (!pi) return;
+
+    wb_picker_ctx_t *pctx = malloc(sizeof(*pctx));
+    if (!pctx) return;
+    memset(pctx, 0, sizeof(*pctx));
+    pctx->instance_id = instance_id;
+    snprintf(pctx->plug_symbol, PB_SYMBOL_MAX, "%s", plug_symbol);
+    snprintf(pctx->plug_uri,    PB_URI_MAX,    "%s", plug_uri);
+
+    /* Pre-fill selection from current prefs */
+    pctx->sel_count = widget_prefs_get(plug_symbol, pctx->sel);
+
+    /* Count CTRL_IN ports for picker height */
+    int n_ctrl = 0;
+    for (int k = 0; k < pi->port_count; k++)
+        if (pi->ports[k].type == PM_PORT_CONTROL_IN) n_ctrl++;
+    if (n_ctrl == 0) { free(pctx); return; }
+
+    int btn_h  = 40;
+    int list_h = n_ctrl * (btn_h + 4);
+    if (list_h > 400) list_h = 400;
+    int panel_h = 52 + list_h + 12 + 48 + 12;
+    if (panel_h > 600) panel_h = 600;
+
+    /* Backdrop */
+    lv_obj_t *back = lv_obj_create(lv_layer_top());
+    lv_obj_set_size(back, LV_PCT(100), LV_PCT(100));
+    lv_obj_set_style_bg_color(back, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(back, LV_OPA_70, 0);
+    lv_obj_set_style_border_width(back, 0, 0);
+    lv_obj_clear_flag(back, LV_OBJ_FLAG_SCROLLABLE);
+    pctx->backdrop = back;
+
+    /* Panel */
+    lv_obj_t *panel = lv_obj_create(back);
+    lv_obj_set_size(panel, 500, panel_h);
+    lv_obj_center(panel);
+    lv_obj_set_style_bg_color(panel, lv_color_hex(0x151E2E), 0);
+    lv_obj_set_style_border_color(panel, UI_COLOR_PRIMARY, 0);
+    lv_obj_set_style_border_width(panel, 2, 0);
+    lv_obj_set_style_radius(panel, 12, 0);
+    lv_obj_set_style_pad_all(panel, 12, 0);
+    lv_obj_set_flex_flow(panel, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(panel, 8, 0);
+    lv_obj_clear_flag(panel, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+
+    /* Title */
+    lv_obj_t *title = lv_label_create(panel);
+    lv_label_set_text(title, TR(TR_BLOCK_PICK_CTRL));
+    lv_obj_set_style_text_color(title, UI_COLOR_TEXT, 0);
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_18, 0);
+
+    /* Scrollable port list */
+    lv_obj_t *scroll = lv_obj_create(panel);
+    lv_obj_set_size(scroll, LV_PCT(100), 0);
+    lv_obj_set_flex_grow(scroll, 1);
+    lv_obj_set_style_bg_opa(scroll, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(scroll, 0, 0);
+    lv_obj_set_style_pad_all(scroll, 0, 0);
+    lv_obj_set_flex_flow(scroll, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(scroll, 4, 0);
+    lv_obj_add_flag(scroll, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_clear_flag(scroll, LV_OBJ_FLAG_CLICKABLE);
+
+    g_wb_item_count = 0;
+
+    for (int k = 0; k < pi->port_count && g_wb_item_count < WB_ITEM_MAX; k++) {
+        if (pi->ports[k].type != PM_PORT_CONTROL_IN) continue;
+        const pm_port_info_t *pm_port = &pi->ports[k];
+
+        bool selected = false;
+        for (int s = 0; s < pctx->sel_count; s++) {
+            if (strcmp(pctx->sel[s], pm_port->symbol) == 0) { selected = true; break; }
+        }
+
+        wb_item_ud_t *ud = &g_wb_items[g_wb_item_count++];
+        ud->pctx = pctx;
+        snprintf(ud->symbol, PB_SYMBOL_MAX, "%s", pm_port->symbol);
+
+        lv_obj_t *btn = lv_obj_create(scroll);
+        lv_obj_set_size(btn, LV_PCT(100), btn_h);
+        lv_obj_set_style_bg_color(btn, selected
+            ? lv_color_hex(0x1E4028) : lv_color_hex(0x1E2840), 0);
+        lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_width(btn, 0, 0);
+        lv_obj_set_style_radius(btn, 6, 0);
+        lv_obj_set_style_pad_all(btn, 6, 0);
+        lv_obj_set_flex_flow(btn, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(btn, LV_FLEX_ALIGN_START,
+                              LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+        lv_obj_clear_flag(btn, LV_OBJ_FLAG_SCROLLABLE);
+        ud->btn = btn;
+
+        lv_obj_t *lbl = lv_label_create(btn);
+        lv_label_set_text(lbl, pm_port->name[0] ? pm_port->name : pm_port->symbol);
+        lv_label_set_long_mode(lbl, LV_LABEL_LONG_DOT);
+        lv_obj_set_width(lbl, LV_PCT(100));
+        lv_obj_set_style_text_color(lbl, UI_COLOR_TEXT, 0);
+        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_14, 0);
+        lv_obj_clear_flag(lbl, LV_OBJ_FLAG_CLICKABLE);
+
+        lv_obj_add_event_cb(btn, wb_item_cb, LV_EVENT_CLICKED, ud);
+    }
+
+    /* Footer: Cancel + OK */
+    lv_obj_t *footer = lv_obj_create(panel);
+    lv_obj_set_size(footer, LV_PCT(100), 48);
+    lv_obj_set_flex_flow(footer, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(footer, LV_FLEX_ALIGN_END,
+                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_bg_opa(footer, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(footer, 0, 0);
+    lv_obj_set_style_pad_all(footer, 0, 0);
+    lv_obj_set_style_pad_column(footer, 8, 0);
+    lv_obj_clear_flag(footer, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *btn_cancel = lv_btn_create(footer);
+    lv_obj_set_size(btn_cancel, 120, 40);
+    lv_obj_set_style_bg_color(btn_cancel, UI_COLOR_BYPASS, 0);
+    lv_obj_t *lbl_cancel = lv_label_create(btn_cancel);
+    lv_label_set_text(lbl_cancel, TR(TR_CANCEL));
+    lv_obj_center(lbl_cancel);
+    lv_obj_add_event_cb(btn_cancel, wb_cancel_cb, LV_EVENT_CLICKED, pctx);
+
+    lv_obj_t *btn_ok = lv_btn_create(footer);
+    lv_obj_set_size(btn_ok, 120, 40);
+    lv_obj_set_style_bg_color(btn_ok, UI_COLOR_ACTIVE, 0);
+    lv_obj_t *lbl_ok = lv_label_create(btn_ok);
+    lv_label_set_text(lbl_ok, TR(TR_OK));
+    lv_obj_center(lbl_ok);
+    lv_obj_add_event_cb(btn_ok, wb_ok_cb, LV_EVENT_CLICKED, pctx);
+}
+
+static void on_widget_prefs_gear(int instance_id,
+                                 const char *plug_symbol,
+                                 const char *plug_uri,
+                                 void *ud)
+{
+    (void)ud;
+    /* Open picker on top of the param editor — do NOT close the editor here
+     * because this runs inside the gear button's event callback (a child of
+     * the editor modal) and lv_obj_del on the parent would be unsafe. The
+     * picker closes the editor from its own OK/Cancel callbacks instead. */
+    open_widget_prefs_picker(instance_id, plug_symbol, plug_uri);
+}
+
+/* ── Block rebuild ───────────────────────────────────────────────────────────── */
+
+void ui_pedalboard_rebuild_block(int instance_id)
+{
+    if (!g_pb_loaded || !g_canvas_scroll) return;
+    for (int i = 0; i < g_pedalboard.plugin_count; i++) {
+        if (g_pedalboard.plugins[i].instance_id != instance_id) continue;
+        pb_plugin_t *plug = &g_pedalboard.plugins[i];
+        int new_w = ui_plugin_block_width(plug);
+        if (new_w != g_block_w[i] || !g_block_obj[i]) {
+            /* Width changed (or block missing) — full refresh is safest */
+            ui_pedalboard_refresh();
+        } else {
+            lv_obj_t *parent = lv_obj_get_parent(g_block_obj[i]);
+            lv_coord_t x = lv_obj_get_x(g_block_obj[i]);
+            lv_coord_t y = lv_obj_get_y(g_block_obj[i]);
+            lv_obj_delete(g_block_obj[i]);
+            lv_obj_t *block = ui_plugin_block_create(
+                parent, plug,
+                on_block_tap, on_block_bypass, on_block_remove, on_block_param,
+                (void *)(intptr_t)instance_id);
+            lv_obj_set_pos(block, x, y);
+            g_block_obj[i] = block;
+        }
+        return;
+    }
+}
+
 void ui_pedalboard_init(lv_obj_t *parent)
 {
+    ui_param_editor_set_widget_prefs_cb(on_widget_prefs_gear, NULL);
     g_parent_obj = parent;
 
     /* Reset canvas pointers — previous LVGL objects may have been freed
@@ -1353,6 +2502,13 @@ void ui_pedalboard_init(lv_obj_t *parent)
     g_canvas_scroll = NULL;
     g_canvas        = NULL;
     g_conn_panel    = NULL; /* freed with content area */
+
+    /* When mod-ui.service is running, show informational placeholder instead
+     * of the pedalboard canvas — mod-pi-touch is disconnected from mod-host. */
+    if (settings_get()->mod_ui_active) {
+        build_modui_placeholder(parent);
+        return;
+    }
 
     /* Scrollable container */
     g_canvas_scroll = lv_obj_create(parent);
@@ -1369,6 +2525,10 @@ void ui_pedalboard_init(lv_obj_t *parent)
      * itself, not the scroll range.  The scroll range is determined by child
      * extents.  A transparent spacer added in ui_pedalboard_refresh() defines
      * the scrollable area. */
+
+    /* Detect the ALSA Midi-Through JACK port once at startup (main thread,
+     * before any background threads open JACK clients concurrently). */
+    detect_midi_loopback_ports();
 
     if (g_pb_loaded) {
         ui_pedalboard_refresh();
@@ -1419,6 +2579,12 @@ static bool uri_to_jack_port(const char *uri, const pedalboard_t *pb,
     /* rel is now "plugin_sym/port_sym" or "hardware_port" */
     const char *slash = strchr(rel, '/');
     if (!slash) {
+        /* Virtual MIDI Loopback: map to the actual Midi-Through JACK playback port */
+        if (strcmp(rel, "midi_loopback") == 0) {
+            if (!g_midi_loopback_pb_port[0]) return false;
+            snprintf(out, outsz, "%s", g_midi_loopback_pb_port);
+            return true;
+        }
         /* Single component — hardware port: capture_N, playback_N, midi_* */
         snprintf(out, outsz, "system:%s", rel);
         /* Redirect audio captures through the pre-fx noise gate when loaded.
@@ -1483,29 +2649,62 @@ void ui_pedalboard_apply_snapshot(int idx)
     if (!g_pb_loaded) return;
     if (idx < 0 || idx >= g_pedalboard.snapshot_count) return;
 
-    pb_snapshot_load(&g_pedalboard, idx);
-
     pb_snapshot_t *snap = &g_pedalboard.snapshots[idx];
+
     for (int i = 0; i < snap->plugin_count; i++) {
         snap_plugin_t *sp = &snap->plugins[i];
         pb_plugin_t *plug = pb_find_plugin_by_symbol(&g_pedalboard, sp->symbol);
         if (!plug) continue;
-        host_bypass(plug->instance_id, sp->bypassed);
-        for (int j = 0; j < sp->param_count; j++)
-            host_param_set(plug->instance_id, sp->params[j].symbol, sp->params[j].value);
-        for (int j = 0; j < sp->patch_param_count; j++)
-            if (sp->patch_params[j].path[0])
-                host_patch_set(plug->instance_id,
-                               sp->patch_params[j].uri,
-                               sp->patch_params[j].path);
-    }
-    /* Marshal LVGL call to main thread (may be called from background thread). */
-    lv_async_call(pb_snapshot_ui_refresh, NULL);
-}
 
-static void pb_snapshot_ui_refresh(void *arg)
-{
-    (void)arg;
+        bool cur_bypassed = !plug->enabled;
+        bool new_bypassed = sp->bypassed;
+        bool diff_bypass  = plug->enabled_snapshotable && (cur_bypassed != new_bypassed);
+
+        /* If becoming bypassed, mute first — params change while silent. */
+        if (diff_bypass && new_bypassed)
+            host_bypass(plug->instance_id, true);
+
+        /* Only send preset_load if the preset URI actually changed. */
+        if (sp->preset_uri[0] && strcmp(sp->preset_uri, plug->preset_uri) != 0)
+            host_preset_load(plug->instance_id, sp->preset_uri);
+
+        /* Only send param_set for values that changed. */
+        for (int j = 0; j < sp->param_count; j++) {
+            for (int k = 0; k < plug->port_count; k++) {
+                if (strcmp(plug->ports[k].symbol, sp->params[j].symbol) == 0) {
+                    if (plug->ports[k].value != sp->params[j].value)
+                        host_param_set(plug->instance_id,
+                                       sp->params[j].symbol, sp->params[j].value);
+                    break;
+                }
+            }
+        }
+
+        /* Only send patch_set for file paths that changed. */
+        for (int j = 0; j < sp->patch_param_count; j++) {
+            if (!sp->patch_params[j].path[0]) continue;
+            for (int k = 0; k < plug->patch_param_count; k++) {
+                if (strcmp(plug->patch_params[k].uri, sp->patch_params[j].uri) == 0) {
+                    if (strcmp(plug->patch_params[k].path, sp->patch_params[j].path) != 0)
+                        host_patch_set(plug->instance_id,
+                                       sp->patch_params[j].uri,
+                                       sp->patch_params[j].path);
+                    break;
+                }
+            }
+        }
+
+        /* If becoming un-bypassed, activate last — all params already applied. */
+        if (diff_bypass && !new_bypassed)
+            host_bypass(plug->instance_id, false);
+    }
+
+    /* Update in-memory state after all commands are sent. */
+    pb_snapshot_load(&g_pedalboard, idx);
+
+    /* Full canvas rebuild — same path as on_block_bypass(), the only approach
+     * proven to reliably trigger a framebuffer redraw from this context. */
+    ui_pedalboard_refresh();
     ui_snapshot_bar_refresh();
     last_state_save();
 }
@@ -1513,6 +2712,11 @@ static void pb_snapshot_ui_refresh(void *arg)
 void ui_pedalboard_load(const char *bundle_path,
                         pb_progress_cb_t progress_cb, void *progress_ud)
 {
+    /* Reset output value table for the new pedalboard */
+    pthread_mutex_lock(&g_pb_mutex);
+    g_output_val_count = 0;
+    pthread_mutex_unlock(&g_pb_mutex);
+
     pb_init(&g_pedalboard);
     fprintf(stderr, "[ui_pedalboard] loading bundle: %s\n", bundle_path);
     if (pb_load(&g_pedalboard, bundle_path) < 0) {
@@ -1524,6 +2728,10 @@ void ui_pedalboard_load(const char *bundle_path,
             g_pedalboard.name, g_pedalboard.plugin_count, g_pedalboard.connection_count);
     g_pb_loaded = true;
 
+    /* Load sidecar widget control prefs (separate from mod-ui pedalboard files) */
+    mpt_settings_t *wp_s = settings_get();
+    if (wp_s) widget_prefs_load(wp_s->data_dir, bundle_path);
+
     /* ── Rebuild mod-host state ── */
 
     /* 1. Clear all existing plugins */
@@ -1531,6 +2739,18 @@ void ui_pedalboard_load(const char *bundle_path,
 
     /* Reload pre-fx instances (host_remove_all removes them too) */
     pre_fx_reload();
+
+    /* Apply Virtual MIDI Loopback state from pedalboard TTL.
+     * Never call remove_hw_port unless we previously called add_hw_port
+     * (the command blocks ~2 s when the port doesn't exist in mod-host). */
+    if (g_midi_loopback_active) {
+        host_remove_hw_port("midi_loopback");
+        g_midi_loopback_active = false;
+    }
+    if (g_pedalboard.midi_loopback) {
+        host_add_hw_port("midi_loopback", 1, "MIDI_Loopback", 42);
+        g_midi_loopback_active = true;
+    }
 
     /* 2. Add plugins, set bypass and port values */
     int total_plugins = g_pedalboard.plugin_count;
@@ -1572,8 +2792,34 @@ void ui_pedalboard_load(const char *bundle_path,
             }
         }
 
+        /* CV assignments */
+        for (int j = 0; j < plug->port_count; j++) {
+            pb_port_t *port = &plug->ports[j];
+            if (!port->cv_source_uri[0]) continue;
+            char jack_port[256];
+            if (cv_uri_to_jack(port->cv_source_uri, jack_port, sizeof(jack_port)))
+                host_cv_map(plug->instance_id, port->symbol, jack_port,
+                            port->cv_min, port->cv_max,
+                            port->cv_op_mode ? port->cv_op_mode : '+');
+        }
+
+        /* Subscribe to real-time output port monitoring */
+        {
+            const pm_plugin_info_t *pm_info = pm_plugin_by_uri(plug->uri);
+            if (pm_info) {
+                for (int j = 0; j < pm_info->port_count; j++) {
+                    if (pm_info->ports[j].type == PM_PORT_CONTROL_OUT)
+                        host_monitor_output(plug->instance_id,
+                                            pm_info->ports[j].symbol);
+                }
+            }
+        }
+
         if (progress_cb) progress_cb(i + 1, total_plugins, progress_ud);
     }
+
+    /* Build the CV source table for the param editor picker */
+    build_cv_sources();
 
     /* 3. Make audio/MIDI connections */
     if (progress_cb) progress_cb(-1, 0, progress_ud); /* phase: connections */
@@ -1589,10 +2835,51 @@ void ui_pedalboard_load(const char *bundle_path,
         }
     }
 
-    /* Note: host_state_load() was removed.  All control port values are sent
-     * individually via host_param_set() above, and file paths via
-     * host_patch_set().  host_state_load() was redundant and consistently
-     * timed out (10 s) on Pi hardware, blocking the splash screen. */
+    /* Restore full LV2 state for plugins that use the LV2_State extension.
+     * mod-host reads bundlepath/effect-<id>/effect.ttl for each loaded plugin
+     * and calls LV2_State_Interface.restore().  This captures state that cannot
+     * be expressed as port values (IR file paths for convolution reverbs, pitch
+     * shifter internal config, etc.) — exactly what mod-ui does at this point. */
+    if (g_pedalboard.path[0])
+        host_state_load(g_pedalboard.path);
+
+    /* Apply the current snapshot on top of the TTL base values.
+     * This restores parameter values (including patch:set file paths) that
+     * were saved with the snapshot but may differ from the TTL base state. */
+    if (g_pedalboard.current_snapshot >= 0 &&
+        g_pedalboard.current_snapshot < g_pedalboard.snapshot_count) {
+        int sidx = g_pedalboard.current_snapshot;
+        pb_snapshot_load(&g_pedalboard, sidx);          /* update in-memory values */
+        pb_snapshot_t *snap = &g_pedalboard.snapshots[sidx];
+        for (int i = 0; i < snap->plugin_count; i++) {
+            snap_plugin_t *sp = &snap->plugins[i];
+            pb_plugin_t *plug = pb_find_plugin_by_symbol(&g_pedalboard, sp->symbol);
+            if (!plug) continue;
+            host_bypass(plug->instance_id, sp->bypassed);
+            for (int j = 0; j < sp->param_count; j++)
+                host_param_set(plug->instance_id, sp->params[j].symbol,
+                               sp->params[j].value);
+            for (int j = 0; j < sp->patch_param_count; j++)
+                if (sp->patch_params[j].path[0])
+                    host_patch_set(plug->instance_id, sp->patch_params[j].uri,
+                                   sp->patch_params[j].path);
+        }
+    }
+
+    /* Apply transport (BPM, BPB, rolling) read from the pedalboard TTL.
+     * mod-host keeps its own transport state; without this call, a looper
+     * or any plugin that reads mod-host tempo would see a stale value. */
+    host_transport(g_pedalboard.transport_rolling,
+                   g_pedalboard.bpb, g_pedalboard.bpm);
+    if (g_pedalboard.transport_sync == 1)
+        host_transport_sync("midi_clock_slave");
+
+    /* Kick-start the mod-host feedback loop.  All monitor_output calls are now
+     * done; sending output_data_ready sets g_postevents_ready=true so the
+     * PostPonedEventsThread dispatches the initial monitored values.  The
+     * fb_thread will automatically re-send output_data_ready after each
+     * subsequent data_finish to keep the loop going. */
+    host_output_data_ready();
 
     /* Marshal LVGL calls to the main thread — ui_pedalboard_load() may be
      * called from a background thread (boot auto-load).  Touching LVGL
@@ -1607,6 +2894,7 @@ static void pb_load_ui_refresh(void *arg)
     (void)arg;
     ui_app_update_title(g_pedalboard.name, false);
     ui_pedalboard_refresh();
+    ui_conductor_refresh();   /* sync BPM/BPB display to newly-loaded pedalboard */
     last_state_save();
 }
 
@@ -1628,7 +2916,14 @@ void ui_pedalboard_save_snapshot(void)
 
     pb_snapshot_overwrite(&g_pedalboard, idx);
 
-    /* Save only snapshots.json (not the full TTL) */
+    /* Save full TTL so the base state matches the current live state.
+     * This mirrors mod-ui behaviour: saving a snapshot also persists
+     * parameter values (including patch:set file paths) to the bundle. */
+    if (pb_save(&g_pedalboard) < 0) {
+        ui_app_show_toast_error(TR(TR_MSG_SNAP_SAVE_FAIL));
+        return;
+    }
+
     char snap_path[1024];
     snprintf(snap_path, sizeof(snap_path), "%s/snapshots.json", g_pedalboard.path);
     if (snapshot_save(snap_path, g_pedalboard.snapshots,
@@ -1671,6 +2966,7 @@ void ui_pedalboard_delete(void)
 
     pb_init(&g_pedalboard);
     g_pb_loaded = false;
+    widget_prefs_clear();
 
     pb_bundle_delete(bundle_path);
 
@@ -1697,6 +2993,47 @@ static void param_editor_async_cb(void *arg)
     param_upd_t *upd = arg;
     ui_param_editor_update(upd->sym, upd->val);
     free(upd);
+}
+
+/* ─── Output port monitoring ─────────────────────────────────────────────────── */
+
+void ui_pedalboard_set_output(int instance, const char *symbol, float value)
+{
+    pthread_mutex_lock(&g_pb_mutex);
+
+    output_val_t *slot = NULL;
+    for (int i = 0; i < g_output_val_count; i++) {
+        if (g_output_vals[i].instance == instance &&
+            strcmp(g_output_vals[i].symbol, symbol) == 0) {
+            slot = &g_output_vals[i];
+            break;
+        }
+    }
+    if (!slot && g_output_val_count < OUTPUT_VAL_MAX) {
+        slot = &g_output_vals[g_output_val_count++];
+        slot->instance = instance;
+        snprintf(slot->symbol, sizeof(slot->symbol), "%s", symbol);
+    }
+    if (slot) slot->value = value;
+
+    pthread_mutex_unlock(&g_pb_mutex);
+    /* UI update is driven by the meter_timer in ui_param_editor at 10 Hz */
+}
+
+bool ui_pedalboard_get_output(int instance, const char *symbol, float *out)
+{
+    pthread_mutex_lock(&g_pb_mutex);
+    bool found = false;
+    for (int i = 0; i < g_output_val_count; i++) {
+        if (g_output_vals[i].instance == instance &&
+            strcmp(g_output_vals[i].symbol, symbol) == 0) {
+            if (out) *out = g_output_vals[i].value;
+            found = true;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_pb_mutex);
+    return found;
 }
 
 void ui_pedalboard_update_param(int instance_id, const char *symbol, float value)
@@ -1787,6 +3124,77 @@ void ui_pedalboard_on_midi_mapped(int instance_id, const char *symbol,
     }
 }
 
+void ui_pedalboard_set_midi_loopback(bool enabled)
+{
+    if (!g_pb_loaded) return;
+    g_pedalboard.midi_loopback = enabled;
+    g_pedalboard.modified = true;
+    if (enabled) {
+        if (!g_midi_loopback_active) {
+            host_add_hw_port("midi_loopback", 1, "MIDI_Loopback", 42);
+            g_midi_loopback_active = true;
+        }
+    } else {
+        g_midi_loopback_pb_port[0] = '\0';
+        if (g_midi_loopback_active) {
+            host_remove_hw_port("midi_loopback");
+            g_midi_loopback_active = false;
+        }
+    }
+}
+
 /* Accessor for other modules */
 pedalboard_t *ui_pedalboard_get(void) { return &g_pedalboard; }
 bool          ui_pedalboard_is_loaded(void) { return g_pb_loaded; }
+
+bool ui_pedalboard_is_cv_out_enabled(int instance_id, const char *symbol)
+{
+    pb_plugin_t *plug = pb_find_plugin(&g_pedalboard, instance_id);
+    if (!plug) return false;
+    for (int i = 0; i < plug->cv_out_enabled_count; i++)
+        if (strcmp(plug->cv_out_enabled[i], symbol) == 0) return true;
+    return false;
+}
+
+void ui_pedalboard_set_cv_out_enabled(int instance_id, const char *symbol, bool enabled)
+{
+    pb_plugin_t *plug = pb_find_plugin(&g_pedalboard, instance_id);
+    if (!plug) return;
+    char uri[PB_CV_URI_MAX];
+    snprintf(uri, sizeof(uri), "/cv/graph/%s/%s", plug->symbol, symbol);
+
+    if (!enabled) {
+        /* Remove from plug->cv_out_enabled */
+        for (int i = 0; i < plug->cv_out_enabled_count; i++) {
+            if (strcmp(plug->cv_out_enabled[i], symbol) != 0) continue;
+            for (int j = i; j < plug->cv_out_enabled_count - 1; j++)
+                memcpy(plug->cv_out_enabled[j], plug->cv_out_enabled[j + 1], PB_SYMBOL_MAX);
+            plug->cv_out_enabled_count--;
+            break;
+        }
+        /* Unmap every parameter that referenced this CV source */
+        for (int i = 0; i < g_pedalboard.plugin_count; i++) {
+            pb_plugin_t *p = &g_pedalboard.plugins[i];
+            for (int j = 0; j < p->port_count; j++) {
+                pb_port_t *port = &p->ports[j];
+                if (strcmp(port->cv_source_uri, uri) != 0) continue;
+                host_cv_unmap(p->instance_id, port->symbol);
+                port->cv_source_uri[0] = '\0';
+                port->cv_op_mode       = '\0';
+            }
+        }
+    } else {
+        /* Add to plug->cv_out_enabled if not already there */
+        bool found = false;
+        for (int i = 0; i < plug->cv_out_enabled_count; i++)
+            if (strcmp(plug->cv_out_enabled[i], symbol) == 0) { found = true; break; }
+        if (!found && plug->cv_out_enabled_count < PB_MAX_PORTS)
+            snprintf(plug->cv_out_enabled[plug->cv_out_enabled_count++],
+                     PB_SYMBOL_MAX, "%s", symbol);
+    }
+
+    /* Rebuild g_cv_sources from the updated enabled list */
+    build_cv_sources();
+    g_pedalboard.modified = true;
+    ui_app_update_title(g_pedalboard.name, true);
+}

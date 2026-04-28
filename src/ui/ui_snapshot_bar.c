@@ -11,6 +11,7 @@
 extern pedalboard_t *ui_pedalboard_get(void);
 extern bool          ui_pedalboard_is_loaded(void);
 extern void          ui_pedalboard_save_last_state(void);
+extern void          ui_pedalboard_apply_snapshot(int idx);
 extern int           host_param_set(int, const char *, float);
 extern int           host_bypass(int, bool);
 extern int           host_patch_set(int, const char *, const char *);
@@ -31,25 +32,7 @@ static void apply_snapshot(int idx)
 {
     pedalboard_t *pb = ui_pedalboard_get();
     if (!pb || idx < 0 || idx >= pb->snapshot_count) return;
-
-    pb_snapshot_load(pb, idx);
-
-    pb_snapshot_t *snap = &pb->snapshots[idx];
-    for (int i = 0; i < snap->plugin_count; i++) {
-        snap_plugin_t *sp = &snap->plugins[i];
-        pb_plugin_t *plug = pb_find_plugin_by_symbol(pb, sp->symbol);
-        if (!plug) continue;
-        host_bypass(plug->instance_id, sp->bypassed);
-        for (int j = 0; j < sp->param_count; j++)
-            host_param_set(plug->instance_id, sp->params[j].symbol, sp->params[j].value);
-        for (int j = 0; j < sp->patch_param_count; j++)
-            if (sp->patch_params[j].path[0])
-                host_patch_set(plug->instance_id,
-                               sp->patch_params[j].uri,
-                               sp->patch_params[j].path);
-    }
-    ui_snapshot_bar_refresh();
-    ui_pedalboard_save_last_state();
+    ui_pedalboard_apply_snapshot(idx);
 }
 
 /* ─── Context menu (long press) ──────────────────────────────────────────────── */
@@ -223,8 +206,13 @@ static void open_popup(void)
     lv_obj_align(panel, LV_ALIGN_BOTTOM_MID, 0, -(UI_SNAPSHOT_BAR_H + 4));
     lv_obj_set_style_bg_color(panel, UI_COLOR_SURFACE, 0);
     lv_obj_set_style_border_color(panel, UI_COLOR_PRIMARY, 0);
-    lv_obj_set_style_border_width(panel, 2, 0);
-    lv_obj_set_style_radius(panel, 8, 0);
+    lv_obj_set_style_border_width(panel, 1, 0);
+    lv_obj_set_style_border_opa(panel, LV_OPA_40, 0);
+    lv_obj_set_style_radius(panel, 12, 0);
+    lv_obj_set_style_shadow_color(panel, lv_color_black(), 0);
+    lv_obj_set_style_shadow_width(panel, 32, 0);
+    lv_obj_set_style_shadow_spread(panel, 4, 0);
+    lv_obj_set_style_shadow_opa(panel, LV_OPA_80, 0);
     lv_obj_set_style_pad_all(panel, 8, 0);
     lv_obj_set_style_pad_row(panel, 4, 0);
     lv_obj_set_flex_flow(panel, LV_FLEX_FLOW_COLUMN);
@@ -320,10 +308,12 @@ void ui_snapshot_bar_init(lv_obj_t *parent)
     lv_obj_t *tap_btn = lv_btn_create(parent);
     lv_obj_set_flex_grow(tap_btn, 1);
     lv_obj_set_height(tap_btn, 44);
-    lv_obj_set_style_bg_color(tap_btn, UI_COLOR_BG, 0);
-    lv_obj_set_style_border_color(tap_btn, UI_COLOR_TEXT_DIM, 0);
+    lv_obj_set_style_bg_color(tap_btn, UI_COLOR_SURFACE, 0);
+    lv_obj_set_style_border_color(tap_btn, UI_COLOR_PRIMARY, 0);
     lv_obj_set_style_border_width(tap_btn, 1, 0);
-    lv_obj_set_style_radius(tap_btn, 6, 0);
+    lv_obj_set_style_border_opa(tap_btn, LV_OPA_40, 0);
+    lv_obj_set_style_radius(tap_btn, 22, 0);
+    lv_obj_set_style_shadow_width(tap_btn, 0, 0);
     lv_obj_set_style_pad_hor(tap_btn, 10, 0);
 
     g_cur_label = lv_label_create(tap_btn);
@@ -346,6 +336,13 @@ void ui_snapshot_bar_init(lv_obj_t *parent)
     lv_obj_t *btn_add = lv_btn_create(parent);
     lv_obj_set_size(btn_add, 44, 44);
     lv_obj_set_style_bg_color(btn_add, UI_COLOR_ACCENT, 0);
+    lv_obj_set_style_radius(btn_add, 22, 0);
+    lv_obj_set_style_shadow_color(btn_add, UI_COLOR_ACCENT, 0);
+    lv_obj_set_style_shadow_width(btn_add, 14, 0);
+    lv_obj_set_style_shadow_spread(btn_add, 2, 0);
+    lv_obj_set_style_shadow_opa(btn_add, LV_OPA_40, 0);
+    lv_obj_set_style_shadow_ofs_x(btn_add, 0, 0);
+    lv_obj_set_style_shadow_ofs_y(btn_add, 0, 0);
     lv_obj_t *lbl_add = lv_label_create(btn_add);
     lv_label_set_text(lbl_add, LV_SYMBOL_PLUS);
     lv_obj_center(lbl_add);

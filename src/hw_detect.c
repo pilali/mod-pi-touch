@@ -1,9 +1,12 @@
+#define _GNU_SOURCE
 #include "hw_detect.h"
 
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
-#include <jack/jack.h>
+
+/* JACK on this build uses /dev/shm as its tmpdir. */
+#define JACK_LSP "TMPDIR=/dev/shm jack_lsp"
 
 /* ─── Audio (ALSA PCM cards) ─────────────────────────────────────────────────
  *
@@ -26,15 +29,12 @@ int hw_detect_audio(hw_audio_device_t *out, int max)
         char bracket[32] = "";
         char long_name[128] = "";
 
-        /* Match lines that start with a card index */
         if (sscanf(line, " %d [%31[^]]]", &card_num, bracket) < 1)
             continue;
 
-        /* Try to extract the long name after " - " */
         const char *dash = strstr(line, " - ");
         if (dash) {
             snprintf(long_name, sizeof(long_name), "%s", dash + 3);
-            /* Trim trailing whitespace / newline */
             char *end = long_name + strlen(long_name) - 1;
             while (end >= long_name && (*end == '\n' || *end == '\r' || *end == ' '))
                 *end-- = '\0';
@@ -50,83 +50,196 @@ int hw_detect_audio(hw_audio_device_t *out, int max)
     return count;
 }
 
-/* ─── MIDI (ALSA raw-MIDI ports via amidi) ───────────────────────────────────
+/* ─── MIDI port detection ────────────────────────────────────────────────────
  *
- * `amidi -l` output:
- *   Dir Device    Name
- *   IO  hw:1,0,0  pisound MIDI
- *    I  hw:2,0,0  USB MIDI Interface MIDI 1
+ * Uses `jack_lsp -p --aliases` (no JACK client API) to enumerate hardware
+ * MIDI ports.  Only ports flagged `physical` are included — this matches
+ * mod-ui's get_jack_hardware_ports(JackPortIsPhysical) behaviour and
+ * naturally excludes plugin ports (effect_N:*), mod-host:*, mod-monitor:*
+ * and any other software-only JACK clients.
+ *
+ * Port direction in JACK vs. user perception:
+ *   JACK "output" (sends data) = hardware MIDI source = user's MIDI INPUT
+ *   JACK "input"  (accepts data) = hardware MIDI sink  = user's MIDI OUTPUT
+ *
+ * Ports included:
+ *   system:midi_capture_N   (physical, output) → is_input=true
+ *   system:midi_playback_N  (physical, input)  → is_output=true
+ *   ttymidi:MIDI_in         (physical, output) → is_input=true
+ *   ttymidi:MIDI_out        (physical, input)  → is_output=true
+ *   … and any other physical MIDI client port
+ *
+ * Midi-Through loopback is always excluded (handled by hw_detect_midi_loopback).
+ * Audio ports (system:capture_N, system:playback_N) are excluded by name prefix.
+ *
+ * Label derivation:
+ *   For system:midi_* ports the first alias is "alsa_pcm:<name>/…"; we extract
+ *   <name> (e.g. "pisound", "touchosc").
+ *   For other ports (e.g. ttymidi) the port name itself is used.
  */
 int hw_detect_midi(hw_midi_port_t *out, int max)
 {
-    FILE *f = popen("amidi -l 2>/dev/null", "r");
+    FILE *f = popen(JACK_LSP " -p --aliases 2>/dev/null", "r");
     if (!f) return 0;
 
-    int  count = 0;
-    char line[256];
+    /* ── Collect raw entries (one per JACK port direction) ── */
+    hw_midi_port_t raw[HW_MAX_MIDI_PORTS * 2];
+    int n_raw = 0;
 
-    /* Skip header line */
-    if (!fgets(line, sizeof(line), f)) { pclose(f); return 0; }
+    char cur_port[128]  = "";
+    char cur_label[128] = "";
+    bool cur_physical   = false;
+    bool cur_is_output  = false; /* JACK "output" direction */
+    bool cur_loopback   = false;
+    bool cur_is_midi    = false;
 
-    while (fgets(line, sizeof(line), f) && count < max) {
-        char mode[4] = "", dev[64] = "", label[128] = "";
+    char line[512];
 
-        /* Direction field may be preceded by spaces */
-        if (sscanf(line, " %3s %63s %127[^\n]", mode, dev, label) < 2)
-            continue;
-        if (dev[0] == '\0') continue;
+#define EMIT_RAW() do { \
+    if (cur_port[0] && cur_physical && cur_is_midi && !cur_loopback \
+            && n_raw < (int)(sizeof(raw)/sizeof(raw[0]))) { \
+        memset(&raw[n_raw], 0, sizeof(raw[0])); \
+        snprintf(raw[n_raw].dev,   sizeof(raw[0].dev),   "%s", cur_port); \
+        snprintf(raw[n_raw].label, sizeof(raw[0].label), "%s", \
+                 cur_label[0] ? cur_label : cur_port); \
+        raw[n_raw].is_input  = cur_is_output;  \
+        raw[n_raw].is_output = !cur_is_output; \
+        n_raw++; \
+    } \
+} while (0)
 
-        /* Trim trailing spaces from label */
-        if (label[0]) {
-            char *end = label + strlen(label) - 1;
-            while (end >= label && (*end == ' ' || *end == '\r')) *end-- = '\0';
+    while (fgets(line, sizeof(line), f)) {
+        line[strcspn(line, "\r\n")] = '\0';
+        if (!line[0]) continue;
+
+        if (line[0] != ' ' && line[0] != '\t') {
+            EMIT_RAW();
+            snprintf(cur_port, sizeof(cur_port), "%s", line);
+            cur_label[0]  = '\0';
+            cur_physical  = false;
+            cur_is_output = false;
+            cur_loopback  = false;
+            if (strncmp(line, "system:midi_", 12) == 0)
+                cur_is_midi = true;
+            else if (strncmp(line, "system:", 7) == 0)
+                cur_is_midi = false;
+            else
+                cur_is_midi = true;
+        } else if (line[0] == ' ') {
+            const char *a = line + strspn(line, " ");
+            if (strcasestr(a, "Midi-Through") || strcasestr(a, "midi_through"))
+                cur_loopback = true;
+            if (!cur_label[0] && strncmp(a, "alsa_pcm:", 9) == 0) {
+                const char *name  = a + 9;
+                const char *slash = strchr(name, '/');
+                if (slash)
+                    snprintf(cur_label, sizeof(cur_label),
+                             "%.*s", (int)(slash - name), name);
+                else
+                    snprintf(cur_label, sizeof(cur_label), "%s", name);
+            }
+        } else {
+            const char *p = line + 1;
+            if (strstr(p, "physical")) cur_physical  = true;
+            if (strstr(p, "output"))   cur_is_output = true;
+        }
+    }
+    EMIT_RAW();
+
+#undef EMIT_RAW
+
+    pclose(f);
+
+    /* ── Group by label: one entry per device, merge capture+playback ── */
+    int count = 0;
+    for (int i = 0; i < n_raw; i++) {
+        /* Find existing entry with same label */
+        int found = -1;
+        for (int j = 0; j < count; j++) {
+            if (strcmp(out[j].label, raw[i].label) == 0) { found = j; break; }
         }
 
-        snprintf(out[count].dev,   sizeof(out[count].dev),   "%s", dev);
-        snprintf(out[count].label, sizeof(out[count].label), "%s",
-                 label[0] ? label : dev);
-        out[count].is_input  = (strchr(mode, 'I') != NULL);
-        out[count].is_output = (strchr(mode, 'O') != NULL);
-        count++;
+        if (found < 0) {
+            if (count >= max) continue;
+            memset(&out[count], 0, sizeof(out[0]));
+            snprintf(out[count].label, sizeof(out[0].label), "%s", raw[i].label);
+            if (raw[i].is_input) {
+                snprintf(out[count].dev, sizeof(out[0].dev), "%s", raw[i].dev);
+                out[count].is_input = true;
+            } else {
+                snprintf(out[count].dev_out, sizeof(out[0].dev_out), "%s", raw[i].dev);
+                out[count].is_output = true;
+            }
+            count++;
+        } else {
+            if (raw[i].is_input && !out[found].is_input) {
+                snprintf(out[found].dev, sizeof(out[0].dev), "%s", raw[i].dev);
+                out[found].is_input = true;
+            } else if (raw[i].is_output && !out[found].is_output) {
+                snprintf(out[found].dev_out, sizeof(out[0].dev_out), "%s", raw[i].dev);
+                out[found].is_output = true;
+            }
+        }
+    }
+    return count;
+}
+
+/* ─── MIDI loopback detection ───────────────────────────────────────────────
+ *
+ * Uses jack_lsp --aliases to find the system:midi_capture_N port whose alias
+ * contains "Midi-Through".  Returns that port name so the caller can derive
+ * the matching playback port.
+ */
+int hw_detect_midi_loopback(char *out_jack_port, size_t sz)
+{
+    out_jack_port[0] = '\0';
+
+    FILE *f = popen(JACK_LSP " --aliases 2>/dev/null", "r");
+    if (!f) return 0;
+
+    char cur[128] = "";
+    char line[512];
+    int  found = 0;
+
+    while (fgets(line, sizeof(line), f) && !found) {
+        line[strcspn(line, "\r\n")] = '\0';
+
+        if (line[0] != ' ' && line[0] != '\t') {
+            if (strncmp(line, "system:midi_capture_", 20) == 0)
+                snprintf(cur, sizeof(cur), "%s", line);
+            else
+                cur[0] = '\0';
+        } else if (cur[0]) {
+            const char *a = line + strspn(line, " \t");
+            if (strcasestr(a, "Midi-Through") || strcasestr(a, "midi_through")) {
+                snprintf(out_jack_port, sz, "%s", cur);
+                found = 1;
+            }
+        }
     }
 
     pclose(f);
-    return count;
+    return found;
 }
 
 /* ─── JACK port enumeration ──────────────────────────────────────────────────
  *
- * Opens a temporary JACK client (JackNoStartServer so we don't accidentally
- * launch jackd), counts system:capture_N and system:playback_N audio ports,
- * then immediately closes the client.
+ * Uses jack_lsp to count system:capture_N and system:playback_N audio ports.
  */
 int hw_detect_jack_ports(hw_jack_ports_t *out)
 {
     memset(out, 0, sizeof(*out));
 
-    jack_status_t status;
-    jack_client_t *client = jack_client_open("mpt_detect",
-                                              JackNoStartServer, &status);
-    if (!client) return -1;
+    FILE *f = popen(JACK_LSP " 2>/dev/null", "r");
+    if (!f) return -1;
 
-    const char **ports;
-
-    /* Audio capture: system outputs audio into JACK → JackPortIsOutput */
-    ports = jack_get_ports(client, "^system:capture_",
-                           JACK_DEFAULT_AUDIO_TYPE, JackPortIsOutput);
-    if (ports) {
-        while (ports[out->audio_capture]) out->audio_capture++;
-        jack_free(ports);
+    char line[256];
+    while (fgets(line, sizeof(line), f)) {
+        line[strcspn(line, "\r\n")] = '\0';
+        if (strncmp(line, "system:capture_",  15) == 0) out->audio_capture++;
+        if (strncmp(line, "system:playback_", 16) == 0) out->audio_playback++;
     }
 
-    /* Audio playback: JACK pushes audio into hardware → JackPortIsInput */
-    ports = jack_get_ports(client, "^system:playback_",
-                           JACK_DEFAULT_AUDIO_TYPE, JackPortIsInput);
-    if (ports) {
-        while (ports[out->audio_playback]) out->audio_playback++;
-        jack_free(ports);
-    }
-
-    jack_client_close(client);
+    pclose(f);
     return 0;
 }

@@ -2,6 +2,12 @@
 #include <lvgl.h>
 #include "../pedalboard.h"
 
+/* ── Block geometry (shared with ui_plugin_block) ────────────────────────────── */
+#define LAYOUT_BLOCK_W  160
+#define LAYOUT_BLOCK_H  160
+#define LAYOUT_H_GAP     80
+#define LAYOUT_V_GAP     40
+
 /* Initialize the pedalboard canvas view inside parent. */
 void ui_pedalboard_init(lv_obj_t *parent);
 
@@ -53,6 +59,28 @@ void ui_pedalboard_chain_bypass(bool bypass_all);
 void ui_pedalboard_on_midi_mapped(int instance_id, const char *symbol,
                                   int ch, int cc, float min, float max);
 
+/* Enable or disable the Virtual MIDI Loopback for the current pedalboard.
+ * Updates pb->midi_loopback, issues the mod-host command, and marks modified. */
+void ui_pedalboard_set_midi_loopback(bool enabled);
+
+/* Rebuild the plugin block widget for a given instance (e.g. after widget prefs change).
+ * Triggers a full canvas refresh if the block width changes. */
+void ui_pedalboard_rebuild_block(int instance_id);
+
 /* Accessors */
 pedalboard_t *ui_pedalboard_get(void);
 bool          ui_pedalboard_is_loaded(void);
+
+/* Output port value table — updated by the feedback thread via monitor_output.
+ * set_output: thread-safe; notifies the param editor via lv_async_call if open.
+ * get_output: returns true and fills *out if a value has been received. */
+void ui_pedalboard_set_output(int instance, const char *symbol, float value);
+bool ui_pedalboard_get_output(int instance, const char *symbol, float *out);
+
+/* CV output port enable/disable.
+ * When a port is disabled all cv_map assignments that used it are removed. */
+bool ui_pedalboard_is_cv_out_enabled(int instance_id, const char *symbol);
+void ui_pedalboard_set_cv_out_enabled(int instance_id, const char *symbol, bool enabled);
+
+/* Cache the WiFi IP before showing the mod-ui placeholder (call from background thread). */
+void ui_pedalboard_set_modui_ip(const char *ip);

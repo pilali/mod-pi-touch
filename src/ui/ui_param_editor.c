@@ -1,4 +1,5 @@
 #include "ui_param_editor.h"
+#include "ui_pedalboard.h"
 #include "ui_file_browser.h"
 #include "ui_app.h"
 #include "../host_comm.h"
@@ -9,6 +10,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <math.h>
+#include <stdatomic.h>
 
 /* ─── File type → (user-files subdir, extensions[]) mapping ─────────────────── */
 typedef struct {
@@ -93,22 +95,34 @@ static int resolve_file_types(const char *file_types,
 #define CTRL_ARC    0
 #define CTRL_TOGGLE 1
 #define CTRL_ENUM   2
+#define CTRL_METER  3  /* read-only output port bar */
 
 /* ─── Control registry — static pool, no malloc ─────────────────────────────── */
 #define MAX_CONTROLS 64
 typedef struct {
     char      symbol[PB_SYMBOL_MAX];
-    int       type;           /* CTRL_ARC / CTRL_TOGGLE / CTRL_ENUM */
-    lv_obj_t *widget;         /* arc / switch / dropdown */
-    lv_obj_t *val_lbl;        /* arc: numeric label below knob */
-    float     min, max;       /* arc: physical range */
+    int       type;           /* CTRL_ARC / CTRL_TOGGLE / CTRL_ENUM / CTRL_METER */
+    lv_obj_t *widget;         /* arc / switch / dropdown (NULL for CTRL_METER) */
+    lv_obj_t *val_lbl;        /* numeric label */
+    float     min, max;       /* physical range */
     bool      is_integer;     /* arc: round before sending */
     float     enum_values[16];
     int       enum_count;
-    /* MIDI CC mapping */
-    lv_obj_t *midi_lbl;       /* chip label: "—" or "CC70 ch13" */
-    int       midi_channel;   /* -1 = none */
-    int       midi_cc;        /* -1 = none */
+    /* MIDI CC mapping (unused for CTRL_METER) */
+    lv_obj_t *midi_lbl;
+    int       midi_channel;
+    int       midi_cc;
+    /* CV assignment (unused for CTRL_METER) */
+    lv_obj_t *cv_lbl;
+    char      cv_source_uri[PB_CV_URI_MAX];
+    /* CTRL_METER only */
+    lv_obj_t *meter_bar;      /* lv_bar widget */
+    /* Tempo sync */
+    bool      is_tempo_related;
+    char      unit_symbol[8];
+    float     tempo_divider;   /* 0 = not synced */
+    lv_obj_t *tempo_lbl;       /* label in the tempo chip */
+    pb_port_t *port_ref;       /* direct pointer into pedalboard port for tempo_divider update */
 } ctrl_reg_t;
 
 static ctrl_reg_t g_controls[MAX_CONTROLS];
@@ -131,6 +145,8 @@ static char                g_user_files_dir[512] = {0};
 
 static lv_obj_t           *g_modal      = NULL;
 static int                 g_instance   = -1;
+/* Atomic mirror of g_instance — safe to read from the feedback thread. */
+static _Atomic int         g_active_instance = -1;
 static bool                g_enabled    = true;
 static bypass_toggle_cb_t  g_bypass_cb  = NULL;
 static void               *g_bypass_ud  = NULL;
@@ -141,6 +157,20 @@ static patch_change_cb_t   g_patch_cb   = NULL;
 static void               *g_patch_ud   = NULL;
 static midi_map_cb_t       g_midi_cb    = NULL;
 static void               *g_midi_ud    = NULL;
+static cv_map_cb_t         g_cv_cb      = NULL;
+static void               *g_cv_ud      = NULL;
+static pb_cv_source_t     *g_cv_sources = NULL;
+static int                 g_cv_source_count = 0;
+static bypass_toggle_cb_t  g_remove_cb  = NULL;
+static void               *g_remove_ud  = NULL;
+
+static lv_obj_t           *g_confirm_overlay = NULL;
+
+/* Widget prefs gear callback */
+static widget_prefs_cb_t   g_widget_prefs_cb = NULL;
+static void               *g_widget_prefs_ud = NULL;
+static char                g_plug_symbol[PB_SYMBOL_MAX] = {0};
+static char                g_plug_uri[PB_URI_MAX]       = {0};
 
 /* Bypass MIDI state */
 static lv_obj_t           *g_bypass_midi_lbl = NULL;
@@ -149,6 +179,282 @@ static int                 g_bypass_midi_cc  = -1;
 
 /* Symbol currently in MIDI learn mode ("" = none) */
 static char g_learning_symbol[PB_SYMBOL_MAX] = {0};
+
+/* Timer that refreshes output port meters at ~10 Hz */
+static lv_timer_t *g_meter_timer = NULL;
+
+/* ─── Tempo sync helpers ─────────────────────────────────────────────────────── */
+
+typedef struct { float value; const char *label; } tempo_div_t;
+
+static const tempo_div_t TEMPO_DIVS[] = {
+    { 0.333f,  "2."    },
+    { 0.5f,    "2"     },
+    { 0.75f,   "2T"    },
+    { 0.666f,  "1."    },
+    { 1.0f,    "1"     },
+    { 1.5f,    "1T"    },
+    { 1.333f,  "1/2."  },
+    { 2.0f,    "1/2"   },
+    { 3.0f,    "1/2T"  },
+    { 2.666f,  "1/4."  },
+    { 4.0f,    "1/4"   },
+    { 6.0f,    "1/4T"  },
+    { 5.333f,  "1/8."  },
+    { 8.0f,    "1/8"   },
+    { 12.0f,   "1/8T"  },
+    { 10.666f, "1/16." },
+    { 16.0f,   "1/16"  },
+    { 24.0f,   "1/16T" },
+    { 21.333f, "1/32." },
+    { 32.0f,   "1/32"  },
+    { 48.0f,   "1/32T" },
+};
+#define TEMPO_DIVS_COUNT 21
+
+/* Compute the port value for a given BPM, divider, and unit symbol.
+ * Matches mod-ui's getPortValue() + convertSecondsToPortValueEquivalent(). */
+static float tempo_compute_port_value(float bpm, float divider, const char *unit)
+{
+    if (divider <= 0.0f || bpm <= 0.0f) return 0.0f;
+    if (strcmp(unit, "BPM") == 0) return bpm / divider;
+    float secs = 240.0f / (bpm * divider);
+    if (strcmp(unit, "ms")  == 0) return secs * 1000.0f;
+    if (strcmp(unit, "min") == 0) return secs / 60.0f;
+    if (secs <= 0.0f) return 0.0f;
+    if (strcmp(unit, "Hz")  == 0) return 1.0f       / secs;
+    if (strcmp(unit, "kHz") == 0) return 0.001f     / secs;
+    if (strcmp(unit, "MHz") == 0) return 0.000001f  / secs;
+    return secs; /* "s" or unknown */
+}
+
+/* Find the division label for a stored divider value (closest match). */
+static const char *tempo_div_label(float divider)
+{
+    if (divider <= 0.0f) return "\xe2\x80\x94"; /* em-dash "—" */
+    const tempo_div_t *best = &TEMPO_DIVS[0];
+    float best_diff = fabsf(divider - TEMPO_DIVS[0].value);
+    for (int i = 1; i < TEMPO_DIVS_COUNT; i++) {
+        float d = fabsf(divider - TEMPO_DIVS[i].value);
+        if (d < best_diff) { best_diff = d; best = &TEMPO_DIVS[i]; }
+    }
+    return best->label;
+}
+
+/* ─── Tempo picker popup ──────────────────────────────────────────────────────── */
+
+typedef struct { ctrl_reg_t *reg; lv_obj_t *popup; } tempo_picker_state_t;
+static tempo_picker_state_t g_tempo_picker;
+
+static void tempo_picker_close(void)
+{
+    if (g_tempo_picker.popup) {
+        lv_obj_del(g_tempo_picker.popup);
+        g_tempo_picker.popup = NULL;
+    }
+    g_tempo_picker.reg = NULL;
+}
+
+typedef struct { int div_index; int unmap; } tempo_btn_ud_t;
+#define TEMPO_BTN_MAX (TEMPO_DIVS_COUNT + 1)
+static tempo_btn_ud_t g_tempo_btn_uds[TEMPO_BTN_MAX];
+static int            g_tempo_btn_ud_count = 0;
+
+static void tempo_btn_cb(lv_event_t *e)
+{
+    tempo_btn_ud_t *ud = lv_event_get_user_data(e);
+    if (!ud || !g_tempo_picker.reg) { tempo_picker_close(); return; }
+
+    ctrl_reg_t *reg = g_tempo_picker.reg;
+
+    if (ud->unmap) {
+        reg->tempo_divider = 0.0f;
+        if (reg->port_ref) reg->port_ref->tempo_divider = 0.0f;
+        if (reg->tempo_lbl) lv_label_set_text(reg->tempo_lbl, "\xe2\x80\x94");
+    } else if (ud->div_index >= 0 && ud->div_index < TEMPO_DIVS_COUNT) {
+        float divider = TEMPO_DIVS[ud->div_index].value;
+        reg->tempo_divider = divider;
+        if (reg->port_ref) reg->port_ref->tempo_divider = divider;
+
+        /* Compute and send new value */
+        pedalboard_t *pb = ui_pedalboard_get();
+        float bpm = pb ? pb->bpm : 120.0f;
+        float val = tempo_compute_port_value(bpm, divider, reg->unit_symbol);
+        if (val < reg->min) val = reg->min;
+        if (val > reg->max) val = reg->max;
+
+        if (g_instance >= 0) host_param_set(g_instance, reg->symbol, val);
+        if (g_value_cb) g_value_cb(g_instance, reg->symbol, val, g_value_ud);
+
+        /* Update arc knob display */
+        if (reg->widget && reg->type == CTRL_ARC) {
+            float range = reg->max - reg->min;
+            if (range > 0.0f) {
+                int av = (int)(((val - reg->min) / range) * 100.0f + 0.5f);
+                if (av < 0) av = 0; if (av > 100) av = 100;
+                lv_arc_set_value(reg->widget, av);
+            }
+        }
+        if (reg->val_lbl) {
+            char buf[32];
+            if (reg->is_integer) snprintf(buf, sizeof(buf), "%d", (int)val);
+            else                 snprintf(buf, sizeof(buf), "%.3g", (double)val);
+            lv_label_set_text(reg->val_lbl, buf);
+        }
+
+        if (reg->tempo_lbl)
+            lv_label_set_text(reg->tempo_lbl, TEMPO_DIVS[ud->div_index].label);
+    }
+
+    tempo_picker_close();
+}
+
+static void tempo_overlay_close_cb(lv_event_t *e)
+{
+    (void)e;
+    tempo_picker_close();
+}
+
+static void show_tempo_picker(ctrl_reg_t *reg)
+{
+    if (g_tempo_picker.popup) tempo_picker_close();
+
+    g_tempo_picker.reg = reg;
+
+    /* Filter divisions: keep only those that produce a value in [min, max]
+     * at any BPM between 20 and 280 (matches mod-ui getDividerOptions). */
+    bool valid[TEMPO_DIVS_COUNT];
+    int  valid_count = 0;
+    for (int i = 0; i < TEMPO_DIVS_COUNT; i++) {
+        float v20  = tempo_compute_port_value(20.0f,  TEMPO_DIVS[i].value, reg->unit_symbol);
+        float v280 = tempo_compute_port_value(280.0f, TEMPO_DIVS[i].value, reg->unit_symbol);
+        float lo = v20 < v280 ? v20 : v280;
+        float hi = v20 < v280 ? v280 : v20;
+        /* Accept if the [lo,hi] range overlaps with [min,max] */
+        valid[i] = (lo <= reg->max && hi >= reg->min);
+        if (valid[i]) valid_count++;
+    }
+    /* If no valid divisions (odd port range), show all */
+    if (valid_count == 0) {
+        for (int i = 0; i < TEMPO_DIVS_COUNT; i++) valid[i] = true;
+        valid_count = TEMPO_DIVS_COUNT;
+    }
+    bool has_unmap = (reg->tempo_divider > 0.0f);
+    int n_buttons = valid_count + (has_unmap ? 1 : 0);
+    int btn_h = 36;
+    int h = 52 + n_buttons * (btn_h + 4) + 16;
+    if (h > 560) h = 560;
+
+    lv_obj_t *overlay = lv_obj_create(lv_layer_top());
+    lv_obj_set_size(overlay, LV_PCT(100), LV_PCT(100));
+    lv_obj_set_style_bg_color(overlay, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(overlay, LV_OPA_60, 0);
+    lv_obj_add_event_cb(overlay, tempo_overlay_close_cb, LV_EVENT_CLICKED, NULL);
+    g_tempo_picker.popup = overlay;
+
+    lv_obj_t *box = lv_obj_create(overlay);
+    lv_obj_set_size(box, 260, h);
+    lv_obj_center(box);
+    lv_obj_set_style_bg_color(box, lv_color_hex(0x1a2030), 0);
+    lv_obj_set_style_border_color(box, lv_color_hex(0x60a070), 0);
+    lv_obj_set_style_border_width(box, 2, 0);
+    lv_obj_set_style_radius(box, 10, 0);
+    lv_obj_set_style_pad_all(box, 10, 0);
+    lv_obj_set_flex_flow(box, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(box, 4, 0);
+    lv_obj_clear_flag(box, LV_OBJ_FLAG_CLICKABLE);
+
+    lv_obj_t *title = lv_label_create(box);
+    lv_label_set_text_fmt(title, LV_SYMBOL_REFRESH " %s", reg->symbol);
+    lv_obj_set_style_text_color(title, lv_color_hex(0x80c0a0), 0);
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_14, 0);
+
+    lv_obj_t *scroll = lv_obj_create(box);
+    lv_obj_set_size(scroll, LV_PCT(100), 0);
+    lv_obj_set_flex_grow(scroll, 1);
+    lv_obj_set_style_bg_opa(scroll, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(scroll, 0, 0);
+    lv_obj_set_style_pad_all(scroll, 0, 0);
+    lv_obj_set_flex_flow(scroll, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(scroll, 4, 0);
+    lv_obj_add_flag(scroll, LV_OBJ_FLAG_SCROLLABLE);
+
+    g_tempo_btn_ud_count = 0;
+
+    if (has_unmap && g_tempo_btn_ud_count < TEMPO_BTN_MAX) {
+        int ui = g_tempo_btn_ud_count++;
+        g_tempo_btn_uds[ui].div_index = -1;
+        g_tempo_btn_uds[ui].unmap     = 1;
+        lv_obj_t *btn = lv_btn_create(scroll);
+        lv_obj_set_size(btn, LV_PCT(100), btn_h);
+        lv_obj_set_style_bg_color(btn, lv_color_hex(0x502020), 0);
+        lv_obj_add_event_cb(btn, tempo_btn_cb, LV_EVENT_CLICKED, &g_tempo_btn_uds[ui]);
+        lv_obj_t *lbl = lv_label_create(btn);
+        lv_label_set_text(lbl, LV_SYMBOL_CLOSE "  Désactiver");
+        lv_obj_center(lbl);
+        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_14, 0);
+    }
+
+    for (int i = 0; i < TEMPO_DIVS_COUNT; i++) {
+        if (!valid[i]) continue;
+        if (g_tempo_btn_ud_count >= TEMPO_BTN_MAX) break;
+        int ui = g_tempo_btn_ud_count++;
+        g_tempo_btn_uds[ui].div_index = i;
+        g_tempo_btn_uds[ui].unmap     = 0;
+        bool is_current = (fabsf(reg->tempo_divider - TEMPO_DIVS[i].value) < 0.01f);
+        lv_obj_t *btn = lv_btn_create(scroll);
+        lv_obj_set_size(btn, LV_PCT(100), btn_h);
+        lv_obj_set_style_bg_color(btn,
+            is_current ? lv_color_hex(0x1a4030) : lv_color_hex(0x243040), 0);
+        lv_obj_add_event_cb(btn, tempo_btn_cb, LV_EVENT_CLICKED, &g_tempo_btn_uds[ui]);
+        lv_obj_t *lbl = lv_label_create(btn);
+        lv_label_set_text(lbl, TEMPO_DIVS[i].label);
+        lv_obj_center(lbl);
+        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_14, 0);
+        lv_obj_set_style_text_color(lbl,
+            is_current ? lv_color_hex(0x80c0a0) : lv_color_hex(0xa0b0c0), 0);
+    }
+}
+
+/* ─── Tempo chip userdata pool ───────────────────────────────────────────────── */
+
+typedef struct { ctrl_reg_t *reg; } tempo_chip_ud_t;
+static tempo_chip_ud_t g_tempo_chip_uds[MAX_CONTROLS];
+static int             g_tempo_chip_ud_count = 0;
+
+static void tempo_chip_tap_cb(lv_event_t *e)
+{
+    tempo_chip_ud_t *ud = lv_event_get_user_data(e);
+    if (!ud || !ud->reg) return;
+    show_tempo_picker(ud->reg);
+}
+
+/* Create a tempo chip button (teal style). Returns the label inside.
+ * Registers a tap callback that opens the division picker. */
+static lv_obj_t *make_tempo_chip(lv_obj_t *parent, ctrl_reg_t *reg)
+{
+    if (g_tempo_chip_ud_count >= MAX_CONTROLS) return NULL;
+    tempo_chip_ud_t *ud = &g_tempo_chip_uds[g_tempo_chip_ud_count++];
+    ud->reg = reg;
+
+    lv_obj_t *chip = lv_btn_create(parent);
+    lv_obj_set_size(chip, LV_SIZE_CONTENT, 22);
+    lv_obj_set_style_radius(chip, 11, 0);
+    lv_obj_set_style_pad_hor(chip, 8, 0);
+    lv_obj_set_style_pad_ver(chip, 3, 0);
+    lv_obj_set_style_bg_color(chip, lv_color_hex(0x1a3a20), 0);
+    lv_obj_set_style_border_color(chip, lv_color_hex(0x3a7050), 0);
+    lv_obj_set_style_border_width(chip, 1, 0);
+    lv_obj_add_event_cb(chip, tempo_chip_tap_cb, LV_EVENT_CLICKED, ud);
+
+    lv_obj_t *lbl = lv_label_create(chip);
+    lv_label_set_text(lbl, tempo_div_label(reg->tempo_divider));
+    lv_obj_center(lbl);
+    lv_obj_set_style_text_color(lbl, lv_color_hex(0x60c090), 0);
+    lv_obj_set_style_text_font(lbl, &lv_font_montserrat_12, 0);
+
+    return lbl;
+}
 
 /* ─── Helpers ─────────────────────────────────────────────────────────────────── */
 
@@ -266,6 +572,202 @@ static lv_obj_t *make_midi_chip(lv_obj_t *parent, int midi_ch, int midi_cc,
     return lbl;
 }
 
+/* ─── CV chip helpers ────────────────────────────────────────────────────────── */
+
+typedef struct { ctrl_reg_t *reg; } cv_chip_ud_t;
+static cv_chip_ud_t g_cv_chip_uds[MAX_CONTROLS];
+static int          g_cv_chip_ud_count = 0;
+
+/* Picker state (one picker open at a time) */
+typedef struct {
+    ctrl_reg_t *reg;
+    lv_obj_t   *popup;
+    bool        has_unmap; /* first list item is "Unmap" */
+} cv_picker_state_t;
+static cv_picker_state_t g_cv_picker;
+
+static void fmt_cv(char *buf, size_t bufsz, const char *uri,
+                   pb_cv_source_t *srcs, int n_srcs)
+{
+    if (!uri || !uri[0]) { snprintf(buf, bufsz, " — "); return; }
+    for (int i = 0; i < n_srcs; i++) {
+        if (strcmp(srcs[i].uri, uri) == 0) {
+            /* Show last component of label (after " — ") */
+            const char *sep = strstr(srcs[i].label, " \xe2\x80\x94 ");
+            const char *short_label = sep ? sep + 4 /* skip " — " */ : srcs[i].label;
+            snprintf(buf, bufsz, "CV: %s", short_label);
+            return;
+        }
+    }
+    snprintf(buf, bufsz, "CV: ?");
+}
+
+static void cv_picker_item_cb(lv_event_t *e)
+{
+    lv_obj_t *list = lv_event_get_current_target(e);
+    lv_obj_t *btn  = lv_event_get_target(e);
+    if (btn == list) return; /* click on list itself */
+
+    cv_picker_state_t *ps = lv_event_get_user_data(e);
+    if (!ps || !ps->reg) return;
+
+    int32_t idx = lv_obj_get_index(btn);
+
+    ctrl_reg_t *reg = ps->reg;
+    const char *sym = reg->symbol;
+
+    if (idx < 0) goto close;
+    if (ps->has_unmap && idx == 0) {
+        /* Unmap */
+        reg->cv_source_uri[0] = '\0';
+        if (reg->cv_lbl) lv_label_set_text(reg->cv_lbl, " — ");
+        if (g_cv_cb)
+            g_cv_cb(g_instance, sym, "", "", 0.0f, 0.0f, '\0', g_cv_ud);
+    } else {
+        int src_idx = (int)idx - (ps->has_unmap ? 1 : 0);
+
+        if (src_idx < 0 || src_idx >= g_cv_source_count) goto close;
+        pb_cv_source_t *src = &g_cv_sources[src_idx];
+        snprintf(reg->cv_source_uri, sizeof(reg->cv_source_uri), "%s", src->uri);
+        char chip_buf[64];
+        fmt_cv(chip_buf, sizeof(chip_buf), src->uri, g_cv_sources, g_cv_source_count);
+        if (reg->cv_lbl) lv_label_set_text(reg->cv_lbl, chip_buf);
+        if (g_cv_cb)
+            g_cv_cb(g_instance, sym, src->uri, src->jack_port,
+                    src->cv_min, src->cv_max, src->op_mode, g_cv_ud);
+    }
+
+close:
+    if (ps->popup) { lv_obj_del(ps->popup); ps->popup = NULL; }
+}
+
+static void cv_picker_close_cb(lv_event_t *e)
+{
+    cv_picker_state_t *ps = lv_event_get_user_data(e);
+    if (ps && ps->popup) { lv_obj_del(ps->popup); ps->popup = NULL; }
+}
+
+static void show_cv_source_picker(ctrl_reg_t *reg)
+{
+    /* Close existing picker if open */
+    if (g_cv_picker.popup) { lv_obj_del(g_cv_picker.popup); g_cv_picker.popup = NULL; }
+
+    g_cv_picker.reg       = reg;
+    g_cv_picker.has_unmap = (reg->cv_source_uri[0] != '\0');
+
+    lv_obj_t *overlay = lv_obj_create(lv_layer_top());
+    lv_obj_set_size(overlay, LV_PCT(100), LV_PCT(100));
+    lv_obj_set_style_bg_color(overlay, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(overlay, LV_OPA_50, 0);
+    lv_obj_add_event_cb(overlay, cv_picker_close_cb, LV_EVENT_CLICKED, &g_cv_picker);
+    g_cv_picker.popup = overlay;
+
+    int n = g_cv_source_count + (g_cv_picker.has_unmap ? 1 : 0);
+    int h = 60 + n * 44 + 20;
+    if (h > 500) h = 500;
+
+    lv_obj_t *box = lv_obj_create(overlay);
+    lv_obj_set_size(box, 380, h);
+    lv_obj_center(box);
+    lv_obj_set_style_bg_color(box, lv_color_hex(0x1a2030), 0);
+    lv_obj_set_style_border_color(box, lv_color_hex(0x405060), 0);
+    lv_obj_set_style_border_width(box, 2, 0);
+    lv_obj_set_style_radius(box, 10, 0);
+    lv_obj_set_style_pad_all(box, 12, 0);
+    lv_obj_set_flex_flow(box, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(box, 8, 0);
+    lv_obj_clear_flag(box, LV_OBJ_FLAG_CLICKABLE); /* don't propagate clicks to overlay */
+
+    lv_obj_t *title = lv_label_create(box);
+    lv_label_set_text_fmt(title, "CV source — %s", reg->symbol);
+    lv_obj_set_style_text_color(title, lv_color_hex(0xc0d0e0), 0);
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_14, 0);
+
+    lv_obj_t *list = lv_obj_create(box);
+    lv_obj_set_size(list, LV_PCT(100), 0);
+    lv_obj_set_flex_grow(list, 1);
+    lv_obj_set_style_bg_opa(list, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(list, 0, 0);
+    lv_obj_set_style_pad_all(list, 0, 0);
+    lv_obj_set_flex_flow(list, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(list, 4, 0);
+    lv_obj_add_event_cb(list, cv_picker_item_cb, LV_EVENT_CLICKED, &g_cv_picker);
+
+    if (g_cv_picker.has_unmap) {
+        lv_obj_t *btn = lv_btn_create(list);
+        lv_obj_set_size(btn, LV_PCT(100), 40);
+        lv_obj_set_style_bg_color(btn, lv_color_hex(0x502020), 0);
+        lv_obj_t *lbl = lv_label_create(btn);
+        lv_label_set_text(lbl, LV_SYMBOL_CLOSE "  Retirer");
+        lv_obj_center(lbl);
+        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_14, 0);
+    }
+
+    for (int i = 0; i < g_cv_source_count; i++) {
+        pb_cv_source_t *src = &g_cv_sources[i];
+        lv_obj_t *btn = lv_btn_create(list);
+        lv_obj_set_size(btn, LV_PCT(100), 40);
+        bool is_current = (strcmp(src->uri, reg->cv_source_uri) == 0);
+        lv_obj_set_style_bg_color(btn,
+            is_current ? lv_color_hex(0x1a4040) : lv_color_hex(0x243040), 0);
+        lv_obj_t *lbl = lv_label_create(btn);
+        lv_label_set_text(lbl, src->label);
+        lv_obj_center(lbl);
+        lv_label_set_long_mode(lbl, LV_LABEL_LONG_DOT);
+        lv_obj_set_width(lbl, 340);
+        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(lbl, lv_color_hex(0xa0c0c0), 0);
+    }
+}
+
+/* ─── CV output port toggle ──────────────────────────────────────────────────── */
+
+typedef struct { char symbol[PB_SYMBOL_MAX]; } cv_out_toggle_ud_t;
+static cv_out_toggle_ud_t g_cv_out_toggle_uds[MAX_CONTROLS];
+static int                g_cv_out_toggle_ud_count = 0;
+
+static void cv_out_toggle_cb(lv_event_t *e)
+{
+    cv_out_toggle_ud_t *ud = lv_event_get_user_data(e);
+    if (!ud || g_instance < 0) return;
+    lv_obj_t *sw    = lv_event_get_target(e);
+    bool      on    = lv_obj_has_state(sw, LV_STATE_CHECKED);
+    ui_pedalboard_set_cv_out_enabled(g_instance, ud->symbol, on);
+}
+
+static void cv_chip_tap_cb(lv_event_t *e)
+{
+    cv_chip_ud_t *ud = lv_event_get_user_data(e);
+    if (!ud || !ud->reg) return;
+    if (g_cv_source_count == 0 && !ud->reg->cv_source_uri[0]) return;
+    show_cv_source_picker(ud->reg);
+}
+
+static lv_obj_t *make_cv_chip(lv_obj_t *parent, const char *cv_uri, int ud_idx)
+{
+    cv_chip_ud_t *ud = &g_cv_chip_uds[ud_idx];
+
+    lv_obj_t *chip = lv_btn_create(parent);
+    lv_obj_set_size(chip, LV_SIZE_CONTENT, 22);
+    lv_obj_set_style_radius(chip, 11, 0);
+    lv_obj_set_style_pad_hor(chip, 8, 0);
+    lv_obj_set_style_pad_ver(chip, 3, 0);
+    lv_obj_set_style_bg_color(chip, lv_color_hex(0x1e3a3a), 0);
+    lv_obj_set_style_border_color(chip, lv_color_hex(0x3a6060), 0);
+    lv_obj_set_style_border_width(chip, 1, 0);
+    lv_obj_add_event_cb(chip, cv_chip_tap_cb, LV_EVENT_CLICKED, ud);
+
+    char buf[64];
+    fmt_cv(buf, sizeof(buf), cv_uri, g_cv_sources, g_cv_source_count);
+    lv_obj_t *lbl = lv_label_create(chip);
+    lv_label_set_text(lbl, buf);
+    lv_obj_center(lbl);
+    lv_obj_set_style_text_color(lbl, lv_color_hex(0x60a0a0), 0);
+    lv_obj_set_style_text_font(lbl, &lv_font_montserrat_12, 0);
+
+    return lbl;
+}
+
 /* ─── Bypass toggle ──────────────────────────────────────────────────────────── */
 
 static void bypass_btn_cb(lv_event_t *e)
@@ -289,6 +791,13 @@ static void arc_changed_cb(lv_event_t *e)
     float ratio = arc_val / 100.0f;
     float value = reg->min + ratio * (reg->max - reg->min);
     if (reg->is_integer) value = (float)(int)(value + 0.5f);
+
+    /* Manual adjustment cancels tempo sync */
+    if (reg->is_tempo_related && reg->tempo_divider > 0.0f) {
+        reg->tempo_divider = 0.0f;
+        if (reg->port_ref) reg->port_ref->tempo_divider = 0.0f;
+        if (reg->tempo_lbl) lv_label_set_text(reg->tempo_lbl, "\xe2\x80\x94");
+    }
 
     char buf[32];
     if (reg->is_integer)
@@ -382,7 +891,128 @@ static void on_browse_btn(lv_event_t *e)
                          on_file_selected, reg);
 }
 
+/* ─── Delete with confirmation ───────────────────────────────────────────────── */
+
+static void remove_cancel_cb(lv_event_t *e)
+{
+    (void)e;
+    if (g_confirm_overlay) {
+        lv_obj_delete_async(g_confirm_overlay);
+        g_confirm_overlay = NULL;
+    }
+}
+
+static void remove_confirmed_cb(lv_event_t *e)
+{
+    (void)e;
+    bypass_toggle_cb_t cb = g_remove_cb;
+    void              *ud = g_remove_ud;
+
+    if (g_confirm_overlay) {
+        lv_obj_delete_async(g_confirm_overlay);
+        g_confirm_overlay = NULL;
+    }
+    /* Close param editor using async pattern (called from inside lv_layer_top child) */
+    if (g_modal) {
+        if (g_meter_timer) { lv_timer_pause(g_meter_timer); }
+        if (g_cv_picker.popup) { lv_obj_del(g_cv_picker.popup); g_cv_picker.popup = NULL; }
+        if (g_tempo_picker.popup) { lv_obj_del(g_tempo_picker.popup); g_tempo_picker.popup = NULL; }
+        lv_obj_delete_async(g_modal);
+        g_modal               = NULL;
+        g_instance            = -1;
+        atomic_store(&g_active_instance, -1);
+        g_ctrl_count          = 0;
+        g_patch_param_count   = 0;
+        g_midi_chip_ud_count  = 0;
+        g_cv_chip_ud_count       = 0;
+        g_cv_out_toggle_ud_count = 0;
+        g_tempo_chip_ud_count    = 0;
+        g_bypass_midi_lbl        = NULL;
+        g_learning_symbol[0]     = '\0';
+        g_cv_sources             = NULL;
+        g_cv_source_count        = 0;
+    }
+    if (cb) cb(ud);
+}
+
+static void delete_btn_cb(lv_event_t *e)
+{
+    (void)e;
+    if (!g_remove_cb) return;
+
+    g_confirm_overlay = lv_obj_create(lv_layer_top());
+    lv_obj_set_size(g_confirm_overlay, LV_PCT(100), LV_PCT(100));
+    lv_obj_set_style_bg_color(g_confirm_overlay, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(g_confirm_overlay, LV_OPA_50, 0);
+    lv_obj_set_style_border_width(g_confirm_overlay, 0, 0);
+    lv_obj_set_style_pad_all(g_confirm_overlay, 0, 0);
+    lv_obj_set_style_radius(g_confirm_overlay, 0, 0);
+    lv_obj_clear_flag(g_confirm_overlay, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *box = lv_obj_create(g_confirm_overlay);
+    lv_obj_set_size(box, 380, 140);
+    lv_obj_center(box);
+    lv_obj_set_style_bg_color(box, UI_COLOR_SURFACE, 0);
+    lv_obj_set_style_border_color(box, UI_COLOR_DANGER, 0);
+    lv_obj_set_style_border_width(box, 2, 0);
+    lv_obj_set_style_radius(box, 10, 0);
+    lv_obj_set_style_pad_all(box, 16, 0);
+    lv_obj_set_flex_flow(box, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(box, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_row(box, 16, 0);
+    lv_obj_clear_flag(box, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *msg = lv_label_create(box);
+    lv_label_set_text(msg, TR(TR_PLUG_REMOVE_CONFIRM));
+    lv_obj_set_style_text_color(msg, UI_COLOR_TEXT, 0);
+    lv_obj_set_style_text_font(msg, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_align(msg, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_width(msg, LV_PCT(100));
+
+    lv_obj_t *btn_row = lv_obj_create(box);
+    lv_obj_set_size(btn_row, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(btn_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(btn_row, LV_FLEX_ALIGN_SPACE_BETWEEN,
+                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_bg_opa(btn_row, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(btn_row, 0, 0);
+    lv_obj_set_style_pad_all(btn_row, 0, 0);
+    lv_obj_clear_flag(btn_row, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *btn_cancel = lv_btn_create(btn_row);
+    lv_obj_set_size(btn_cancel, 150, 44);
+    lv_obj_set_style_bg_color(btn_cancel, UI_COLOR_BYPASS, 0);
+    lv_obj_add_event_cb(btn_cancel, remove_cancel_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *lbl_cancel = lv_label_create(btn_cancel);
+    lv_label_set_text(lbl_cancel, TR(TR_CANCEL));
+    lv_obj_center(lbl_cancel);
+    lv_obj_set_style_text_font(lbl_cancel, &lv_font_montserrat_14, 0);
+
+    lv_obj_t *btn_confirm = lv_btn_create(btn_row);
+    lv_obj_set_size(btn_confirm, 150, 44);
+    lv_obj_set_style_bg_color(btn_confirm, UI_COLOR_DANGER, 0);
+    lv_obj_add_event_cb(btn_confirm, remove_confirmed_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *lbl_confirm = lv_label_create(btn_confirm);
+    lv_label_set_text(lbl_confirm, TR(TR_PLUG_REMOVE));
+    lv_obj_center(lbl_confirm);
+    lv_obj_set_style_text_font(lbl_confirm, &lv_font_montserrat_14, 0);
+}
+
 /* ─── Close ──────────────────────────────────────────────────────────────────── */
+
+void ui_param_editor_set_widget_prefs_cb(widget_prefs_cb_t cb, void *ud)
+{
+    g_widget_prefs_cb = cb;
+    g_widget_prefs_ud = ud;
+}
+
+static void gear_cb(lv_event_t *e)
+{
+    (void)e;
+    if (g_widget_prefs_cb && g_instance >= 0)
+        g_widget_prefs_cb(g_instance, g_plug_symbol, g_plug_uri, g_widget_prefs_ud);
+}
 
 static void close_cb(lv_event_t *e)
 {
@@ -391,16 +1021,29 @@ static void close_cb(lv_event_t *e)
      * synchronously from a child's event callback causes LVGL to access
      * freed memory while still dispatching the event. */
     if (g_modal) {
+        if (g_meter_timer) { lv_timer_pause(g_meter_timer); }
+        if (g_cv_picker.popup) { lv_obj_del(g_cv_picker.popup); g_cv_picker.popup = NULL; }
+        if (g_tempo_picker.popup) { lv_obj_del(g_tempo_picker.popup); g_tempo_picker.popup = NULL; }
         lv_obj_delete_async(g_modal);
-        g_modal              = NULL;
-        g_instance           = -1;
-        g_ctrl_count         = 0;
-        g_patch_param_count  = 0;
-        g_midi_chip_ud_count = 0;
-        g_bypass_midi_lbl    = NULL;
-        g_learning_symbol[0] = '\0';
+        g_modal               = NULL;
+        g_instance            = -1;
+        atomic_store(&g_active_instance, -1);
+        g_ctrl_count          = 0;
+        g_patch_param_count   = 0;
+        g_midi_chip_ud_count  = 0;
+        g_cv_chip_ud_count       = 0;
+        g_cv_out_toggle_ud_count = 0;
+        g_tempo_chip_ud_count    = 0;
+        g_bypass_midi_lbl        = NULL;
+        g_learning_symbol[0]     = '\0';
+        g_cv_sources             = NULL;
+        g_cv_source_count        = 0;
     }
 }
+
+/* ─── Card size constants ────────────────────────────────────────────────────── */
+#define CARD_W 150  /* reference knob/arc card width */
+#define CARD_H 195  /* all control cards use the same height as the arc card */
 
 /* ─── Card builder helpers ───────────────────────────────────────────────────── */
 
@@ -420,6 +1063,22 @@ static lv_obj_t *make_card(lv_obj_t *parent, int w, int h)
     return card;
 }
 
+/* Create a horizontal row for MIDI and CV chips at the bottom of a card. */
+static lv_obj_t *make_chips_row(lv_obj_t *parent)
+{
+    lv_obj_t *row = lv_obj_create(parent);
+    lv_obj_set_size(row, LV_PCT(100), 22);
+    lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(row, 0, 0);
+    lv_obj_set_style_pad_all(row, 0, 0);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(row, 6, 0);
+    lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+    return row;
+}
+
 static lv_obj_t *make_name_lbl(lv_obj_t *card, const char *name)
 {
     lv_obj_t *lbl = lv_label_create(card);
@@ -432,23 +1091,45 @@ static lv_obj_t *make_name_lbl(lv_obj_t *card, const char *name)
     return lbl;
 }
 
+/* ─── Meter refresh timer (runs on LVGL thread at ~10 Hz) ──────────────────── */
+
+static void meter_timer_cb(lv_timer_t *t)
+{
+    (void)t;
+    if (!g_modal || g_instance < 0) return;
+    for (int i = 0; i < g_ctrl_count; i++) {
+        ctrl_reg_t *reg = &g_controls[i];
+        if (reg->type != CTRL_METER || !reg->meter_bar) continue;
+        float cur = 0.0f;
+        if (ui_pedalboard_get_output(g_instance, reg->symbol, &cur))
+            ui_param_editor_update_output(reg->symbol, cur);
+    }
+}
+
 /* ─── Public API ─────────────────────────────────────────────────────────────── */
 
 void ui_param_editor_show(int instance_id,
                           const char *plugin_label,
                           const char *plugin_uri,
+                          const char *plugin_symbol,
                           pb_port_t *ports, int port_count,
                           pb_patch_t *patch_params, int patch_param_count,
                           bool enabled,
                           bypass_toggle_cb_t bypass_cb, void *bypass_ud,
                           param_change_cb_t value_cb, void *value_ud,
                           patch_change_cb_t patch_cb, void *patch_ud,
-                          midi_map_cb_t midi_cb, void *midi_ud)
+                          midi_map_cb_t midi_cb, void *midi_ud,
+                          pb_cv_source_t *cv_sources, int cv_source_count,
+                          cv_map_cb_t cv_cb, void *cv_ud,
+                          bypass_toggle_cb_t remove_cb, void *remove_ud)
 {
     if (g_modal) ui_param_editor_close();
 
     g_instance          = instance_id;
+    atomic_store(&g_active_instance, instance_id);
     g_enabled           = enabled;
+    snprintf(g_plug_symbol, sizeof(g_plug_symbol), "%s", plugin_symbol ? plugin_symbol : "");
+    snprintf(g_plug_uri,    sizeof(g_plug_uri),    "%s", plugin_uri    ? plugin_uri    : "");
     g_bypass_cb         = bypass_cb;
     g_bypass_ud         = bypass_ud;
     g_bypass_lbl        = NULL;
@@ -458,13 +1139,27 @@ void ui_param_editor_show(int instance_id,
     g_patch_ud          = patch_ud;
     g_midi_cb           = midi_cb;
     g_midi_ud           = midi_ud;
+    g_cv_cb             = cv_cb;
+    g_cv_ud             = cv_ud;
+    g_cv_sources        = cv_sources;
+    g_cv_source_count   = cv_source_count;
+    g_remove_cb         = remove_cb;
+    g_remove_ud         = remove_ud;
+    g_confirm_overlay   = NULL;
     g_ctrl_count        = 0;
     g_patch_param_count = 0;
     g_midi_chip_ud_count = 0;
+    g_cv_chip_ud_count  = 0;
     g_bypass_midi_lbl   = NULL;
     g_bypass_midi_ch    = -1;
     g_bypass_midi_cc    = -1;
     g_learning_symbol[0] = '\0';
+    g_cv_picker.popup        = NULL;
+    g_cv_picker.reg          = NULL;
+    g_cv_out_toggle_ud_count = 0;
+    g_tempo_chip_ud_count    = 0;
+    g_tempo_picker.popup     = NULL;
+    g_tempo_picker.reg       = NULL;
 
     /* Read bypass MIDI CC from the :bypass port if present */
     for (int i = 0; i < port_count; i++) {
@@ -519,6 +1214,17 @@ void ui_param_editor_show(int instance_id,
     lv_obj_set_style_text_color(title_lbl, UI_COLOR_TEXT, 0);
     lv_obj_set_style_text_font(title_lbl, &lv_font_montserrat_20, 0);
 
+    /* Gear button — only shown when a widget_prefs callback is registered */
+    if (g_widget_prefs_cb) {
+        lv_obj_t *btn_gear = lv_btn_create(title_row);
+        lv_obj_set_size(btn_gear, 36, 36);
+        lv_obj_set_style_bg_color(btn_gear, lv_color_hex(0x2A3050), 0);
+        lv_obj_t *lbl_gear = lv_label_create(btn_gear);
+        lv_label_set_text(lbl_gear, LV_SYMBOL_SETTINGS);
+        lv_obj_center(lbl_gear);
+        lv_obj_add_event_cb(btn_gear, gear_cb, LV_EVENT_CLICKED, NULL);
+    }
+
     lv_obj_t *btn_close = lv_btn_create(title_row);
     lv_obj_set_size(btn_close, 36, 36);
     lv_obj_set_style_bg_color(btn_close, UI_COLOR_BYPASS, 0);
@@ -541,13 +1247,39 @@ void ui_param_editor_show(int instance_id,
     lv_obj_set_style_pad_column(scroll, 12, 0);
     lv_obj_add_flag(scroll, LV_OBJ_FLAG_SCROLLABLE);
 
+    /* ── Footer: Delete button (only if remove callback provided) ── */
+    if (remove_cb) {
+        lv_obj_t *footer = lv_obj_create(panel);
+        lv_obj_set_size(footer, LV_PCT(100), 52);
+        lv_obj_set_flex_flow(footer, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(footer, LV_FLEX_ALIGN_END,
+                              LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+        lv_obj_set_style_bg_opa(footer, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_side(footer, LV_BORDER_SIDE_TOP, 0);
+        lv_obj_set_style_border_width(footer, 1, 0);
+        lv_obj_set_style_border_color(footer, UI_COLOR_BYPASS, 0);
+        lv_obj_set_style_pad_all(footer, 0, 0);
+        lv_obj_set_style_pad_top(footer, 8, 0);
+        lv_obj_clear_flag(footer, LV_OBJ_FLAG_SCROLLABLE);
+
+        lv_obj_t *btn_del = lv_btn_create(footer);
+        lv_obj_set_size(btn_del, 160, 36);
+        lv_obj_set_style_bg_color(btn_del, UI_COLOR_DANGER, 0);
+        lv_obj_set_style_radius(btn_del, 6, 0);
+        lv_obj_add_event_cb(btn_del, delete_btn_cb, LV_EVENT_CLICKED, NULL);
+        lv_obj_t *lbl_del = lv_label_create(btn_del);
+        lv_label_set_text(lbl_del, TR(TR_PLUG_REMOVE));
+        lv_obj_center(lbl_del);
+        lv_obj_set_style_text_font(lbl_del, &lv_font_montserrat_14, 0);
+    }
+
     /* ── Bypass toggle — always first ── */
     {
-        lv_obj_t *card = make_card(scroll, 140, 145);
+        lv_obj_t *card = make_card(scroll, CARD_W, CARD_H);
         make_name_lbl(card, TR(TR_PARAM_BYPASS_LABEL));
 
         lv_obj_t *btn = lv_btn_create(card);
-        lv_obj_set_size(btn, 110, 44);
+        lv_obj_set_size(btn, 120, 44);
         lv_obj_set_style_bg_color(btn, g_enabled ? UI_COLOR_ACTIVE : UI_COLOR_BYPASS, 0);
         g_bypass_lbl = lv_label_create(btn);
         lv_label_set_text(g_bypass_lbl, g_enabled ? TR(TR_PARAM_ENABLED) : TR(TR_PARAM_DISABLED));
@@ -556,10 +1288,11 @@ void ui_param_editor_show(int instance_id,
         lv_obj_add_event_cb(btn, bypass_btn_cb, LV_EVENT_CLICKED, NULL);
 
         /* MIDI chip for bypass */
+        lv_obj_t *chips_row = make_chips_row(card);
         int ud_idx = g_midi_chip_ud_count++;
         g_midi_chip_uds[ud_idx].reg       = NULL;
         g_midi_chip_uds[ud_idx].is_bypass = true;
-        g_bypass_midi_lbl = make_midi_chip(card, g_bypass_midi_ch,
+        g_bypass_midi_lbl = make_midi_chip(chips_row, g_bypass_midi_ch,
                                            g_bypass_midi_cc, ud_idx);
     }
 
@@ -586,6 +1319,17 @@ void ui_param_editor_show(int instance_id,
         snprintf(reg->symbol, sizeof(reg->symbol), "%s", port->symbol);
         reg->midi_channel = port->midi_channel;
         reg->midi_cc      = port->midi_cc;
+        snprintf(reg->cv_source_uri, sizeof(reg->cv_source_uri),
+                 "%s", port->cv_source_uri);
+        reg->port_ref = port;  /* direct pointer for tempo_divider updates */
+
+        /* Tempo sync fields */
+        if (pm_port && pm_port->is_tempo_related) {
+            reg->is_tempo_related = true;
+            snprintf(reg->unit_symbol, sizeof(reg->unit_symbol),
+                     "%s", pm_port->unit_symbol);
+            reg->tempo_divider = port->tempo_divider;
+        }
 
         /* Physical min/max from pm (TTL doesn't store them) */
         float p_min = pm_port ? pm_port->min : 0.0f;
@@ -599,7 +1343,7 @@ void ui_param_editor_show(int instance_id,
         if (is_toggle) {
             /* ── Toggle switch ── */
             reg->type = CTRL_TOGGLE;
-            lv_obj_t *card = make_card(scroll, 140, 135);
+            lv_obj_t *card = make_card(scroll, CARD_W, CARD_H);
             make_name_lbl(card, disp_name);
 
             lv_obj_t *sw = lv_switch_create(card);
@@ -610,13 +1354,20 @@ void ui_param_editor_show(int instance_id,
             lv_obj_add_event_cb(sw, toggle_changed_cb, LV_EVENT_VALUE_CHANGED, reg);
             reg->widget = sw;
 
-            /* MIDI chip */
+            /* MIDI + CV chips side by side */
+            lv_obj_t *chips_row = make_chips_row(card);
             int ud_idx = g_midi_chip_ud_count++;
             g_midi_chip_uds[ud_idx].reg       = reg;
             g_midi_chip_uds[ud_idx].is_bypass = false;
             reg->min = 0.0f; reg->max = 1.0f; /* toggles are 0/1 */
-            reg->midi_lbl = make_midi_chip(card, reg->midi_channel,
+            reg->midi_lbl = make_midi_chip(chips_row, reg->midi_channel,
                                            reg->midi_cc, ud_idx);
+            /* CV chip */
+            {
+                int ci = g_cv_chip_ud_count++;
+                g_cv_chip_uds[ci].reg = reg;
+                reg->cv_lbl = make_cv_chip(chips_row, reg->cv_source_uri, ci);
+            }
 
         } else if (is_enum) {
             /* ── Enum dropdown ── */
@@ -637,26 +1388,33 @@ void ui_param_editor_show(int instance_id,
                     cur_sel = k;
             }
 
-            lv_obj_t *card = make_card(scroll, 220, 135);
+            lv_obj_t *card = make_card(scroll, CARD_W * 2, CARD_H);
             make_name_lbl(card, disp_name);
 
             lv_obj_t *dd = lv_dropdown_create(card);
             lv_dropdown_set_options(dd, options);
             lv_dropdown_set_selected(dd, (uint16_t)cur_sel);
-            lv_obj_set_width(dd, 200);
+            lv_obj_set_width(dd, CARD_W * 2 - 16);
             lv_obj_set_style_text_font(dd, &lv_font_montserrat_12, 0);
             lv_obj_set_style_text_font(dd, &lv_font_montserrat_12,
                                        LV_PART_SELECTED);
             lv_obj_add_event_cb(dd, enum_changed_cb, LV_EVENT_VALUE_CHANGED, reg);
             reg->widget = dd;
 
-            /* MIDI chip */
+            /* MIDI + CV chips side by side */
+            lv_obj_t *chips_row = make_chips_row(card);
             {
                 int ud_idx = g_midi_chip_ud_count++;
                 g_midi_chip_uds[ud_idx].reg       = reg;
                 g_midi_chip_uds[ud_idx].is_bypass = false;
-                reg->midi_lbl = make_midi_chip(card, reg->midi_channel,
+                reg->midi_lbl = make_midi_chip(chips_row, reg->midi_channel,
                                                reg->midi_cc, ud_idx);
+            }
+            /* CV chip */
+            {
+                int ci = g_cv_chip_ud_count++;
+                g_cv_chip_uds[ci].reg = reg;
+                reg->cv_lbl = make_cv_chip(chips_row, reg->cv_source_uri, ci);
             }
 
         } else {
@@ -672,7 +1430,7 @@ void ui_param_editor_show(int instance_id,
             if (arc_val < 0)   arc_val = 0;
             if (arc_val > 100) arc_val = 100;
 
-            lv_obj_t *card = make_card(scroll, 140, 195);
+            lv_obj_t *card = make_card(scroll, CARD_W, CARD_H);
             make_name_lbl(card, disp_name);
 
             lv_obj_t *arc = lv_arc_create(card);
@@ -695,14 +1453,24 @@ void ui_param_editor_show(int instance_id,
             lv_obj_set_style_text_font(val_lbl, &lv_font_montserrat_12, 0);
             reg->val_lbl = val_lbl;
 
-            /* MIDI chip */
+            /* Chips row: MIDI + CV (+ tempo if applicable) */
+            lv_obj_t *chips_row = make_chips_row(card);
             {
                 int ud_idx = g_midi_chip_ud_count++;
                 g_midi_chip_uds[ud_idx].reg       = reg;
                 g_midi_chip_uds[ud_idx].is_bypass = false;
-                reg->midi_lbl = make_midi_chip(card, reg->midi_channel,
+                reg->midi_lbl = make_midi_chip(chips_row, reg->midi_channel,
                                                reg->midi_cc, ud_idx);
             }
+            /* CV chip */
+            {
+                int ci = g_cv_chip_ud_count++;
+                g_cv_chip_uds[ci].reg = reg;
+                reg->cv_lbl = make_cv_chip(chips_row, reg->cv_source_uri, ci);
+            }
+            /* Tempo sync chip */
+            if (reg->is_tempo_related)
+                reg->tempo_lbl = make_tempo_chip(chips_row, reg);
         }
     }
 
@@ -727,16 +1495,16 @@ void ui_param_editor_show(int instance_id,
                 }
             }
 
-            /* Wide card for file selector */
-            lv_obj_t *card = make_card(scroll, 400, 110);
+            /* Wide card for file selector: CARD_W * 3 wide, same height as all cards */
+            lv_obj_t *card = make_card(scroll, CARD_W * 3, CARD_H);
             lv_obj_set_flex_flow(card, LV_FLEX_FLOW_ROW);
             lv_obj_set_flex_align(card, LV_FLEX_ALIGN_START,
                                   LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
             lv_obj_set_style_pad_column(card, 10, 0);
 
-            /* Label column */
+            /* Label column: card_inner_w - pad_col - browse_btn_w = (CARD_W*3-16) - 10 - 130 = 294 */
             lv_obj_t *label_col = lv_obj_create(card);
-            lv_obj_set_size(label_col, 200, LV_PCT(100));
+            lv_obj_set_size(label_col, 294, LV_PCT(100));
             lv_obj_set_style_bg_opa(label_col, LV_OPA_TRANSP, 0);
             lv_obj_set_style_border_width(label_col, 0, 0);
             lv_obj_set_style_pad_all(label_col, 0, 0);
@@ -758,13 +1526,13 @@ void ui_param_editor_show(int instance_id,
             preg->path_lbl = lv_label_create(label_col);
             lv_label_set_text(preg->path_lbl, cur_name);
             lv_label_set_long_mode(preg->path_lbl, LV_LABEL_LONG_DOT);
-            lv_obj_set_width(preg->path_lbl, 190);
+            lv_obj_set_width(preg->path_lbl, 284);
             lv_obj_set_style_text_color(preg->path_lbl, UI_COLOR_TEXT, 0);
             lv_obj_set_style_text_font(preg->path_lbl, &lv_font_montserrat_12, 0);
 
             /* Browse button */
             lv_obj_t *browse_btn = lv_btn_create(card);
-            lv_obj_set_size(browse_btn, 120, 50);
+            lv_obj_set_size(browse_btn, 130, 60);
             lv_obj_set_style_bg_color(browse_btn, UI_COLOR_PRIMARY, 0);
             lv_obj_t *browse_lbl = lv_label_create(browse_btn);
             lv_label_set_text_fmt(browse_lbl, LV_SYMBOL_DIRECTORY "%s", TR(TR_PARAM_BROWSE));
@@ -773,19 +1541,181 @@ void ui_param_editor_show(int instance_id,
             lv_obj_add_event_cb(browse_btn, on_browse_btn, LV_EVENT_CLICKED, preg);
         }
     }
+
+    /* ── Output port meters (read-only, real-time feedback) ── */
+    if (pm_info) {
+        bool has_out = false;
+        for (int i = 0; i < pm_info->port_count; i++)
+            if (pm_info->ports[i].type == PM_PORT_CONTROL_OUT) { has_out = true; break; }
+
+        if (has_out) {
+            /* Separator line */
+            lv_obj_t *sep = lv_obj_create(scroll);
+            lv_obj_set_size(sep, LV_PCT(95), 1);
+            lv_obj_set_style_bg_color(sep, UI_COLOR_TEXT_DIM, 0);
+            lv_obj_set_style_bg_opa(sep, LV_OPA_COVER, 0);
+            lv_obj_set_style_border_width(sep, 0, 0);
+            lv_obj_set_style_pad_all(sep, 0, 0);
+
+            /* Section title */
+            lv_obj_t *sec_lbl = lv_label_create(scroll);
+            lv_label_set_text(sec_lbl, TR(TR_PARAM_OUTPUT_PORTS));
+            lv_obj_set_style_text_color(sec_lbl, UI_COLOR_TEXT_DIM, 0);
+            lv_obj_set_style_text_font(sec_lbl, &lv_font_montserrat_14, 0);
+
+            for (int i = 0; i < pm_info->port_count && g_ctrl_count < MAX_CONTROLS; i++) {
+                const pm_port_info_t *pm_port = &pm_info->ports[i];
+                if (pm_port->type != PM_PORT_CONTROL_OUT) continue;
+
+                ctrl_reg_t *reg = &g_controls[g_ctrl_count++];
+                memset(reg, 0, sizeof(*reg));
+                snprintf(reg->symbol, sizeof(reg->symbol), "%s", pm_port->symbol);
+                reg->type      = CTRL_METER;
+                reg->min       = pm_port->min;
+                reg->max       = pm_port->max;
+                reg->midi_channel = -1;
+                reg->midi_cc      = -1;
+                if (reg->max <= reg->min) reg->max = reg->min + 1.0f;
+
+                /* Row: [Name 110px] [bar flex] [value 64px] */
+                lv_obj_t *row = lv_obj_create(scroll);
+                lv_obj_set_size(row, LV_PCT(100), 38);
+                lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
+                lv_obj_set_style_border_width(row, 0, 0);
+                lv_obj_set_style_pad_ver(row, 4, 0);
+                lv_obj_set_style_pad_hor(row, 8, 0);
+                lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+                lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START,
+                                      LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+                lv_obj_set_style_pad_column(row, 8, 0);
+                lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+
+                /* Port name */
+                lv_obj_t *name_lbl = lv_label_create(row);
+                lv_label_set_text(name_lbl,
+                    pm_port->name[0] ? pm_port->name : pm_port->symbol);
+                lv_obj_set_style_text_color(name_lbl, UI_COLOR_TEXT, 0);
+                lv_obj_set_style_text_font(name_lbl, &lv_font_montserrat_14, 0);
+                lv_obj_set_width(name_lbl, 110);
+                lv_label_set_long_mode(name_lbl, LV_LABEL_LONG_DOT);
+
+                /* Level bar */
+                lv_obj_t *bar = lv_bar_create(row);
+                lv_obj_set_height(bar, 18);
+                lv_obj_set_flex_grow(bar, 1);
+                lv_bar_set_range(bar, 0, 1000);
+                lv_bar_set_value(bar, 0, LV_ANIM_OFF);
+                lv_obj_set_style_bg_color(bar, UI_COLOR_SURFACE, 0);
+                lv_obj_set_style_bg_color(bar, UI_COLOR_ACTIVE,
+                                          LV_PART_INDICATOR | LV_STATE_DEFAULT);
+                lv_obj_clear_flag(bar, LV_OBJ_FLAG_CLICKABLE);
+                reg->meter_bar = bar;
+
+                /* Numeric value */
+                lv_obj_t *val_lbl = lv_label_create(row);
+                lv_label_set_text(val_lbl, "—");
+                lv_obj_set_style_text_color(val_lbl, UI_COLOR_TEXT_DIM, 0);
+                lv_obj_set_style_text_font(val_lbl, &lv_font_montserrat_14, 0);
+                lv_obj_set_width(val_lbl, 64);
+                lv_obj_set_style_text_align(val_lbl, LV_TEXT_ALIGN_RIGHT, 0);
+                reg->val_lbl = val_lbl;
+
+                /* Seed with value already received (monitoring started at load) */
+                float cur = 0.0f;
+                if (ui_pedalboard_get_output(instance_id, pm_port->symbol, &cur))
+                    ui_param_editor_update_output(pm_port->symbol, cur);
+            }
+        }
+    }
+
+    /* ── CV output port toggles ── */
+    if (pm_info) {
+        bool has_cv_out = false;
+        for (int i = 0; i < pm_info->port_count; i++)
+            if (pm_info->ports[i].type == PM_PORT_CV_OUT) { has_cv_out = true; break; }
+
+        if (has_cv_out) {
+            /* Separator */
+            lv_obj_t *sep2 = lv_obj_create(scroll);
+            lv_obj_set_size(sep2, LV_PCT(95), 1);
+            lv_obj_set_style_bg_color(sep2, UI_COLOR_TEXT_DIM, 0);
+            lv_obj_set_style_bg_opa(sep2, LV_OPA_COVER, 0);
+            lv_obj_set_style_border_width(sep2, 0, 0);
+            lv_obj_set_style_pad_all(sep2, 0, 0);
+
+            lv_obj_t *cv_sec_lbl = lv_label_create(scroll);
+            lv_label_set_text(cv_sec_lbl, TR(TR_PARAM_CV_OUTPUTS));
+            lv_obj_set_style_text_color(cv_sec_lbl, lv_color_hex(0x60a0a0), 0);
+            lv_obj_set_style_text_font(cv_sec_lbl, &lv_font_montserrat_14, 0);
+
+            for (int i = 0; i < pm_info->port_count
+                            && g_cv_out_toggle_ud_count < MAX_CONTROLS; i++) {
+                const pm_port_info_t *pm_port = &pm_info->ports[i];
+                if (pm_port->type != PM_PORT_CV_OUT) continue;
+
+                cv_out_toggle_ud_t *ud = &g_cv_out_toggle_uds[g_cv_out_toggle_ud_count++];
+                snprintf(ud->symbol, sizeof(ud->symbol), "%s", pm_port->symbol);
+
+                bool cur_enabled = ui_pedalboard_is_cv_out_enabled(instance_id, pm_port->symbol);
+
+                /* Row: [toggle 52px] [name flex] */
+                lv_obj_t *row = lv_obj_create(scroll);
+                lv_obj_set_size(row, LV_PCT(100), 40);
+                lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
+                lv_obj_set_style_border_width(row, 0, 0);
+                lv_obj_set_style_pad_ver(row, 4, 0);
+                lv_obj_set_style_pad_hor(row, 8, 0);
+                lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+                lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START,
+                                      LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+                lv_obj_set_style_pad_column(row, 12, 0);
+                lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+
+                lv_obj_t *sw = lv_switch_create(row);
+                lv_obj_set_size(sw, 44, 24);
+                lv_obj_set_style_bg_color(sw, lv_color_hex(0x1a6060), LV_PART_INDICATOR);
+                if (cur_enabled) lv_obj_add_state(sw, LV_STATE_CHECKED);
+                lv_obj_add_event_cb(sw, cv_out_toggle_cb, LV_EVENT_VALUE_CHANGED, ud);
+
+                lv_obj_t *name_lbl = lv_label_create(row);
+                lv_label_set_text(name_lbl,
+                    pm_port->name[0] ? pm_port->name : pm_port->symbol);
+                lv_obj_set_style_text_color(name_lbl, lv_color_hex(0xa0c0c0), 0);
+                lv_obj_set_style_text_font(name_lbl, &lv_font_montserrat_14, 0);
+                lv_obj_set_flex_grow(name_lbl, 1);
+                lv_label_set_long_mode(name_lbl, LV_LABEL_LONG_DOT);
+            }
+        }
+    }
+
+    /* Start meter refresh timer (100 ms = 10 Hz) */
+    if (!g_meter_timer)
+        g_meter_timer = lv_timer_create(meter_timer_cb, 100, NULL);
+    else
+        lv_timer_resume(g_meter_timer);
 }
 
 void ui_param_editor_close(void)
 {
     if (g_modal) {
+        if (g_meter_timer) { lv_timer_pause(g_meter_timer); }
+        if (g_cv_picker.popup) { lv_obj_del(g_cv_picker.popup); g_cv_picker.popup = NULL; }
+        if (g_tempo_picker.popup) { lv_obj_del(g_tempo_picker.popup); g_tempo_picker.popup = NULL; }
+        if (g_confirm_overlay) { lv_obj_del(g_confirm_overlay); g_confirm_overlay = NULL; }
         lv_obj_del(g_modal);
-        g_modal              = NULL;
-        g_instance           = -1;
-        g_ctrl_count         = 0;
-        g_patch_param_count  = 0;
-        g_midi_chip_ud_count = 0;
-        g_bypass_midi_lbl    = NULL;
-        g_learning_symbol[0] = '\0';
+        g_modal               = NULL;
+        g_instance            = -1;
+        atomic_store(&g_active_instance, -1);
+        g_ctrl_count          = 0;
+        g_patch_param_count   = 0;
+        g_midi_chip_ud_count  = 0;
+        g_cv_chip_ud_count       = 0;
+        g_cv_out_toggle_ud_count = 0;
+        g_tempo_chip_ud_count    = 0;
+        g_bypass_midi_lbl        = NULL;
+        g_learning_symbol[0]     = '\0';
+        g_cv_sources             = NULL;
+        g_cv_source_count        = 0;
     }
 }
 
@@ -823,6 +1753,32 @@ void ui_param_editor_update(const char *symbol, float value)
                 fabsf(reg->enum_values[sel] - value))
                 sel = k;
         lv_dropdown_set_selected(reg->widget, (uint16_t)sel);
+    }
+}
+
+int ui_param_editor_instance(void)
+{
+    return atomic_load(&g_active_instance);
+}
+
+void ui_param_editor_update_output(const char *symbol, float value)
+{
+    ctrl_reg_t *reg = find_ctrl(symbol);
+    if (!reg || reg->type != CTRL_METER || !reg->meter_bar) return;
+
+    float range = reg->max - reg->min;
+    int bar_val = 0;
+    if (range > 0.0f)
+        bar_val = (int)(((value - reg->min) / range) * 1000.0f + 0.5f);
+    if (bar_val < 0)    bar_val = 0;
+    if (bar_val > 1000) bar_val = 1000;
+
+    lv_bar_set_value(reg->meter_bar, bar_val, LV_ANIM_OFF);
+
+    if (reg->val_lbl) {
+        char buf[32];
+        snprintf(buf, sizeof(buf), "%.3g", (double)value);
+        lv_label_set_text(reg->val_lbl, buf);
     }
 }
 

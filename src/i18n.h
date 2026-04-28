@@ -24,12 +24,21 @@ typedef enum {
     TR_BANKS,
     TR_NO_PEDALBOARD,
 
-    /* Save menu — button labels */
+    /* Files menu — top bar button label */
+    TR_MENU_FILES,
+
+    /* Files menu — action labels */
+    TR_MENU_NEW_PB,
     TR_MENU_SAVE_PB,
     TR_MENU_SAVE_PB_AS,
     TR_MENU_SAVE_SNAP,
     TR_MENU_DELETE_SNAP,
     TR_MENU_DELETE_PB,
+    TR_MENU_RENAME_PB,
+    TR_MENU_NEW_SNAP,
+    TR_MENU_REORDER_SNAPS,
+    TR_SNAP_REORDER_TITLE,
+    TR_CONFIRM_RENAME_PB,
 
     /* Confirm / message dialogs */
     TR_CONFIRM_SAVE_PB,           /* no %s */
@@ -54,6 +63,14 @@ typedef enum {
     TR_BANK_ALL,
     TR_BANK_NO_PB_FOUND,
     TR_BANK_NO_PB_IN_BANK,
+    TR_BANK_NEW_BANK,
+    TR_BANK_NEW_BANK_HINT,
+    TR_BANK_CONFIRM_DELETE_TITLE,
+    TR_BANK_CONFIRM_DELETE_MSG,
+    TR_BANK_ADD_PB,
+    TR_BANK_REMOVE_PB_TITLE,
+    TR_BANK_REMOVE_PB_MSG,
+    TR_BANK_VALIDATE,
 
     /* Plugin browser */
     TR_PLUGIN_BROWSER_TITLE,
@@ -70,10 +87,11 @@ typedef enum {
     TR_SNAP_DELETE_BTN,
     TR_SNAP_DELETE_TITLE,
 
-    /* Plugin block context menu */
+    /* Plugin block / param editor */
     TR_PLUG_BYPASS,
     TR_PLUG_ENABLE,
     TR_PLUG_REMOVE,
+    TR_PLUG_REMOVE_CONFIRM,
 
     /* Param editor */
     TR_PARAM_BYPASS_LABEL,
@@ -83,6 +101,8 @@ typedef enum {
     TR_PARAM_NONE,
     TR_PARAM_BROWSE,
     TR_PARAM_SELECT_MODEL,
+    TR_PARAM_OUTPUT_PORTS,
+    TR_PARAM_CV_OUTPUTS,
 
     /* File browser */
     TR_FILE_SELECT_TITLE,
@@ -96,6 +116,8 @@ typedef enum {
     TR_PB_SOURCE_OUTPUT,
     TR_PB_CONNECT,
     TR_PB_DISCONNECT,
+    TR_PB_DISC_TITLE,          /* "Disconnect from:" */
+    TR_PB_DISC_ALL,            /* "All" / "Tout" */
 
     /* Conductor */
     TR_CONDUCTOR_TITLE,
@@ -107,6 +129,32 @@ typedef enum {
     TR_CONDUCTOR_PLAY,
     TR_CONDUCTOR_STOP,
     TR_CONDUCTOR_TAP,
+    TR_CONDUCTOR_DENOM,
+
+    /* Scene view */
+    TR_SCENE_TITLE,
+    TR_SCENE_PEDALS,
+    TR_SCENE_SETLIST,
+    TR_SCENE_UNASSIGNED,
+    TR_SCENE_MIDI_LEARNING,
+    TR_SCENE_CANCEL_LEARN,
+    TR_SCENE_PICK_PLUGIN,
+    TR_SCENE_CONFIRM_PB,
+    TR_SCENE_BYPASSED,
+    TR_SCENE_ACTIVE,
+    TR_SCENE_NO_PB,
+    TR_SCENE_NO_SNAPS,
+    TR_SCENE_UNASSIGN,
+    TR_SCENE_LEARN_MIDI,
+    TR_SCENE_ALL_BANKS,
+    TR_SCENE_PARAMS,       /* "Paramètres…" context menu item */
+    TR_SCENE_PICK_PARAM,   /* param picker overlay title */
+    TR_SCENE_MAX_PARAMS,   /* toast: already 4 params selected */
+
+    /* Plugin block widget controls customization */
+    TR_BLOCK_WIDGET_PREFS,   /* gear button tooltip / picker title */
+    TR_BLOCK_PICK_CTRL,      /* picker subtitle */
+    TR_BLOCK_MAX_CTRL,       /* toast: already 8 controls selected */
 
     /* Pre-FX (Tuner + Noise Gate) */
     TR_PREFX_TITLE,
@@ -141,6 +189,7 @@ typedef enum {
     TR_SETTINGS_BIT_DEPTH_OPTS,
     TR_SETTINGS_APPLY_JACK,
     TR_SETTINGS_NO_MIDI,
+    TR_SETTINGS_MIDI_LOOPBACK,
     TR_SETTINGS_HOST_ADDR,
     TR_SETTINGS_HOST_PORT,
     TR_SETTINGS_PB_DIR,
@@ -173,6 +222,15 @@ typedef enum {
     TR_SETTINGS_WIFI_HOTSPOT_SSID,
     TR_SETTINGS_WIFI_HOTSPOT_PASSWORD,
     TR_SETTINGS_WIFI_HOTSPOT_PW_SAVED,
+
+    /* MOD-UI co-existence */
+    TR_SETTINGS_MODUI,
+    TR_SETTINGS_MODUI_ACTIVATE,
+    TR_SETTINGS_MODUI_DEACTIVATE,
+    TR_MODUI_ACTIVE_TITLE,
+    TR_MODUI_ACTIVE_BODY,
+    TR_MODUI_BTN_DISABLE,
+    TR_MODUI_SAVE_CONFIRM,  /* "Save pedalboard before switching to MOD-UI?" */
 
     /* Power */
     TR_SETTINGS_POWER,

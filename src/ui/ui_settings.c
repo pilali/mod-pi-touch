@@ -5,6 +5,7 @@
 #include "../settings.h"
 #include "../i18n.h"
 #include "../host_comm.h"
+#include "../pre_fx.h"
 #include "../hw_detect.h"
 #include "../wifi_manager.h"
 
@@ -37,6 +38,10 @@ static volatile bool       g_wifi_bg_done  = false; /* set by bg thread, cleared
 
 static wifi_network_t      g_wifi_nets[WIFI_MAX_NETWORKS];
 static int                 g_wifi_net_count = 0;
+
+/* Cached wifi status — written by background thread, read on LVGL thread */
+static char g_wifi_cached_ssid[WIFI_MAX_SSID_LEN] = "";
+static char g_wifi_cached_ip[32]                  = "";
 
 static lv_obj_t *g_wifi_ssid_lbl    = NULL;
 static lv_obj_t *g_wifi_ip_lbl      = NULL;
@@ -135,6 +140,38 @@ static lv_obj_t *add_dropdown_row(lv_obj_t *parent, const char *label,
 
 /* ─── Audio section ──────────────────────────────────────────────────────────── */
 
+/* Background thread: wait for JACK + mod-host to come back after a restart,
+ * then reconnect and reload the current pedalboard. */
+typedef struct {
+    char pb_path[512];
+    bool pb_loaded;
+} jack_restart_ctx_t;
+
+static void *jack_restart_thread(void *arg)
+{
+    jack_restart_ctx_t *ctx = arg;
+
+    /* JACK + mod-host need a few seconds to fully restart */
+    sleep(6);
+
+    if (host_comm_reconnect() != 0) {
+        fprintf(stderr, "[settings] JACK restart: mod-host reconnect timed out\n");
+        free(ctx);
+        return NULL;
+    }
+
+    pre_fx_init();
+
+    if (ctx->pb_loaded && ctx->pb_path[0]) {
+        ui_pedalboard_load(ctx->pb_path, NULL, NULL);
+    } else {
+        pre_fx_reload();
+    }
+
+    free(ctx);
+    return NULL;
+}
+
 static void apply_audio_cb(lv_event_t *e)
 {
     (void)e;
@@ -157,10 +194,24 @@ static void apply_audio_cb(lv_event_t *e)
     s->jack_bit_depth = (lv_dropdown_get_selected(g_dd_bits) == 0) ? 16 : 24;
 
     settings_save_prefs(s);
+
+    /* Capture current pedalboard path before tearing down */
+    jack_restart_ctx_t *ctx = calloc(1, sizeof(*ctx));
+    pedalboard_t *pb = ui_pedalboard_get();
+    if (pb && pb->path[0]) {
+        snprintf(ctx->pb_path, sizeof(ctx->pb_path), "%s", pb->path);
+        ctx->pb_loaded = true;
+    }
+
+    /* Cleanly close our JACK client before killing jackd */
+    pre_fx_fini();
+
     settings_apply_jack(s);
 
-    if (ui_pedalboard_is_loaded())
-        ui_pedalboard_refresh();
+    /* Reconnect in background — JACK + mod-host take several seconds to restart */
+    pthread_t tid;
+    pthread_create(&tid, NULL, jack_restart_thread, ctx);
+    pthread_detach(tid);
 
     ui_app_show_toast(TR(TR_SETTINGS_JACK_RESTARTING));
 }
@@ -227,6 +278,13 @@ static void build_audio_section(lv_obj_t *parent)
 
 /* ─── MIDI section ───────────────────────────────────────────────────────────── */
 
+static void midi_loopback_cb(lv_event_t *e)
+{
+    lv_obj_t *cb = lv_event_get_target(e);
+    bool enabled = lv_obj_has_state(cb, LV_STATE_CHECKED);
+    ui_pedalboard_set_midi_loopback(enabled);
+}
+
 static void midi_toggle_cb(lv_event_t *e)
 {
     midi_ctx_t *ctx = lv_event_get_user_data(e);
@@ -253,14 +311,21 @@ static void build_midi_section(lv_obj_t *parent)
         lv_obj_t *lbl = lv_label_create(parent);
         lv_label_set_text(lbl, TR(TR_SETTINGS_NO_MIDI));
         lv_obj_set_style_text_color(lbl, UI_COLOR_TEXT_DIM, 0);
-        return;
     }
 
-    /* Merge detected ports into settings */
+    /* Merge detected ports into settings (match by capture port or label) */
     for (int i = 0; i < n_hw; i++) {
         int found = -1;
-        for (int j = 0; j < s->midi_port_count; j++)
-            if (strcmp(s->midi_ports[j].dev, hw[i].dev) == 0) { found = j; break; }
+        /* Match by capture port name (primary key) */
+        if (hw[i].dev[0]) {
+            for (int j = 0; j < s->midi_port_count; j++)
+                if (strcmp(s->midi_ports[j].dev, hw[i].dev) == 0) { found = j; break; }
+        }
+        /* Fallback: match by playback port for output-only devices */
+        if (found < 0 && hw[i].dev_out[0]) {
+            for (int j = 0; j < s->midi_port_count; j++)
+                if (strcmp(s->midi_ports[j].dev_out, hw[i].dev_out) == 0) { found = j; break; }
+        }
         if (found < 0 && s->midi_port_count < MPT_MAX_MIDI_PORTS) {
             found = s->midi_port_count++;
             snprintf(s->midi_ports[found].dev, sizeof(s->midi_ports[0].dev),
@@ -268,8 +333,12 @@ static void build_midi_section(lv_obj_t *parent)
             s->midi_ports[found].enabled = false;
         }
         if (found >= 0) {
-            snprintf(s->midi_ports[found].label, sizeof(s->midi_ports[0].label),
+            snprintf(s->midi_ports[found].label,   sizeof(s->midi_ports[0].label),
                      "%s", hw[i].label);
+            snprintf(s->midi_ports[found].dev,     sizeof(s->midi_ports[0].dev),
+                     "%s", hw[i].dev);
+            snprintf(s->midi_ports[found].dev_out, sizeof(s->midi_ports[0].dev_out),
+                     "%s", hw[i].dev_out);
             s->midi_ports[found].is_input  = hw[i].is_input;
             s->midi_ports[found].is_output = hw[i].is_output;
         }
@@ -277,8 +346,14 @@ static void build_midi_section(lv_obj_t *parent)
 
     for (int i = 0; i < n_hw; i++) {
         int found = -1;
-        for (int j = 0; j < s->midi_port_count; j++)
-            if (strcmp(s->midi_ports[j].dev, hw[i].dev) == 0) { found = j; break; }
+        if (hw[i].dev[0]) {
+            for (int j = 0; j < s->midi_port_count; j++)
+                if (strcmp(s->midi_ports[j].dev, hw[i].dev) == 0) { found = j; break; }
+        }
+        if (found < 0 && hw[i].dev_out[0]) {
+            for (int j = 0; j < s->midi_port_count; j++)
+                if (strcmp(s->midi_ports[j].dev_out, hw[i].dev_out) == 0) { found = j; break; }
+        }
         if (found < 0) continue;
 
         g_midi_ctx[i].port_idx = found;
@@ -288,25 +363,34 @@ static void build_midi_section(lv_obj_t *parent)
                               LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
         lv_obj_t *cb = lv_checkbox_create(row);
-
-        char dir[8] = "";
-        if (s->midi_ports[found].is_input && s->midi_ports[found].is_output)
-            snprintf(dir, sizeof(dir), " [I/O]");
-        else if (s->midi_ports[found].is_input)
-            snprintf(dir, sizeof(dir), " [In]");
-        else if (s->midi_ports[found].is_output)
-            snprintf(dir, sizeof(dir), " [Out]");
-
-        char cb_text[128];
-        snprintf(cb_text, sizeof(cb_text), "%s%s",
-                 s->midi_ports[found].label, dir);
-        lv_checkbox_set_text(cb, cb_text);
+        lv_checkbox_set_text(cb, s->midi_ports[found].label);
 
         if (s->midi_ports[found].enabled)
             lv_obj_add_state(cb, LV_STATE_CHECKED);
 
         lv_obj_set_style_text_color(cb, UI_COLOR_TEXT, 0);
         lv_obj_add_event_cb(cb, midi_toggle_cb, LV_EVENT_VALUE_CHANGED, &g_midi_ctx[i]);
+    }
+
+    /* Virtual MIDI Loopback toggle (ALSA Midi-Through → pedalboard MIDI input) */
+    {
+        lv_obj_t *row = make_row(parent);
+        lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START,
+                              LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+        lv_obj_t *cb = lv_checkbox_create(row);
+        lv_checkbox_set_text(cb, TR(TR_SETTINGS_MIDI_LOOPBACK));
+        lv_obj_set_style_text_color(cb, UI_COLOR_TEXT, 0);
+
+        /* Reflect current pedalboard state */
+        if (ui_pedalboard_is_loaded()) {
+            pedalboard_t *pb = ui_pedalboard_get();
+            if (pb->midi_loopback)
+                lv_obj_add_state(cb, LV_STATE_CHECKED);
+        } else {
+            lv_obj_add_state(cb, LV_STATE_DISABLED);
+        }
+
+        lv_obj_add_event_cb(cb, midi_loopback_cb, LV_EVENT_VALUE_CHANGED, NULL);
     }
 }
 
@@ -346,6 +430,8 @@ static void wifi_update_pw_visibility(void)
         lv_obj_add_flag(g_wifi_pw_row, LV_OBJ_FLAG_HIDDEN);
 }
 
+static void wifi_status_async(void *ud); /* forward declaration */
+
 /* Poll timer — checks whether the background WiFi operation has completed. */
 static void wifi_poll_cb(lv_timer_t *tmr)
 {
@@ -370,14 +456,8 @@ static void wifi_poll_cb(lv_timer_t *tmr)
 
     case WIFI_OP_CONNECT:
         if (g_wifi_result == 0) {
-            char ssid[WIFI_MAX_SSID_LEN] = "";
-            char ip[32] = "";
-            wifi_get_status(ssid, sizeof(ssid), ip, sizeof(ip));
-            if (g_wifi_ssid_lbl)
-                lv_label_set_text(g_wifi_ssid_lbl,
-                                  ssid[0] ? ssid : TR(TR_SETTINGS_WIFI_NO_CONNECTION));
-            if (g_wifi_ip_lbl)
-                lv_label_set_text(g_wifi_ip_lbl, ip[0] ? ip : "--");
+            /* Cache already filled by wifi_connect_thread — just update labels */
+            wifi_status_async(NULL);
             ui_app_show_toast(TR(TR_SETTINGS_WIFI_CONNECTED_OK));
         } else {
             ui_app_show_toast(TR(TR_SETTINGS_WIFI_CONNECT_FAIL));
@@ -400,6 +480,28 @@ static void wifi_poll_cb(lv_timer_t *tmr)
     default:
         break;
     }
+}
+
+/* Called on LVGL thread via lv_async_call — updates wifi status labels from cache. */
+static void wifi_status_async(void *ud)
+{
+    (void)ud;
+    if (g_wifi_ssid_lbl)
+        lv_label_set_text(g_wifi_ssid_lbl,
+                          g_wifi_cached_ssid[0] ? g_wifi_cached_ssid
+                                                : TR(TR_SETTINGS_WIFI_NO_CONNECTION));
+    if (g_wifi_ip_lbl)
+        lv_label_set_text(g_wifi_ip_lbl, g_wifi_cached_ip[0] ? g_wifi_cached_ip : "--");
+}
+
+/* Background thread: fetch wifi status without blocking the LVGL thread. */
+static void *wifi_status_fetch_thread(void *arg)
+{
+    (void)arg;
+    wifi_get_status(g_wifi_cached_ssid, sizeof(g_wifi_cached_ssid),
+                    g_wifi_cached_ip,   sizeof(g_wifi_cached_ip));
+    lv_async_call(wifi_status_async, NULL);
+    return NULL;
 }
 
 static void *wifi_scan_thread(void *arg)
@@ -442,6 +544,9 @@ static void *wifi_connect_thread(void *arg)
     const char *pw = g_wifi_connect_args.password[0]
                      ? g_wifi_connect_args.password : NULL;
     g_wifi_result  = wifi_connect(g_wifi_connect_args.ssid, pw);
+    if (g_wifi_result == 0)
+        wifi_get_status(g_wifi_cached_ssid, sizeof(g_wifi_cached_ssid),
+                        g_wifi_cached_ip,   sizeof(g_wifi_cached_ip));
     g_wifi_bg_done = true;
     return NULL;
 }
@@ -514,6 +619,7 @@ static void wifi_pw_ta_focused_cb(lv_event_t *e)
         g_wifi_kbd = lv_keyboard_create(lv_scr_act());
         lv_obj_set_size(g_wifi_kbd, LV_PCT(100), LV_PCT(45));
         lv_obj_align(g_wifi_kbd, LV_ALIGN_BOTTOM_MID, 0, 0);
+        ui_app_keyboard_apply_lang(g_wifi_kbd);
     }
     lv_keyboard_set_textarea(g_wifi_kbd, ta);
     lv_obj_clear_flag(g_wifi_kbd, LV_OBJ_FLAG_HIDDEN);
@@ -560,7 +666,7 @@ static void show_confirm(const char *msg,
     ctx->user_data  = user_data;
 
     /* Semi-transparent full-screen overlay */
-    lv_obj_t *overlay = lv_obj_create(lv_scr_act());
+    lv_obj_t *overlay = lv_obj_create(lv_layer_top());
     lv_obj_set_size(overlay, LV_PCT(100), LV_PCT(100));
     lv_obj_set_pos(overlay, 0, 0);
     lv_obj_set_style_bg_color(overlay, lv_color_black(), 0);
@@ -648,6 +754,108 @@ static void reboot_btn_cb(lv_event_t *e)
     show_confirm(TR(TR_SETTINGS_CONFIRM_REBOOT), do_reboot, NULL);
 }
 
+/* ─── MOD-UI section ─────────────────────────────────────────────────────────── */
+
+/* Write mod-ui's last.json so the current pedalboard is auto-loaded on startup.
+ * Format: {"bank":-2,"pedalboard":"<path>","supportsDividers":true}
+ * Path: dirname(banks_file)/last.json  — banks_file defaults to ~/data/banks.json
+ * which is the same data directory that mod-ui uses for last.json. */
+static void write_modui_last_json(const char *pb_path)
+{
+    if (!pb_path || !pb_path[0]) return;
+    mpt_settings_t *s = settings_get();
+    /* dirname(banks_file): "~/data/banks.json" → "~/data" */
+    char data_dir[512];
+    snprintf(data_dir, sizeof(data_dir), "%s", s->banks_file);
+    char *slash = strrchr(data_dir, '/');
+    if (slash) *slash = '\0';
+
+    char last_path[512];
+    snprintf(last_path, sizeof(last_path), "%s/last.json", data_dir);
+
+    FILE *f = fopen(last_path, "w");
+    if (!f) { fprintf(stderr, "[modui] cannot write %s: %m\n", last_path); return; }
+    fprintf(f, "{\"bank\":-2,\"pedalboard\":\"%s\",\"supportsDividers\":true}\n", pb_path);
+    fclose(f);
+    fprintf(stderr, "[modui] wrote %s → %s\n", last_path, pb_path);
+}
+
+static void spawn_detached(void *(*fn)(void *))
+{
+    pthread_t tid;
+    pthread_create(&tid, NULL, fn, NULL);
+    pthread_detach(tid);
+}
+
+/* ─── MOD-UI activation (settings → button) ─────────────────────────────────── */
+
+/* Step 3 — runs on LVGL thread via lv_async_call: switch to pedalboard
+ * screen which will show the placeholder (mod_ui_active is already true). */
+static void modui_activate_async(void *ud)
+{
+    (void)ud;
+    ui_app_show_screen(UI_SCREEN_PEDALBOARD);
+}
+
+/* Step 2 — background thread: slow operations that must NOT block LVGL. */
+static void *modui_activate_thread(void *arg)
+{
+    (void)arg;
+    fprintf(stderr, "[modui] starting mod-ui service...\n");
+    system("sudo systemctl start mod-ui");
+
+    host_comm_disconnect();
+
+    mpt_settings_t *s = settings_get();
+    s->mod_ui_active = true;
+    settings_save_prefs(s);
+
+    /* Fetch WiFi IP in background — avoids blocking popen() on LVGL thread. */
+    char ip[64] = "", ssid[64] = "";
+    wifi_get_status(ssid, sizeof(ssid), ip, sizeof(ip));
+    ui_pedalboard_set_modui_ip(ip);
+    fprintf(stderr, "[modui] mod-ui active, ip=%s\n", ip);
+
+    lv_async_call(modui_activate_async, NULL);
+    return NULL;
+}
+
+/* Step 1 — confirm callback (LVGL thread): save pedalboard then spawn thread. */
+static void modui_activate_confirm_cb(lv_event_t *e)
+{
+    (void)e;
+    pedalboard_t *pb = ui_pedalboard_get();
+    if (pb && pb->path[0]) {
+        ui_pedalboard_save();
+        write_modui_last_json(pb->path);
+    }
+    spawn_detached(modui_activate_thread);
+}
+
+static void modui_activate_btn_cb(lv_event_t *e)
+{
+    (void)e;
+    show_confirm(TR(TR_MODUI_SAVE_CONFIRM), modui_activate_confirm_cb, NULL);
+}
+
+static void build_modui_section(lv_obj_t *parent)
+{
+    lv_obj_t *row = make_row(parent);
+
+    lv_obj_t *lbl = lv_label_create(row);
+    lv_label_set_text(lbl, TR(TR_SETTINGS_MODUI));
+    lv_obj_set_style_text_color(lbl, UI_COLOR_TEXT, 0);
+    lv_obj_set_flex_grow(lbl, 1);
+
+    lv_obj_t *btn = lv_btn_create(row);
+    lv_obj_set_size(btn, 200, 40);
+    lv_obj_set_style_bg_color(btn, UI_COLOR_ACCENT, 0);
+    lv_obj_add_event_cb(btn, modui_activate_btn_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *btn_lbl = lv_label_create(btn);
+    lv_label_set_text(btn_lbl, TR(TR_SETTINGS_MODUI_ACTIVATE));
+    lv_obj_center(btn_lbl);
+}
+
 static void build_power_section(lv_obj_t *parent)
 {
     lv_obj_t *row = make_row(parent);
@@ -685,19 +893,22 @@ static void wifi_hotspot_pw_save_cb(lv_event_t *e)
 static void build_wifi_section(lv_obj_t *parent)
 {
     /* ── Current network status ── */
-    char ssid[WIFI_MAX_SSID_LEN] = "";
-    char ip[32] = "";
-    wifi_get_status(ssid, sizeof(ssid), ip, sizeof(ip));
-
-    /* SSID row */
+    /* Show cached values immediately; background thread fetches fresh status
+     * via wifi_status_fetch_thread to avoid blocking the LVGL thread. */
     g_wifi_ssid_lbl = add_info_row(parent,
                                    TR(TR_SETTINGS_WIFI_CURRENT),
-                                   ssid[0] ? ssid : TR(TR_SETTINGS_WIFI_NO_CONNECTION));
+                                   g_wifi_cached_ssid[0] ? g_wifi_cached_ssid
+                                                         : TR(TR_SETTINGS_WIFI_NO_CONNECTION));
 
     /* IP row */
     g_wifi_ip_lbl = add_info_row(parent,
                                  TR(TR_SETTINGS_WIFI_IP),
-                                 ip[0] ? ip : "--");
+                                 g_wifi_cached_ip[0] ? g_wifi_cached_ip : "--");
+
+    /* Spawn background fetch — updates labels via lv_async_call when done */
+    pthread_t tid;
+    pthread_create(&tid, NULL, wifi_status_fetch_thread, NULL);
+    pthread_detach(tid);
 
     /* ── Scan button ── */
     lv_obj_t *scan_row = make_row(parent);
@@ -849,14 +1060,6 @@ void ui_settings_show(lv_obj_t *parent)
     lv_obj_set_style_pad_column(hdr, 8, 0);
     lv_obj_clear_flag(hdr, LV_OBJ_FLAG_SCROLLABLE);
 
-    lv_obj_t *btn_back = lv_btn_create(hdr);
-    lv_obj_set_size(btn_back, 80, 36);
-    lv_obj_set_style_bg_color(btn_back, UI_COLOR_PRIMARY, 0);
-    lv_obj_t *lbl_back = lv_label_create(btn_back);
-    lv_label_set_text_fmt(lbl_back, LV_SYMBOL_LEFT " %s", TR(TR_BACK));
-    lv_obj_center(lbl_back);
-    lv_obj_add_event_cb(btn_back, back_cb, LV_EVENT_CLICKED, NULL);
-
     lv_obj_t *hdr_lbl = lv_label_create(hdr);
     lv_label_set_text(hdr_lbl, TR(TR_SETTINGS_TITLE));
     lv_obj_set_style_text_color(hdr_lbl, UI_COLOR_TEXT, 0);
@@ -914,7 +1117,36 @@ void ui_settings_show(lv_obj_t *parent)
     add_section_header(parent, TR(TR_SETTINGS_WIFI));
     build_wifi_section(parent);
 
+    /* ── MOD-UI ── */
+    add_section_header(parent, TR(TR_SETTINGS_MODUI));
+    build_modui_section(parent);
+
     /* ── Power ── */
     add_section_header(parent, TR(TR_SETTINGS_POWER));
     build_power_section(parent);
+}
+
+void ui_settings_before_hide(void)
+{
+    /* Cancel the wifi poll timer before lv_obj_clean() destroys the widgets it
+     * references, so its callback never runs on freed objects. */
+    if (g_wifi_poll_tmr) { lv_timer_del(g_wifi_poll_tmr); g_wifi_poll_tmr = NULL; }
+
+    /* NULL all widget pointers. wifi_status_fetch_thread may still be running
+     * and will call lv_async_call(wifi_status_async) after this returns — the
+     * NULL guards in wifi_status_async prevent any write to freed LVGL objects. */
+    g_wifi_ssid_lbl     = NULL;
+    g_wifi_ip_lbl       = NULL;
+    g_wifi_scan_btn     = NULL;
+    g_wifi_dd_net       = NULL;
+    g_wifi_pw_ta        = NULL;
+    g_wifi_pw_row       = NULL;
+    g_wifi_connect_btn  = NULL;
+    g_wifi_hotspot_sw   = NULL;
+    g_wifi_hotspot_pw   = NULL;
+    if (g_wifi_kbd) { lv_obj_del(g_wifi_kbd); g_wifi_kbd = NULL; }
+
+    g_dd_device         = NULL;
+    g_dd_buffer         = NULL;
+    g_dd_bits           = NULL;
 }

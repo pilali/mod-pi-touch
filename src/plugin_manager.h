@@ -7,7 +7,21 @@
 #define PM_NAME_MAX   256
 #define PM_CAT_MAX    128
 #define PM_PORT_MAX   64
-#define PM_PATCH_MAX  8   /* max patch:writable parameters per plugin */
+#define PM_PATCH_MAX      8   /* max patch:writable parameters per plugin */
+#define PM_MODGUI_PORT_MAX 16 /* max modgui:port entries per plugin */
+
+/* ─── modgui curated port entry ──────────────────────────────────────────────── */
+typedef enum {
+    PM_WIDGET_KNOB = 0, /* modgui:Knob — rotary control */
+    PM_WIDGET_SWITCH,   /* modgui:Switch / modgui:Bypass / modgui:MomentaryButton */
+    PM_WIDGET_SELECT,   /* modgui:SelectBox / modgui:CustomSelect */
+    PM_WIDGET_OTHER,    /* any other type — render like knob */
+} pm_modgui_widget_t;
+
+typedef struct {
+    char               symbol[PM_NAME_MAX];
+    pm_modgui_widget_t widget;
+} pm_modgui_port_t;
 
 /* ─── Port descriptor (for display purposes) ─────────────────────────────────── */
 typedef enum {
@@ -35,7 +49,11 @@ typedef struct {
     char           enum_labels[16][PM_NAME_MAX];
     float          enum_values[16];
     int            enum_count;
+    /* tempo sync (mod:tempoRelatedDynamicScalePoints) */
+    bool           is_tempo_related;
+    char           unit_symbol[8]; /* "s", "ms", "min", "Hz", "kHz", "MHz", "BPM" or "" */
 } pm_port_info_t;
+
 
 /* ─── Patch parameter (patch:writable with atom:Path range) ──────────────────── */
 typedef struct {
@@ -52,6 +70,8 @@ typedef struct {
     char author[PM_NAME_MAX];
     char category[PM_CAT_MAX];
     char subcategory[PM_CAT_MAX];
+    bool is_cv_plugin;    /* declared as mod:ControlVoltagePlugin */
+    bool is_midi_plugin;  /* declared as mod:MIDIPlugin */
 
     pm_port_info_t ports[PM_PORT_MAX];
     int            port_count;
@@ -61,11 +81,17 @@ typedef struct {
     int midi_in_count;
     int midi_out_count;
     int ctrl_in_count;
+    int cv_in_count;
+    int cv_out_count;
 
     pm_patch_param_t patch_params[PM_PATCH_MAX];
     int              patch_param_count;
 
     char thumbnail_path[PM_URI_MAX]; /* absolute fs path to modgui thumbnail PNG, or "" */
+
+    /* modgui curated control list (empty = no modgui.ttl, fall back to all ctrl ports) */
+    pm_modgui_port_t modgui_ports[PM_MODGUI_PORT_MAX];
+    int              modgui_port_count;
 } pm_plugin_info_t;
 
 /* ─── API ─────────────────────────────────────────────────────────────────────── */
