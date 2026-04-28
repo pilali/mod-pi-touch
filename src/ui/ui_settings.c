@@ -666,7 +666,7 @@ static void show_confirm(const char *msg,
     ctx->user_data  = user_data;
 
     /* Semi-transparent full-screen overlay */
-    lv_obj_t *overlay = lv_obj_create(lv_scr_act());
+    lv_obj_t *overlay = lv_obj_create(lv_layer_top());
     lv_obj_set_size(overlay, LV_PCT(100), LV_PCT(100));
     lv_obj_set_pos(overlay, 0, 0);
     lv_obj_set_style_bg_color(overlay, lv_color_black(), 0);
@@ -1124,4 +1124,29 @@ void ui_settings_show(lv_obj_t *parent)
     /* ── Power ── */
     add_section_header(parent, TR(TR_SETTINGS_POWER));
     build_power_section(parent);
+}
+
+void ui_settings_before_hide(void)
+{
+    /* Cancel the wifi poll timer before lv_obj_clean() destroys the widgets it
+     * references, so its callback never runs on freed objects. */
+    if (g_wifi_poll_tmr) { lv_timer_del(g_wifi_poll_tmr); g_wifi_poll_tmr = NULL; }
+
+    /* NULL all widget pointers. wifi_status_fetch_thread may still be running
+     * and will call lv_async_call(wifi_status_async) after this returns — the
+     * NULL guards in wifi_status_async prevent any write to freed LVGL objects. */
+    g_wifi_ssid_lbl     = NULL;
+    g_wifi_ip_lbl       = NULL;
+    g_wifi_scan_btn     = NULL;
+    g_wifi_dd_net       = NULL;
+    g_wifi_pw_ta        = NULL;
+    g_wifi_pw_row       = NULL;
+    g_wifi_connect_btn  = NULL;
+    g_wifi_hotspot_sw   = NULL;
+    g_wifi_hotspot_pw   = NULL;
+    if (g_wifi_kbd) { lv_obj_del(g_wifi_kbd); g_wifi_kbd = NULL; }
+
+    g_dd_device         = NULL;
+    g_dd_buffer         = NULL;
+    g_dd_bits           = NULL;
 }

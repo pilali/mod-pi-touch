@@ -10,6 +10,22 @@
 #include <stdint.h>
 #include <math.h>
 
+/* ── Block gradient helper ───────────────────────────────────────────────────── */
+/* Apply a vertical gradient with a ~10° rightward tilt to the block background.
+ * The gradient runs from a slightly lighter top to a slightly darker bottom,
+ * giving depth without overwhelming the accent colour. */
+static void apply_block_bg(lv_obj_t *block, lv_color_t bg)
+{
+    /* Vertical gradient: slightly lighter at top, slightly darker at bottom.
+     * Colors stored as values by LVGL (no pointer lifetime issue). */
+    lv_obj_set_style_bg_color(block,
+        lv_color_mix(lv_color_white(), bg, 28), 0);   /* ~11% lighter */
+    lv_obj_set_style_bg_grad_color(block,
+        lv_color_mix(lv_color_black(), bg, 28), 0);   /* ~11% darker  */
+    lv_obj_set_style_bg_grad_dir(block, LV_GRAD_DIR_VER, 0);
+    lv_obj_set_style_bg_opa(block, LV_OPA_COVER, 0);
+}
+
 /* ── Block size constants ────────────────────────────────────────────────────── */
 
 /* Single-width = LAYOUT_BLOCK_W (160), double-width spans 2 grid slots (400) */
@@ -31,7 +47,7 @@
 
 /* ── Category → accent colour ───────────────────────────────────────────────── */
 
-static lv_color_t category_accent_color(const char *cat)
+lv_color_t ui_plugin_block_category_color(const char *cat)
 {
     if (!cat || !cat[0]) return UI_COLOR_PRIMARY;
     if (!strcmp(cat,"Distortion") || !strcmp(cat,"Waveshaper") || !strcmp(cat,"Simulator"))
@@ -363,7 +379,7 @@ lv_obj_t *ui_plugin_block_create(lv_obj_t *parent, pb_plugin_t *plug,
                                   void *userdata)
 {
     const pm_plugin_info_t *pi_info = pm_plugin_by_uri(plug->uri);
-    lv_color_t accent = category_accent_color(pi_info ? pi_info->category : "");
+    lv_color_t accent = ui_plugin_block_category_color(pi_info ? pi_info->category : "");
 
     /* Block dimensions */
     int n_displayed = pi_info
@@ -404,12 +420,11 @@ lv_obj_t *ui_plugin_block_create(lv_obj_t *parent, pb_plugin_t *plug,
     lv_obj_set_size(block, block_w, block_h);
     lv_obj_set_user_data(block, ctx);
 
-    /* Category-tinted background */
+    /* Category-tinted background with angled gradient */
     lv_color_t bg = plug->enabled
         ? lv_color_mix(accent, lv_color_hex(0x0D0D1E), 55)
         : lv_color_hex(0x252535);
-    lv_obj_set_style_bg_color(block, bg, 0);
-    lv_obj_set_style_bg_opa(block, LV_OPA_COVER, 0);
+    apply_block_bg(block, bg);
 
     lv_obj_set_style_border_side(block, LV_BORDER_SIDE_LEFT, 0);
     lv_obj_set_style_border_width(block, 3, 0);
@@ -528,7 +543,7 @@ void ui_plugin_block_set_bypassed(lv_obj_t *block, bool bypassed)
     lv_color_t bg = bypassed
         ? lv_color_hex(0x252535)
         : lv_color_mix(accent, lv_color_hex(0x0D0D1E), 55);
-    lv_obj_set_style_bg_color(block, bg, 0);
+    apply_block_bg(block, bg);
     lv_obj_set_style_border_color(block, bypassed ? UI_COLOR_BYPASS : accent, 0);
     lv_obj_set_style_shadow_width(block, bypassed ? 0 : 18, 0);
     lv_obj_set_style_shadow_color(block, accent, 0);

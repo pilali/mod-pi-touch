@@ -1221,6 +1221,7 @@ void ui_app_show_screen(ui_screen_t screen)
     ui_conductor_close();
     ui_pre_fx_close();
     ui_scene_close();
+    ui_settings_before_hide();
     /* Free reorder C allocations before lv_obj_clean deletes the LVGL objects.
      * LV_EVENT_DELETE on g_reorder->overlay will free g_reorder itself. */
     if (g_reorder) reorder_free_allocations(g_reorder);
@@ -1229,6 +1230,7 @@ void ui_app_show_screen(ui_screen_t screen)
     lv_obj_clean(lv_layer_top());
 
     lv_obj_clean(g_content_area);
+    lv_obj_scroll_to(g_content_area, 0, 0, LV_ANIM_OFF);
 
     g_current_screen = screen;
     switch (screen) {

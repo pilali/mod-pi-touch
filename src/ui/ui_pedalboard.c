@@ -1726,16 +1726,19 @@ static int uri_to_plugin_idx(const char *uri, const pedalboard_t *pb)
     return -1;
 }
 
-/* Classify a plugin into its band using the LV2 type declarations:
- *   mod:ControlVoltagePlugin → CV band
- *   mod:MIDIPlugin           → MIDI band
- *   everything else          → Audio band */
+/* Classify a plugin into its band.
+ * Primary: explicit LV2 type declarations (mod:ControlVoltagePlugin / mod:MIDIPlugin).
+ * Fallback: port counts — a plugin with MIDI ports but no audio ports belongs in the
+ * MIDI band even if it lacks the mod:MIDIPlugin declaration. */
 static plug_band_t classify_plugin(const pb_plugin_t *plug)
 {
     const pm_plugin_info_t *info = pm_plugin_by_uri(plug->uri);
     if (!info) return PLUG_AUDIO;
     if (info->is_cv_plugin)   return PLUG_CV;
     if (info->is_midi_plugin) return PLUG_MIDI;
+    if (info->midi_in_count + info->midi_out_count > 0 &&
+        info->audio_in_count + info->audio_out_count == 0)
+        return PLUG_MIDI;
     return PLUG_AUDIO;
 }
 
@@ -1944,46 +1947,28 @@ void ui_pedalboard_refresh(void)
         }
 
         /* Compute column X positions.
-         * col_eff_w[c]: effective width used to space the next column.
-         * When a column is a "sub-grid" (folded under a previous 2X block),
-         * it inherits the 2X width so subsequent columns clear the full footprint. */
-        int  col_x[LAYOUT_MAX_COLS + 1];
-        bool col_is_subgrid[LAYOUT_MAX_COLS + 1];
-        int  col_eff_w[LAYOUT_MAX_COLS + 1];
-        memset(col_is_subgrid, 0, sizeof(col_is_subgrid));
+         * Each column advances to the right by (prev_width + H_GAP). */
+        int col_x[LAYOUT_MAX_COLS + 1];
+        int col_eff_w[LAYOUT_MAX_COLS + 1];
         col_x[0]     = 20;
         col_eff_w[0] = col_max_w[0] > 0 ? col_max_w[0] : LAYOUT_BLOCK_W;
 
         for (int c = 1; c <= max_c; c++) {
-            bool prev_2x       = col_eff_w[c - 1] > LAYOUT_BLOCK_W;
-            bool prev_subgrid  = col_is_subgrid[c - 1];
-            bool cur_only_1x   = col_max_w[c] <= LAYOUT_BLOCK_W && col_max_w[c] > 0;
-
-            if (prev_2x && !prev_subgrid && cur_only_1x) {
-                /* Fold this column into the previous 2X footprint */
-                col_x[c]          = col_x[c - 1];
-                col_is_subgrid[c] = true;
-                col_eff_w[c]      = col_eff_w[c - 1]; /* inherit 2X width */
-            } else {
-                col_x[c]     = col_x[c - 1] + col_eff_w[c - 1] + LAYOUT_H_GAP;
-                col_eff_w[c] = col_max_w[c] > 0 ? col_max_w[c] : LAYOUT_BLOCK_W;
-            }
+            col_x[c]     = col_x[c - 1] + col_eff_w[c - 1] + LAYOUT_H_GAP;
+            col_eff_w[c] = col_max_w[c] > 0 ? col_max_w[c] : LAYOUT_BLOCK_W;
         }
 
         for (int i = 0; i < g_pedalboard.plugin_count; i++)
             g_layout_x[i] = (lv_coord_t)col_x[col_of[i]];
 
-        /* ── Sub-grid pairing ──────────────────────────────────────────────────
-         * Two cases trigger side-by-side pairing of 1X blocks:
-         *   a) A column natively contains a 2X block (col_max_w > LAYOUT_BLOCK_W):
-         *      its 1X blocks are paired within the 2X footprint.
-         *   b) A column is a sub-grid (downstream of a 2X, folded into its X):
-         *      its 1X blocks are also paired within the inherited 2X footprint.
+        /* ── Pairing : 1X blocks in a column that also contains a 2X block ──────
+         * When a column has a 2X block, its 1X siblings are placed side-by-side
+         * within the 2X footprint to avoid wasted vertical space.
          * Even-indexed block: stays at col_x[c].
          * Odd-indexed block:  moves to col_x[c] + LAYOUT_BLOCK_W + LAYOUT_H_GAP,
          *                     and shares the same Y as its pair partner. */
         for (int c = 0; c <= max_c; c++) {
-            if (col_max_w[c] <= LAYOUT_BLOCK_W && !col_is_subgrid[c]) continue;
+            if (col_max_w[c] <= LAYOUT_BLOCK_W) continue;
 
             int idx1x[PB_MAX_PLUGINS], n1x = 0;
             for (int i = 0; i < g_pedalboard.plugin_count; i++) {

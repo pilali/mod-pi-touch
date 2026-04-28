@@ -1,7 +1,9 @@
 #include "ui_scene.h"
 #include "ui_app.h"
 #include "ui_pedalboard.h"
+#include "ui_plugin_block.h"
 #include "../pedalboard.h"
+#include "../plugin_manager.h"
 #include "../host_comm.h"
 #include "../bank.h"
 #include "../settings.h"
@@ -289,6 +291,10 @@ static void slot_apply_style(int idx)
     pb_plugin_t  *pl = (pb && sl->instance_id >= 0)
                         ? pb_find_plugin(pb, sl->instance_id) : NULL;
 
+    /* Resolve doap:name once — used for the name label in every branch */
+    const pm_plugin_info_t *info = pl ? pm_plugin_by_uri(pl->uri) : NULL;
+    const char *display_name = (info && info->name[0]) ? info->name : (pl ? pl->label : "");
+
     if (g_learning_slot == idx) {
         lv_obj_set_style_bg_color(sl->card, lv_color_hex(0x0F1D3A), 0);
         lv_obj_set_style_shadow_color(sl->card, UI_COLOR_ACCENT, 0);
@@ -297,7 +303,7 @@ static void slot_apply_style(int idx)
         lv_obj_set_style_shadow_opa(sl->card, LV_OPA_80, 0);
         lv_obj_set_style_shadow_ofs_x(sl->card, 0, 0);
         lv_obj_set_style_shadow_ofs_y(sl->card, 0, 0);
-        if (sl->name_lbl)  lv_label_set_text(sl->name_lbl,  pl ? pl->label : "");
+        if (sl->name_lbl)  lv_label_set_text(sl->name_lbl, display_name);
         if (sl->state_lbl) {
             lv_label_set_text(sl->state_lbl, TR(TR_SCENE_MIDI_LEARNING));
             lv_obj_set_style_text_color(sl->state_lbl, UI_COLOR_ACCENT, 0);
@@ -319,22 +325,24 @@ static void slot_apply_style(int idx)
     }
 
     if (pl->enabled) {
-        lv_obj_set_style_bg_color(sl->card, lv_color_hex(0x163320), 0);
-        lv_obj_set_style_shadow_color(sl->card, GLOW_COLOR, 0);
+        lv_color_t glow = ui_plugin_block_category_color(info ? info->category : "");
+        lv_color_t bg   = lv_color_mix(glow, lv_color_hex(0x0D0D1E), 35);
+        lv_obj_set_style_bg_color(sl->card, bg, 0);
+        lv_obj_set_style_shadow_color(sl->card, glow, 0);
         lv_obj_set_style_shadow_width(sl->card, GLOW_W, 0);
         lv_obj_set_style_shadow_spread(sl->card, GLOW_SPREAD, 0);
         lv_obj_set_style_shadow_opa(sl->card, LV_OPA_80, 0);
         lv_obj_set_style_shadow_ofs_x(sl->card, 0, 0);
         lv_obj_set_style_shadow_ofs_y(sl->card, 0, 0);
-        if (sl->name_lbl) lv_label_set_text(sl->name_lbl, pl->label);
+        if (sl->name_lbl) lv_label_set_text(sl->name_lbl, display_name);
         if (sl->state_lbl) {
             lv_label_set_text(sl->state_lbl, TR(TR_SCENE_ACTIVE));
-            lv_obj_set_style_text_color(sl->state_lbl, GLOW_COLOR, 0);
+            lv_obj_set_style_text_color(sl->state_lbl, glow, 0);
         }
     } else {
         lv_obj_set_style_bg_color(sl->card, UI_COLOR_SURFACE, 0);
         lv_obj_set_style_shadow_width(sl->card, 0, 0);
-        if (sl->name_lbl) lv_label_set_text(sl->name_lbl, pl->label);
+        if (sl->name_lbl) lv_label_set_text(sl->name_lbl, display_name);
         if (sl->state_lbl) {
             lv_label_set_text(sl->state_lbl, TR(TR_SCENE_BYPASSED));
             lv_obj_set_style_text_color(sl->state_lbl, UI_COLOR_TEXT_DIM, 0);
@@ -634,7 +642,7 @@ static void build_pedals_tab(lv_obj_t *parent)
         /* Plugin name */
         lv_obj_t *name_lbl = lv_label_create(card);
         lv_obj_set_style_text_color(name_lbl, UI_COLOR_TEXT, 0);
-        lv_obj_set_style_text_font(name_lbl, &lv_font_montserrat_20, 0);
+        lv_obj_set_style_text_font(name_lbl, &lv_font_montserrat_24, 0);
         lv_label_set_long_mode(name_lbl, LV_LABEL_LONG_WRAP);
         lv_obj_set_width(name_lbl, LV_PCT(100));
         lv_obj_set_style_text_align(name_lbl, LV_TEXT_ALIGN_CENTER, 0);
@@ -1202,8 +1210,8 @@ void ui_scene_open(void)
     lv_obj_center(_l); \
 } while(0)
 
-    TAB_BTN(g_tab_btn_pedals,  TR(TR_SCENE_PEDALS),  tab_pedals_cb);
     TAB_BTN(g_tab_btn_setlist, TR(TR_SCENE_SETLIST), tab_setlist_cb);
+    TAB_BTN(g_tab_btn_pedals,  TR(TR_SCENE_PEDALS),  tab_pedals_cb);
 
 #undef TAB_BTN
 
@@ -1255,7 +1263,7 @@ void ui_scene_open(void)
     lv_obj_set_style_text_color(lbl_close, UI_COLOR_TEXT_DIM, 0);
     lv_obj_center(lbl_close);
 
-    show_tab(0);
+    show_tab(1); /* default: Setlist */
 }
 
 void ui_scene_close(void)

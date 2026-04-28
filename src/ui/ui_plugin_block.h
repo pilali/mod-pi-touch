@@ -33,3 +33,7 @@ void ui_plugin_block_set_param(lv_obj_t *block, const char *symbol, float value)
  * Width depends on the number of modgui-curated (or fallback control) ports. */
 int ui_plugin_block_width(const pb_plugin_t *plug);
 int ui_plugin_block_height(const pb_plugin_t *plug);
+
+/* Accent colour for the given LV2 category string (e.g. "Reverb", "Delay").
+ * Returns UI_COLOR_PRIMARY for unknown categories. */
+lv_color_t ui_plugin_block_category_color(const char *category);
