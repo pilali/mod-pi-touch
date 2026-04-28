@@ -166,6 +166,12 @@ static void               *g_remove_ud  = NULL;
 
 static lv_obj_t           *g_confirm_overlay = NULL;
 
+/* Widget prefs gear callback */
+static widget_prefs_cb_t   g_widget_prefs_cb = NULL;
+static void               *g_widget_prefs_ud = NULL;
+static char                g_plug_symbol[PB_SYMBOL_MAX] = {0};
+static char                g_plug_uri[PB_URI_MAX]       = {0};
+
 /* Bypass MIDI state */
 static lv_obj_t           *g_bypass_midi_lbl = NULL;
 static int                 g_bypass_midi_ch  = -1;
@@ -995,6 +1001,19 @@ static void delete_btn_cb(lv_event_t *e)
 
 /* ─── Close ──────────────────────────────────────────────────────────────────── */
 
+void ui_param_editor_set_widget_prefs_cb(widget_prefs_cb_t cb, void *ud)
+{
+    g_widget_prefs_cb = cb;
+    g_widget_prefs_ud = ud;
+}
+
+static void gear_cb(lv_event_t *e)
+{
+    (void)e;
+    if (g_widget_prefs_cb && g_instance >= 0)
+        g_widget_prefs_cb(g_instance, g_plug_symbol, g_plug_uri, g_widget_prefs_ud);
+}
+
 static void close_cb(lv_event_t *e)
 {
     (void)e;
@@ -1092,6 +1111,7 @@ static void meter_timer_cb(lv_timer_t *t)
 void ui_param_editor_show(int instance_id,
                           const char *plugin_label,
                           const char *plugin_uri,
+                          const char *plugin_symbol,
                           pb_port_t *ports, int port_count,
                           pb_patch_t *patch_params, int patch_param_count,
                           bool enabled,
@@ -1108,6 +1128,8 @@ void ui_param_editor_show(int instance_id,
     g_instance          = instance_id;
     atomic_store(&g_active_instance, instance_id);
     g_enabled           = enabled;
+    snprintf(g_plug_symbol, sizeof(g_plug_symbol), "%s", plugin_symbol ? plugin_symbol : "");
+    snprintf(g_plug_uri,    sizeof(g_plug_uri),    "%s", plugin_uri    ? plugin_uri    : "");
     g_bypass_cb         = bypass_cb;
     g_bypass_ud         = bypass_ud;
     g_bypass_lbl        = NULL;
@@ -1191,6 +1213,17 @@ void ui_param_editor_show(int instance_id,
     lv_label_set_text(title_lbl, plugin_label);
     lv_obj_set_style_text_color(title_lbl, UI_COLOR_TEXT, 0);
     lv_obj_set_style_text_font(title_lbl, &lv_font_montserrat_20, 0);
+
+    /* Gear button — only shown when a widget_prefs callback is registered */
+    if (g_widget_prefs_cb) {
+        lv_obj_t *btn_gear = lv_btn_create(title_row);
+        lv_obj_set_size(btn_gear, 36, 36);
+        lv_obj_set_style_bg_color(btn_gear, lv_color_hex(0x2A3050), 0);
+        lv_obj_t *lbl_gear = lv_label_create(btn_gear);
+        lv_label_set_text(lbl_gear, LV_SYMBOL_SETTINGS);
+        lv_obj_center(lbl_gear);
+        lv_obj_add_event_cb(btn_gear, gear_cb, LV_EVENT_CLICKED, NULL);
+    }
 
     lv_obj_t *btn_close = lv_btn_create(title_row);
     lv_obj_set_size(btn_close, 36, 36);

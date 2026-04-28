@@ -126,6 +126,13 @@ static const char * const g_en[TR_COUNT] = {
     /* TR_SCENE_UNASSIGN */        "Unassign",
     /* TR_SCENE_LEARN_MIDI */      "MIDI Learn",
     /* TR_SCENE_ALL_BANKS */       "All pedalboards",
+    /* TR_SCENE_PARAMS */         "Parameters\xe2\x80\xa6",
+    /* TR_SCENE_PICK_PARAM */     "Choose parameters (max 4)",
+    /* TR_SCENE_MAX_PARAMS */     "Max 4 parameters selected",
+
+    /* TR_BLOCK_WIDGET_PREFS */  "Widget controls\xe2\x80\xa6",
+    /* TR_BLOCK_PICK_CTRL */     "Choose controls (max 8)",
+    /* TR_BLOCK_MAX_CTRL */      "Max 8 controls selected",
 
     /* TR_PREFX_TITLE */           "Pre-FX",
     /* TR_PREFX_TUNER */           "Tuner",
@@ -339,6 +346,13 @@ static const char * const g_fr[TR_COUNT] = {
     /* TR_SCENE_UNASSIGN */        "D\xc3\xa9sassigner",
     /* TR_SCENE_LEARN_MIDI */      "Appr. MIDI",
     /* TR_SCENE_ALL_BANKS */       "Tous les pedalboards",
+    /* TR_SCENE_PARAMS */         "Param\xc3\xa8tres\xe2\x80\xa6",
+    /* TR_SCENE_PICK_PARAM */     "Choisir les param\xc3\xa8tres (max 4)",
+    /* TR_SCENE_MAX_PARAMS */     "Maximum 4 param\xc3\xa8tres s\xc3\xa9lectionn\xc3\xa9s",
+
+    /* TR_BLOCK_WIDGET_PREFS */  "Contr\xc3\xb4les du widget\xe2\x80\xa6",
+    /* TR_BLOCK_PICK_CTRL */     "Choisir les contr\xc3\xb4les (max 8)",
+    /* TR_BLOCK_MAX_CTRL */      "Maximum 8 contr\xc3\xb4les s\xc3\xa9lectionn\xc3\xa9s",
 
     /* TR_PREFX_TITLE */           "Pr\xc3\xa9-FX",
     /* TR_PREFX_TUNER */           "Accordeur",

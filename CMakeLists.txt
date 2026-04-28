@@ -77,6 +77,7 @@ set(SOURCES
     src/bank.c
     src/settings.c
     src/lv2_utils.c
+    src/widget_prefs.c
     src/ui/ui_app.c
     src/ui/ui_pedalboard.c
     src/ui/ui_plugin_block.c

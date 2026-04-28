@@ -63,6 +63,10 @@ void ui_pedalboard_on_midi_mapped(int instance_id, const char *symbol,
  * Updates pb->midi_loopback, issues the mod-host command, and marks modified. */
 void ui_pedalboard_set_midi_loopback(bool enabled);
 
+/* Rebuild the plugin block widget for a given instance (e.g. after widget prefs change).
+ * Triggers a full canvas refresh if the block width changes. */
+void ui_pedalboard_rebuild_block(int instance_id);
+
 /* Accessors */
 pedalboard_t *ui_pedalboard_get(void);
 bool          ui_pedalboard_is_loaded(void);

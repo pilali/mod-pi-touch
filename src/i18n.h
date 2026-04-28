@@ -147,6 +147,14 @@ typedef enum {
     TR_SCENE_UNASSIGN,
     TR_SCENE_LEARN_MIDI,
     TR_SCENE_ALL_BANKS,
+    TR_SCENE_PARAMS,       /* "Paramètres…" context menu item */
+    TR_SCENE_PICK_PARAM,   /* param picker overlay title */
+    TR_SCENE_MAX_PARAMS,   /* toast: already 4 params selected */
+
+    /* Plugin block widget controls customization */
+    TR_BLOCK_WIDGET_PREFS,   /* gear button tooltip / picker title */
+    TR_BLOCK_PICK_CTRL,      /* picker subtitle */
+    TR_BLOCK_MAX_CTRL,       /* toast: already 8 controls selected */
 
     /* Pre-FX (Tuner + Noise Gate) */
     TR_PREFX_TITLE,

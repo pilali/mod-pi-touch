@@ -14,20 +14,39 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 
 /* ─── Constants ──────────────────────────────────────────────────────────────── */
-#define SLOT_COUNT 4
+#define SLOT_COUNT       4
+#define SCENE_CTRL_COUNT 4
+#define CELL_ENUM_LBL_MAX 32
 #define GLOW_COLOR  lv_color_hex(0x34D399)
 #define GLOW_W      24
 #define GLOW_SPREAD 8
 
+/* ─── Per-cell control state ─────────────────────────────────────────────────── */
+typedef struct {
+    int        slot_idx;
+    char       symbol[PB_SYMBOL_MAX];
+    float      min, max, value;
+    bool       is_toggle, is_enum, is_integer;
+    int        enum_count;
+    float      enum_values[16];
+    char       enum_labels[16][CELL_ENUM_LBL_MAX];
+    lv_obj_t  *indicator;   /* arc / dot / val_lbl — NULL if not built */
+} scene_cell_t;
+
 /* ─── Slot state ─────────────────────────────────────────────────────────────── */
 typedef struct {
-    int       instance_id;
-    lv_obj_t *card;
-    lv_obj_t *name_lbl;
-    lv_obj_t *state_lbl;
-    lv_obj_t *cancel_btn;
+    int          instance_id;
+    lv_obj_t    *card;
+    lv_obj_t    *ctrl_area;
+    lv_obj_t    *name_lbl;
+    lv_obj_t    *state_lbl;
+    lv_obj_t    *cancel_btn;
+    scene_cell_t cells[SCENE_CTRL_COUNT];
+    char         custom_syms[SCENE_CTRL_COUNT][PB_SYMBOL_MAX];
+    bool         has_custom;
 } slot_t;
 
 /* ─── Module state ───────────────────────────────────────────────────────────── */
@@ -45,6 +64,7 @@ static lv_obj_t *g_bank_menu       = NULL;
 
 /* ─── Forward declarations ───────────────────────────────────────────────────── */
 static void slot_apply_style(int idx);
+static void slot_build_controls(int idx);
 static void build_pedals_tab(lv_obj_t *parent);
 static void build_setlist_tab(lv_obj_t *parent);
 static void show_tab(int tab);
@@ -52,6 +72,8 @@ static void scene_refresh(void);
 static void show_spinner(void);
 static void hide_spinner(void);
 static void open_bank_menu(lv_obj_t *anchor, bank_list_t *banks);
+static void open_param_picker(int slot_idx);
+static void slot_rebuild_async(void *arg);
 
 /* ─── Close callback shim ────────────────────────────────────────────────────── */
 static void scene_close_cb(lv_event_t *e) { (void)e; ui_scene_close(); }
@@ -65,8 +87,17 @@ static void scene_save(void)
 
     cJSON *root = cJSON_CreateObject();
     cJSON *arr  = cJSON_AddArrayToObject(root, "slots");
-    for (int i = 0; i < SLOT_COUNT; i++)
-        cJSON_AddItemToArray(arr, cJSON_CreateNumber(g_slots[i].instance_id));
+    for (int i = 0; i < SLOT_COUNT; i++) {
+        slot_t *sl = &g_slots[i];
+        cJSON *slot_obj = cJSON_CreateObject();
+        cJSON_AddNumberToObject(slot_obj, "instance_id", sl->instance_id);
+        if (sl->has_custom) {
+            cJSON *params = cJSON_AddArrayToObject(slot_obj, "params");
+            for (int k = 0; k < SCENE_CTRL_COUNT; k++)
+                cJSON_AddItemToArray(params, cJSON_CreateString(sl->custom_syms[k]));
+        }
+        cJSON_AddItemToArray(arr, slot_obj);
+    }
 
     char path[PB_PATH_MAX];
     snprintf(path, sizeof(path), "%s/scene.json", pb->path);
@@ -81,8 +112,12 @@ static void scene_save(void)
 
 static void scene_load(void)
 {
-    for (int i = 0; i < SLOT_COUNT; i++)
+    for (int i = 0; i < SLOT_COUNT; i++) {
         g_slots[i].instance_id = -1;
+        g_slots[i].has_custom  = false;
+        for (int k = 0; k < SCENE_CTRL_COUNT; k++)
+            g_slots[i].custom_syms[k][0] = '\0';
+    }
 
     pedalboard_t *pb = ui_pedalboard_get();
     if (!pb || !pb->path[0]) return;
@@ -108,8 +143,29 @@ static void scene_load(void)
         if (n > SLOT_COUNT) n = SLOT_COUNT;
         for (int i = 0; i < n; i++) {
             cJSON *v = cJSON_GetArrayItem(arr, i);
-            if (cJSON_IsNumber(v))
+            if (cJSON_IsNumber(v)) {
+                /* Legacy format: plain number */
                 g_slots[i].instance_id = (int)v->valuedouble;
+            } else if (cJSON_IsObject(v)) {
+                cJSON *ji = cJSON_GetObjectItem(v, "instance_id");
+                if (cJSON_IsNumber(ji))
+                    g_slots[i].instance_id = (int)ji->valuedouble;
+                cJSON *params = cJSON_GetObjectItem(v, "params");
+                if (cJSON_IsArray(params)) {
+                    int np = cJSON_GetArraySize(params);
+                    if (np > SCENE_CTRL_COUNT) np = SCENE_CTRL_COUNT;
+                    bool any = false;
+                    for (int k = 0; k < np; k++) {
+                        cJSON *ps = cJSON_GetArrayItem(params, k);
+                        if (cJSON_IsString(ps)) {
+                            snprintf(g_slots[i].custom_syms[k],
+                                     PB_SYMBOL_MAX, "%s", ps->valuestring);
+                            if (ps->valuestring[0]) any = true;
+                        }
+                    }
+                    g_slots[i].has_custom = any;
+                }
+            }
         }
     }
     cJSON_Delete(root);
@@ -280,6 +336,263 @@ static void open_bank_menu(lv_obj_t *anchor, bank_list_t *banks)
 #undef BANK_ITEM
 }
 
+/* ─── Cell interaction callbacks ─────────────────────────────────────────────── */
+
+static void scene_toggle_cb(lv_event_t *e)
+{
+    scene_cell_t *cc = lv_event_get_user_data(e);
+    cc->value = (cc->value > 0.5f) ? 0.0f : 1.0f;
+    bool active = cc->value > 0.5f;
+    if (cc->indicator) {
+        lv_obj_set_style_bg_color(cc->indicator,
+            active ? UI_COLOR_ACTIVE : UI_COLOR_BYPASS, 0);
+        lv_obj_set_style_shadow_color(cc->indicator,
+            active ? UI_COLOR_ACTIVE : UI_COLOR_BYPASS, 0);
+        lv_obj_set_style_shadow_width(cc->indicator, active ? 8 : 0, 0);
+    }
+    int iid = g_slots[cc->slot_idx].instance_id;
+    if (iid >= 0) host_param_set(iid, cc->symbol, cc->value);
+}
+
+static void scene_enum_cb(lv_event_t *e)
+{
+    scene_cell_t *cc = lv_event_get_user_data(e);
+    if (cc->enum_count <= 0) return;
+    int cur = 0;
+    for (int k = 0; k < cc->enum_count; k++)
+        if (fabsf(cc->enum_values[k] - cc->value) < 0.5f) { cur = k; break; }
+    cur = (cur + 1) % cc->enum_count;
+    cc->value = cc->enum_values[cur];
+    if (cc->indicator) lv_label_set_text(cc->indicator, cc->enum_labels[cur]);
+    int iid = g_slots[cc->slot_idx].instance_id;
+    if (iid >= 0) host_param_set(iid, cc->symbol, cc->value);
+}
+
+static void scene_arc_cb(lv_event_t *e)
+{
+    scene_cell_t *cc = lv_event_get_user_data(e);
+    if (!cc->indicator) return;
+    int arc_val = lv_arc_get_value(cc->indicator);
+    float norm = (float)arc_val / 1000.0f;
+    float v = cc->min + (cc->max - cc->min) * norm;
+    if (cc->is_integer) v = roundf(v);
+    if (v < cc->min) v = cc->min;
+    if (v > cc->max) v = cc->max;
+    cc->value = v;
+    int iid = g_slots[cc->slot_idx].instance_id;
+    if (iid >= 0) host_param_set(iid, cc->symbol, cc->value);
+}
+
+/* ─── Control area builder ───────────────────────────────────────────────────── */
+
+static void slot_build_controls(int idx)
+{
+    slot_t *sl = &g_slots[idx];
+    if (!sl->ctrl_area) return;
+
+    for (int k = 0; k < SCENE_CTRL_COUNT; k++)
+        sl->cells[k].indicator = NULL;
+    lv_obj_clean(sl->ctrl_area);
+
+    pedalboard_t *pb = ui_pedalboard_get();
+    pb_plugin_t *pl = (pb && sl->instance_id >= 0)
+                       ? pb_find_plugin(pb, sl->instance_id) : NULL;
+    if (!pl) return;
+
+    const pm_plugin_info_t *info = pm_plugin_by_uri(pl->uri);
+    if (!info) return;
+
+    lv_color_t accent = ui_plugin_block_category_color(info->category);
+
+    /* Collect up to SCENE_CTRL_COUNT port infos */
+    const pm_port_info_t *ports[SCENE_CTRL_COUNT] = {NULL, NULL, NULL, NULL};
+    int n_ports = 0;
+
+    if (sl->has_custom) {
+        for (int k = 0; k < SCENE_CTRL_COUNT && n_ports < SCENE_CTRL_COUNT; k++) {
+            if (!sl->custom_syms[k][0]) { n_ports++; continue; }
+            for (int j = 0; j < info->port_count; j++) {
+                if (info->ports[j].type == PM_PORT_CONTROL_IN &&
+                    strcmp(info->ports[j].symbol, sl->custom_syms[k]) == 0) {
+                    ports[n_ports] = &info->ports[j];
+                    break;
+                }
+            }
+            n_ports++;
+        }
+    } else if (info->modgui_port_count > 0) {
+        for (int k = 0; k < info->modgui_port_count && n_ports < SCENE_CTRL_COUNT; k++) {
+            const char *sym = info->modgui_ports[k].symbol;
+            for (int j = 0; j < info->port_count; j++) {
+                if (strcmp(info->ports[j].symbol, sym) == 0) {
+                    ports[n_ports++] = &info->ports[j];
+                    break;
+                }
+            }
+        }
+    } else {
+        for (int j = 0; j < info->port_count && n_ports < SCENE_CTRL_COUNT; j++) {
+            if (info->ports[j].type == PM_PORT_CONTROL_IN)
+                ports[n_ports++] = &info->ports[j];
+        }
+    }
+
+    for (int k = 0; k < SCENE_CTRL_COUNT; k++) {
+        scene_cell_t *cc = &sl->cells[k];
+        cc->slot_idx  = idx;
+        cc->indicator = NULL;
+
+        /* Cell container: 50% width, 120px high */
+        lv_obj_t *cell = lv_obj_create(sl->ctrl_area);
+        lv_obj_set_size(cell, LV_PCT(50), 120);
+        lv_obj_set_style_bg_opa(cell, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(cell, 0, 0);
+        lv_obj_set_style_pad_all(cell, 4, 0);
+        lv_obj_set_flex_flow(cell, LV_FLEX_FLOW_COLUMN);
+        lv_obj_set_flex_align(cell, LV_FLEX_ALIGN_START,
+                              LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+        lv_obj_clear_flag(cell, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+
+        const pm_port_info_t *pm_port = ports[k];
+        if (!pm_port) continue;
+
+        /* Current port value from pedalboard model */
+        float val = pm_port->default_val;
+        for (int j = 0; j < pl->port_count; j++) {
+            if (strcmp(pl->ports[j].symbol, pm_port->symbol) == 0) {
+                val = pl->ports[j].value;
+                break;
+            }
+        }
+
+        /* Fill cell context */
+        snprintf(cc->symbol, sizeof(cc->symbol), "%s", pm_port->symbol);
+        cc->min        = pm_port->min;
+        cc->max        = pm_port->max;
+        cc->value      = val;
+        cc->is_toggle  = pm_port->toggled;
+        cc->is_enum    = (pm_port->enumeration && pm_port->enum_count > 0);
+        cc->is_integer = pm_port->integer;
+        cc->enum_count = pm_port->enum_count < 16 ? pm_port->enum_count : 16;
+        for (int j = 0; j < cc->enum_count; j++) {
+            cc->enum_values[j] = pm_port->enum_values[j];
+            snprintf(cc->enum_labels[j], CELL_ENUM_LBL_MAX,
+                     "%s", pm_port->enum_labels[j]);
+        }
+
+        /* Port name label */
+        lv_obj_t *name_lbl = lv_label_create(cell);
+        lv_label_set_text(name_lbl, pm_port->name);
+        lv_label_set_long_mode(name_lbl, LV_LABEL_LONG_DOT);
+        lv_obj_set_width(name_lbl, LV_PCT(100));
+        lv_obj_set_style_text_font(name_lbl, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(name_lbl, UI_COLOR_TEXT_DIM, 0);
+        lv_obj_set_style_text_align(name_lbl, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_clear_flag(name_lbl, LV_OBJ_FLAG_CLICKABLE);
+
+        /* Indicator wrapper (fills remaining height) */
+        lv_obj_t *ind_wrap = lv_obj_create(cell);
+        lv_obj_set_flex_grow(ind_wrap, 1);
+        lv_obj_set_width(ind_wrap, LV_PCT(100));
+        lv_obj_set_style_bg_opa(ind_wrap, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(ind_wrap, 0, 0);
+        lv_obj_set_style_pad_all(ind_wrap, 0, 0);
+        lv_obj_clear_flag(ind_wrap, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+
+        if (pm_port->toggled) {
+            bool active = val > 0.5f;
+            lv_obj_t *dot = lv_obj_create(ind_wrap);
+            lv_obj_set_size(dot, 24, 24);
+            lv_obj_set_style_radius(dot, LV_RADIUS_CIRCLE, 0);
+            lv_obj_set_style_bg_color(dot,
+                active ? UI_COLOR_ACTIVE : UI_COLOR_BYPASS, 0);
+            lv_obj_set_style_border_width(dot, 0, 0);
+            lv_obj_set_style_shadow_color(dot,
+                active ? UI_COLOR_ACTIVE : UI_COLOR_BYPASS, 0);
+            lv_obj_set_style_shadow_width(dot, active ? 8 : 0, 0);
+            lv_obj_set_style_shadow_spread(dot, 2, 0);
+            lv_obj_set_style_shadow_opa(dot, LV_OPA_60, 0);
+            lv_obj_align(dot, LV_ALIGN_CENTER, 0, 0);
+            lv_obj_clear_flag(dot, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+            cc->indicator = dot;
+
+            lv_obj_t *btn = lv_obj_create(cell);
+            lv_obj_add_flag(btn, LV_OBJ_FLAG_FLOATING);
+            lv_obj_set_size(btn, LV_PCT(100), LV_PCT(100));
+            lv_obj_set_pos(btn, 0, 0);
+            lv_obj_set_style_bg_opa(btn, LV_OPA_TRANSP, 0);
+            lv_obj_set_style_border_width(btn, 0, 0);
+            lv_obj_set_style_shadow_width(btn, 0, 0);
+            lv_obj_set_style_pad_all(btn, 0, 0);
+            lv_obj_clear_flag(btn, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_SCROLL_CHAIN);
+            lv_obj_add_flag(btn, LV_OBJ_FLAG_CLICKABLE);
+            lv_obj_add_event_cb(btn, scene_toggle_cb, LV_EVENT_CLICKED, cc);
+            lv_obj_add_event_cb(btn,
+                (lv_event_cb_t)lv_event_stop_bubbling, LV_EVENT_CLICKED, NULL);
+
+        } else if (pm_port->enumeration && pm_port->enum_count > 0) {
+            const char *enum_str = "?";
+            for (int j = 0; j < pm_port->enum_count; j++) {
+                if (fabsf(pm_port->enum_values[j] - val) < 0.5f) {
+                    enum_str = pm_port->enum_labels[j];
+                    break;
+                }
+            }
+            lv_obj_t *val_lbl = lv_label_create(ind_wrap);
+            lv_label_set_text(val_lbl, enum_str);
+            lv_label_set_long_mode(val_lbl, LV_LABEL_LONG_DOT);
+            lv_obj_set_width(val_lbl, LV_PCT(100));
+            lv_obj_set_style_text_font(val_lbl, &lv_font_montserrat_12, 0);
+            lv_obj_set_style_text_color(val_lbl, UI_COLOR_TEXT, 0);
+            lv_obj_set_style_text_align(val_lbl, LV_TEXT_ALIGN_CENTER, 0);
+            lv_obj_align(val_lbl, LV_ALIGN_CENTER, 0, 0);
+            lv_obj_clear_flag(val_lbl, LV_OBJ_FLAG_CLICKABLE);
+            cc->indicator = val_lbl;
+
+            lv_obj_t *btn = lv_obj_create(cell);
+            lv_obj_add_flag(btn, LV_OBJ_FLAG_FLOATING);
+            lv_obj_set_size(btn, LV_PCT(100), LV_PCT(100));
+            lv_obj_set_pos(btn, 0, 0);
+            lv_obj_set_style_bg_opa(btn, LV_OPA_TRANSP, 0);
+            lv_obj_set_style_border_width(btn, 0, 0);
+            lv_obj_set_style_shadow_width(btn, 0, 0);
+            lv_obj_set_style_pad_all(btn, 0, 0);
+            lv_obj_clear_flag(btn, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_SCROLL_CHAIN);
+            lv_obj_add_flag(btn, LV_OBJ_FLAG_CLICKABLE);
+            lv_obj_add_event_cb(btn, scene_enum_cb, LV_EVENT_CLICKED, cc);
+            lv_obj_add_event_cb(btn,
+                (lv_event_cb_t)lv_event_stop_bubbling, LV_EVENT_CLICKED, NULL);
+
+        } else {
+            /* Arc knob */
+            lv_obj_t *arc = lv_arc_create(ind_wrap);
+            lv_obj_set_size(arc, 56, 56);
+            lv_obj_align(arc, LV_ALIGN_CENTER, 0, 0);
+            lv_arc_set_bg_angles(arc, 135, 45);
+            lv_arc_set_range(arc, 0, 1000);
+            int val_norm = 0;
+            if (pm_port->max > pm_port->min)
+                val_norm = (int)(1000.0f * (val - pm_port->min)
+                                 / (pm_port->max - pm_port->min));
+            if (val_norm < 0)    val_norm = 0;
+            if (val_norm > 1000) val_norm = 1000;
+            lv_arc_set_value(arc, val_norm);
+            lv_obj_set_style_arc_color(arc, lv_color_hex(0x2A2A4A), LV_PART_MAIN);
+            lv_obj_set_style_arc_color(arc, accent,                  LV_PART_INDICATOR);
+            lv_obj_set_style_arc_width(arc, 3, LV_PART_MAIN);
+            lv_obj_set_style_arc_width(arc, 3, LV_PART_INDICATOR);
+            lv_obj_set_style_bg_color(arc, lv_color_white(), LV_PART_KNOB);
+            lv_obj_set_style_bg_opa(arc, LV_OPA_60, LV_PART_KNOB);
+            lv_obj_set_style_pad_all(arc, -4, LV_PART_KNOB);
+            lv_obj_set_style_border_width(arc, 0, LV_PART_KNOB);
+            lv_obj_set_style_radius(arc, LV_RADIUS_CIRCLE, LV_PART_KNOB);
+            lv_obj_clear_flag(arc, LV_OBJ_FLAG_SCROLL_CHAIN);
+            cc->indicator = arc;
+            lv_obj_add_event_cb(arc, scene_arc_cb, LV_EVENT_VALUE_CHANGED, cc);
+        }
+    }
+}
+
 /* ─── Slot style ─────────────────────────────────────────────────────────────── */
 
 static void slot_apply_style(int idx)
@@ -386,6 +699,7 @@ static void picker_item_cb(lv_event_t *e)
     slot_apply_style(slot);
     scene_save();
     host_midi_learn(iid, ":bypass", 0.0f, 1.0f);
+    lv_async_call(slot_rebuild_async, (void *)(intptr_t)slot);
 }
 
 static void picker_item_delete_cb(lv_event_t *e)
@@ -470,6 +784,234 @@ static void open_plugin_picker(int slot_idx)
     }
 }
 
+/* ─── Parameter picker (choose which 4 params to display) ───────────────────── */
+
+typedef struct {
+    int  slot_idx;
+    char sel[SCENE_CTRL_COUNT][PB_SYMBOL_MAX];
+    int  sel_count;
+    lv_obj_t *backdrop;
+    lv_obj_t *list;   /* scrollable list panel — to update button colors */
+} param_picker_ctx_t;
+
+static void param_picker_delete_cb(lv_event_t *e)
+{
+    free(lv_event_get_user_data(e));
+}
+
+typedef struct {
+    param_picker_ctx_t *pctx;
+    char  symbol[PB_SYMBOL_MAX];
+    lv_obj_t *btn;
+} param_item_ctx_t;
+
+static void param_item_delete_cb(lv_event_t *e)
+{
+    free(lv_event_get_user_data(e));
+}
+
+static void param_item_cb(lv_event_t *e)
+{
+    param_item_ctx_t *ic = lv_event_get_user_data(e);
+    param_picker_ctx_t *pctx = ic->pctx;
+    const char *sym = ic->symbol;
+
+    /* Check if already selected */
+    int found = -1;
+    for (int k = 0; k < pctx->sel_count; k++) {
+        if (strcmp(pctx->sel[k], sym) == 0) { found = k; break; }
+    }
+
+    if (found >= 0) {
+        /* Deselect: shift remaining down */
+        for (int k = found; k < pctx->sel_count - 1; k++)
+            snprintf(pctx->sel[k], PB_SYMBOL_MAX, "%s", pctx->sel[k+1]);
+        pctx->sel[--pctx->sel_count][0] = '\0';
+        lv_obj_set_style_bg_color(ic->btn, UI_COLOR_SURFACE, 0);
+        lv_obj_set_style_border_width(ic->btn, 0, 0);
+    } else {
+        if (pctx->sel_count >= SCENE_CTRL_COUNT) {
+            ui_app_show_toast(TR(TR_SCENE_MAX_PARAMS));
+            return;
+        }
+        snprintf(pctx->sel[pctx->sel_count++], PB_SYMBOL_MAX, "%s", sym);
+        lv_obj_set_style_bg_color(ic->btn, UI_COLOR_PRIMARY, 0);
+        lv_obj_set_style_border_color(ic->btn, UI_COLOR_PRIMARY, 0);
+        lv_obj_set_style_border_width(ic->btn, 1, 0);
+    }
+}
+
+static void slot_rebuild_async(void *arg)
+{
+    int idx = (int)(intptr_t)arg;
+    if (g_slots[idx].ctrl_area)
+        slot_build_controls(idx);
+}
+
+static void param_picker_ok_cb(lv_event_t *e)
+{
+    param_picker_ctx_t *pctx = lv_event_get_user_data(e);
+    int idx = pctx->slot_idx;
+    lv_obj_t *back = pctx->backdrop;
+
+    slot_t *sl = &g_slots[idx];
+    for (int k = 0; k < SCENE_CTRL_COUNT; k++) {
+        if (k < pctx->sel_count)
+            snprintf(sl->custom_syms[k], PB_SYMBOL_MAX, "%s", pctx->sel[k]);
+        else
+            sl->custom_syms[k][0] = '\0';
+    }
+    sl->has_custom = (pctx->sel_count > 0);
+    scene_save();
+
+    lv_obj_delete_async(back);
+    lv_async_call(slot_rebuild_async, (void *)(intptr_t)idx);
+}
+
+static void param_picker_cancel_cb(lv_event_t *e)
+{
+    param_picker_ctx_t *pctx = lv_event_get_user_data(e);
+    lv_obj_delete_async(pctx->backdrop);
+}
+
+static void param_picker_backdrop_cb(lv_event_t *e)
+{
+    lv_obj_t *t = lv_event_get_target(e);
+    lv_obj_t *c = lv_event_get_current_target(e);
+    if (t == c) lv_obj_delete_async(c);
+}
+
+static void open_param_picker(int slot_idx)
+{
+    pedalboard_t *pb = ui_pedalboard_get();
+    pb_plugin_t *pl = (pb && g_slots[slot_idx].instance_id >= 0)
+                       ? pb_find_plugin(pb, g_slots[slot_idx].instance_id) : NULL;
+    if (!pl) { ui_app_show_toast(TR(TR_SCENE_NO_PB)); return; }
+    const pm_plugin_info_t *info = pm_plugin_by_uri(pl->uri);
+    if (!info) return;
+
+    lv_obj_t *backdrop = lv_obj_create(lv_layer_top());
+    lv_obj_set_size(backdrop, LV_PCT(100), LV_PCT(100));
+    lv_obj_set_style_bg_color(backdrop, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(backdrop, LV_OPA_50, 0);
+    lv_obj_set_style_border_width(backdrop, 0, 0);
+    lv_obj_clear_flag(backdrop, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(backdrop, param_picker_backdrop_cb, LV_EVENT_CLICKED, NULL);
+
+    param_picker_ctx_t *pctx = calloc(1, sizeof(*pctx));
+    pctx->slot_idx = slot_idx;
+    pctx->backdrop = backdrop;
+    pctx->sel_count = 0;
+    /* Pre-fill with current custom_syms if any */
+    slot_t *sl = &g_slots[slot_idx];
+    if (sl->has_custom) {
+        for (int k = 0; k < SCENE_CTRL_COUNT; k++) {
+            if (sl->custom_syms[k][0]) {
+                snprintf(pctx->sel[pctx->sel_count++], PB_SYMBOL_MAX,
+                         "%s", sl->custom_syms[k]);
+            }
+        }
+    }
+    lv_obj_add_event_cb(backdrop, param_picker_delete_cb, LV_EVENT_DELETE, pctx);
+
+    lv_obj_t *panel = lv_obj_create(backdrop);
+    lv_obj_set_size(panel, 500, LV_SIZE_CONTENT);
+    lv_obj_set_style_max_height(panel, 580, 0);
+    lv_obj_align(panel, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_set_style_bg_color(panel, UI_COLOR_BG, 0);
+    lv_obj_set_style_border_color(panel, UI_COLOR_PRIMARY, 0);
+    lv_obj_set_style_border_width(panel, 1, 0);
+    lv_obj_set_style_radius(panel, 10, 0);
+    lv_obj_set_style_pad_all(panel, 14, 0);
+    lv_obj_set_style_pad_row(panel, 10, 0);
+    lv_obj_set_flex_flow(panel, LV_FLEX_FLOW_COLUMN);
+    lv_obj_add_flag(panel, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(panel,
+        (lv_event_cb_t)lv_event_stop_bubbling, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *title = lv_label_create(panel);
+    lv_label_set_text(title, TR(TR_SCENE_PICK_PARAM));
+    lv_obj_set_style_text_color(title, UI_COLOR_TEXT, 0);
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_18, 0);
+
+    lv_obj_t *list = lv_obj_create(panel);
+    lv_obj_set_width(list, LV_PCT(100));
+    lv_obj_set_height(list, LV_SIZE_CONTENT);
+    lv_obj_set_style_max_height(list, 420, 0);
+    lv_obj_set_style_bg_opa(list, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(list, 0, 0);
+    lv_obj_set_style_pad_all(list, 0, 0);
+    lv_obj_set_style_pad_row(list, 6, 0);
+    lv_obj_set_flex_flow(list, LV_FLEX_FLOW_COLUMN);
+
+    /* One button per ctrl_in port */
+    for (int j = 0; j < info->port_count; j++) {
+        if (info->ports[j].type != PM_PORT_CONTROL_IN) continue;
+        const pm_port_info_t *port = &info->ports[j];
+
+        bool is_sel = false;
+        for (int k = 0; k < pctx->sel_count; k++) {
+            if (strcmp(pctx->sel[k], port->symbol) == 0) { is_sel = true; break; }
+        }
+
+        lv_obj_t *btn = lv_btn_create(list);
+        lv_obj_set_size(btn, LV_PCT(100), 52);
+        lv_obj_set_style_bg_color(btn, is_sel ? UI_COLOR_PRIMARY : UI_COLOR_SURFACE, 0);
+        lv_obj_set_style_border_color(btn, UI_COLOR_PRIMARY, 0);
+        lv_obj_set_style_border_width(btn, is_sel ? 1 : 0, 0);
+        lv_obj_set_style_radius(btn, 8, 0);
+        lv_obj_set_style_shadow_width(btn, 0, 0);
+        lv_obj_set_style_pad_hor(btn, 10, 0);
+
+        param_item_ctx_t *ic = malloc(sizeof(*ic));
+        ic->pctx = pctx;
+        snprintf(ic->symbol, sizeof(ic->symbol), "%s", port->symbol);
+        ic->btn  = btn;
+        lv_obj_add_event_cb(btn, param_item_cb,        LV_EVENT_CLICKED, ic);
+        lv_obj_add_event_cb(btn, param_item_delete_cb, LV_EVENT_DELETE,  ic);
+
+        lv_obj_t *lbl = lv_label_create(btn);
+        lv_label_set_text(lbl, port->name);
+        lv_obj_set_style_text_color(lbl, UI_COLOR_TEXT, 0);
+        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_16, 0);
+        lv_label_set_long_mode(lbl, LV_LABEL_LONG_DOT);
+        lv_obj_set_width(lbl, LV_PCT(90));
+        lv_obj_align(lbl, LV_ALIGN_LEFT_MID, 0, 0);
+    }
+
+    /* Button row: Cancel + OK */
+    lv_obj_t *btn_row = lv_obj_create(panel);
+    lv_obj_set_size(btn_row, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(btn_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(btn_row, LV_FLEX_ALIGN_END,
+                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_bg_opa(btn_row, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(btn_row, 0, 0);
+    lv_obj_set_style_pad_column(btn_row, 12, 0);
+
+    lv_obj_t *btn_cancel = lv_btn_create(btn_row);
+    lv_obj_set_size(btn_cancel, 120, 44);
+    lv_obj_set_style_bg_color(btn_cancel, UI_COLOR_BYPASS, 0);
+    lv_obj_set_style_radius(btn_cancel, 6, 0);
+    lv_obj_set_style_shadow_width(btn_cancel, 0, 0);
+    lv_obj_add_event_cb(btn_cancel, param_picker_cancel_cb, LV_EVENT_CLICKED, pctx);
+    lv_obj_t *lbl_cancel = lv_label_create(btn_cancel);
+    lv_label_set_text(lbl_cancel, TR(TR_CANCEL));
+    lv_obj_set_style_text_color(lbl_cancel, UI_COLOR_TEXT, 0);
+    lv_obj_center(lbl_cancel);
+
+    lv_obj_t *btn_ok = lv_btn_create(btn_row);
+    lv_obj_set_size(btn_ok, 120, 44);
+    lv_obj_set_style_bg_color(btn_ok, UI_COLOR_PRIMARY, 0);
+    lv_obj_set_style_radius(btn_ok, 6, 0);
+    lv_obj_set_style_shadow_width(btn_ok, 0, 0);
+    lv_obj_add_event_cb(btn_ok, param_picker_ok_cb, LV_EVENT_CLICKED, pctx);
+    lv_obj_t *lbl_ok = lv_label_create(btn_ok);
+    lv_label_set_text(lbl_ok, TR(TR_OK));
+    lv_obj_set_style_text_color(lbl_ok, lv_color_white(), 0);
+    lv_obj_center(lbl_ok);
+}
+
 /* ─── Slot context menu (long press) ────────────────────────────────────────── */
 
 typedef struct {
@@ -493,6 +1035,7 @@ static void slot_unassign_cb(lv_event_t *e)
         g_learning_slot = -1;
     }
     g_slots[idx].instance_id = -1;
+    slot_build_controls(idx);
     slot_apply_style(idx);
     scene_save();
 }
@@ -506,6 +1049,15 @@ static void slot_learn_again_cb(lv_event_t *e)
     g_learning_slot = idx;
     slot_apply_style(idx);
     host_midi_learn(g_slots[idx].instance_id, ":bypass", 0.0f, 1.0f);
+}
+
+static void slot_params_cb(lv_event_t *e)
+{
+    slot_menu_ctx_t *ctx = lv_event_get_user_data(e);
+    int idx        = ctx->slot_idx;
+    lv_obj_t *back = ctx->backdrop;
+    lv_obj_delete_async(back);
+    open_param_picker(idx);
 }
 
 static void slot_menu_backdrop_click_cb(lv_event_t *e)
@@ -564,8 +1116,9 @@ static void open_slot_menu(int slot_idx)
     lv_obj_center(l); \
 } while(0)
 
-    MENU_BTN(UI_COLOR_ACCENT,            TR(TR_SCENE_LEARN_MIDI), slot_learn_again_cb);
-    MENU_BTN(UI_COLOR_DANGER,            TR(TR_SCENE_UNASSIGN),   slot_unassign_cb);
+    MENU_BTN(UI_COLOR_SURFACE, TR(TR_SCENE_PARAMS),     slot_params_cb);
+    MENU_BTN(UI_COLOR_ACCENT,  TR(TR_SCENE_LEARN_MIDI), slot_learn_again_cb);
+    MENU_BTN(UI_COLOR_DANGER,  TR(TR_SCENE_UNASSIGN),   slot_unassign_cb);
 
 #undef MENU_BTN
 }
@@ -614,33 +1167,68 @@ static void build_pedals_tab(lv_obj_t *parent)
     for (int i = 0; i < SLOT_COUNT; i++) {
         slot_t *sl = &g_slots[i];
 
+        /* ── Card ── */
         lv_obj_t *card = lv_obj_create(parent);
         lv_obj_set_flex_grow(card, 1);
-        lv_obj_set_height(card, 520);
+        lv_obj_set_height(card, 560);
         lv_obj_set_style_radius(card, 16, 0);
         lv_obj_set_style_border_width(card, 1, 0);
         lv_obj_set_style_border_color(card, UI_COLOR_TEXT_DIM, 0);
         lv_obj_set_style_shadow_ofs_x(card, 0, 0);
         lv_obj_set_style_shadow_ofs_y(card, 0, 0);
-        lv_obj_set_style_pad_all(card, 16, 0);
-        lv_obj_set_style_pad_row(card, 12, 0);
+        lv_obj_set_style_pad_all(card, 8, 0);
+        lv_obj_set_style_pad_row(card, 0, 0);
         lv_obj_set_flex_flow(card, LV_FLEX_FLOW_COLUMN);
-        lv_obj_set_flex_align(card, LV_FLEX_ALIGN_CENTER,
+        lv_obj_set_flex_align(card, LV_FLEX_ALIGN_START,
                               LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
         lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_add_flag(card, LV_OBJ_FLAG_CLICKABLE);
-        lv_obj_add_event_cb(card, slot_tap_cb,        LV_EVENT_CLICKED,     (void *)(intptr_t)i);
-        lv_obj_add_event_cb(card, slot_long_press_cb, LV_EVENT_LONG_PRESSED,(void *)(intptr_t)i);
+        lv_obj_add_event_cb(card, slot_tap_cb,        LV_EVENT_CLICKED,      (void *)(intptr_t)i);
+        lv_obj_add_event_cb(card, slot_long_press_cb, LV_EVENT_LONG_PRESSED, (void *)(intptr_t)i);
         sl->card = card;
 
-        /* Slot number */
-        lv_obj_t *badge = lv_label_create(card);
+        /* ── Top half: ctrl_area (240px, 2×2 grid via ROW_WRAP) ── */
+        lv_obj_t *ctrl_area = lv_obj_create(card);
+        lv_obj_set_size(ctrl_area, LV_PCT(100), 240);
+        lv_obj_set_style_bg_opa(ctrl_area, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(ctrl_area, 0, 0);
+        lv_obj_set_style_pad_all(ctrl_area, 0, 0);
+        lv_obj_set_flex_flow(ctrl_area, LV_FLEX_FLOW_ROW_WRAP);
+        lv_obj_set_flex_align(ctrl_area, LV_FLEX_ALIGN_START,
+                              LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+        lv_obj_clear_flag(ctrl_area, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+        sl->ctrl_area = ctrl_area;
+
+        /* ── Thin separator ── */
+        lv_obj_t *sep = lv_obj_create(card);
+        lv_obj_set_size(sep, LV_PCT(90), 1);
+        lv_obj_set_style_bg_color(sep, UI_COLOR_TEXT_DIM, 0);
+        lv_obj_set_style_bg_opa(sep, LV_OPA_30, 0);
+        lv_obj_set_style_border_width(sep, 0, 0);
+        lv_obj_set_style_radius(sep, 0, 0);
+        lv_obj_clear_flag(sep, LV_OBJ_FLAG_CLICKABLE);
+
+        /* ── Bottom half: info_area ── */
+        lv_obj_t *info_area = lv_obj_create(card);
+        lv_obj_set_flex_grow(info_area, 1);
+        lv_obj_set_width(info_area, LV_PCT(100));
+        lv_obj_set_style_bg_opa(info_area, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(info_area, 0, 0);
+        lv_obj_set_style_pad_all(info_area, 4, 0);
+        lv_obj_set_style_pad_row(info_area, 6, 0);
+        lv_obj_set_flex_flow(info_area, LV_FLEX_FLOW_COLUMN);
+        lv_obj_set_flex_align(info_area, LV_FLEX_ALIGN_CENTER,
+                              LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+        lv_obj_clear_flag(info_area, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+
+        /* Slot number badge */
+        lv_obj_t *badge = lv_label_create(info_area);
         lv_label_set_text_fmt(badge, "%d", i + 1);
         lv_obj_set_style_text_color(badge, UI_COLOR_TEXT_DIM, 0);
         lv_obj_set_style_text_font(badge, &lv_font_montserrat_14, 0);
 
         /* Plugin name */
-        lv_obj_t *name_lbl = lv_label_create(card);
+        lv_obj_t *name_lbl = lv_label_create(info_area);
         lv_obj_set_style_text_color(name_lbl, UI_COLOR_TEXT, 0);
         lv_obj_set_style_text_font(name_lbl, &lv_font_montserrat_24, 0);
         lv_label_set_long_mode(name_lbl, LV_LABEL_LONG_WRAP);
@@ -648,27 +1236,29 @@ static void build_pedals_tab(lv_obj_t *parent)
         lv_obj_set_style_text_align(name_lbl, LV_TEXT_ALIGN_CENTER, 0);
         sl->name_lbl = name_lbl;
 
-        /* State: ON / OFF / "Attente MIDI..." */
-        lv_obj_t *state_lbl = lv_label_create(card);
-        lv_obj_set_style_text_font(state_lbl, &lv_font_montserrat_28, 0);
+        /* State: Active / Bypassed / MIDI learning */
+        lv_obj_t *state_lbl = lv_label_create(info_area);
+        lv_obj_set_style_text_font(state_lbl, &lv_font_montserrat_20, 0);
         lv_obj_set_style_text_align(state_lbl, LV_TEXT_ALIGN_CENTER, 0);
         lv_obj_set_width(state_lbl, LV_PCT(100));
         sl->state_lbl = state_lbl;
 
         /* Cancel MIDI learn button (hidden by default) */
-        lv_obj_t *cancel_btn = lv_btn_create(card);
-        lv_obj_set_size(cancel_btn, LV_PCT(75), 46);
+        lv_obj_t *cancel_btn = lv_btn_create(info_area);
+        lv_obj_set_size(cancel_btn, LV_PCT(75), 40);
         lv_obj_set_style_bg_color(cancel_btn, UI_COLOR_DANGER, 0);
         lv_obj_set_style_radius(cancel_btn, 8, 0);
         lv_obj_set_style_shadow_width(cancel_btn, 0, 0);
-        lv_obj_add_event_cb(cancel_btn, cancel_learn_cb, LV_EVENT_CLICKED, (void *)(intptr_t)i);
+        lv_obj_add_event_cb(cancel_btn, cancel_learn_cb, LV_EVENT_CLICKED,
+                            (void *)(intptr_t)i);
         lv_obj_t *cancel_lbl = lv_label_create(cancel_btn);
         lv_label_set_text(cancel_lbl, TR(TR_SCENE_CANCEL_LEARN));
         lv_obj_set_style_text_color(cancel_lbl, lv_color_white(), 0);
-        lv_obj_set_style_text_font(cancel_lbl, &lv_font_montserrat_16, 0);
+        lv_obj_set_style_text_font(cancel_lbl, &lv_font_montserrat_14, 0);
         lv_obj_center(cancel_lbl);
         sl->cancel_btn = cancel_btn;
 
+        slot_build_controls(i);
         slot_apply_style(i);
     }
 }
@@ -1147,9 +1737,12 @@ static void scene_refresh(void)
     /* Null stale LVGL object pointers before cleaning the pedals tab */
     for (int i = 0; i < SLOT_COUNT; i++) {
         g_slots[i].card       = NULL;
+        g_slots[i].ctrl_area  = NULL;
         g_slots[i].name_lbl   = NULL;
         g_slots[i].state_lbl  = NULL;
         g_slots[i].cancel_btn = NULL;
+        for (int k = 0; k < SCENE_CTRL_COUNT; k++)
+            g_slots[i].cells[k].indicator = NULL;
     }
 
     lv_obj_clean(g_content_pedals);
@@ -1281,9 +1874,12 @@ void ui_scene_close(void)
     g_active_tab      = 0;
     for (int i = 0; i < SLOT_COUNT; i++) {
         g_slots[i].card       = NULL;
+        g_slots[i].ctrl_area  = NULL;
         g_slots[i].name_lbl   = NULL;
         g_slots[i].state_lbl  = NULL;
         g_slots[i].cancel_btn = NULL;
+        for (int k = 0; k < SCENE_CTRL_COUNT; k++)
+            g_slots[i].cells[k].indicator = NULL;
     }
 }
 

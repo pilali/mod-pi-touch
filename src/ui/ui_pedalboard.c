@@ -14,6 +14,7 @@
 #include "../wifi_manager.h"
 
 #include "../plugin_manager.h"
+#include "../widget_prefs.h"
 #include "cJSON.h"
 
 #include <string.h>
@@ -1457,7 +1458,7 @@ static void on_block_tap(void *userdata)
     pb_plugin_t *plug = pb_find_plugin(&g_pedalboard, instance_id);
     if (!plug) return;
 
-    ui_param_editor_show(instance_id, plug->label, plug->uri,
+    ui_param_editor_show(instance_id, plug->label, plug->uri, plug->symbol,
                          plug->ports, plug->port_count,
                          plug->patch_params, plug->patch_param_count,
                          plug->enabled,
@@ -2224,8 +2225,276 @@ static void build_modui_placeholder(lv_obj_t *parent)
     lv_obj_center(btn_lbl);
 }
 
+/* ── Widget prefs picker ─────────────────────────────────────────────────────── */
+
+#define WB_MAX_CTRL WIDGET_PREFS_MAX_CTRL
+
+typedef struct {
+    int      instance_id;
+    char     plug_symbol[PB_SYMBOL_MAX];
+    char     plug_uri[PB_URI_MAX];
+    char     sel[WB_MAX_CTRL][PB_SYMBOL_MAX];
+    int      sel_count;
+    lv_obj_t *backdrop;
+} wb_picker_ctx_t;
+
+/* Per-item userdata — one per port in the picker list */
+typedef struct {
+    wb_picker_ctx_t *pctx;
+    char             symbol[PB_SYMBOL_MAX];
+    lv_obj_t        *btn;
+} wb_item_ud_t;
+
+#define WB_ITEM_MAX 128
+static wb_item_ud_t  g_wb_items[WB_ITEM_MAX];
+static int           g_wb_item_count = 0;
+
+static void wb_close_picker(wb_picker_ctx_t *pctx)
+{
+    if (pctx->backdrop) {
+        lv_obj_delete_async(pctx->backdrop);
+        pctx->backdrop = NULL;
+    }
+    free(pctx);
+}
+
+static void wb_cancel_cb(lv_event_t *e)
+{
+    wb_picker_ctx_t *pctx = lv_event_get_user_data(e);
+    wb_close_picker(pctx);
+    /* Close the param editor too (safe here — we're outside its event tree) */
+    ui_param_editor_close();
+}
+
+static void wb_ok_cb(lv_event_t *e)
+{
+    wb_picker_ctx_t *pctx = lv_event_get_user_data(e);
+    mpt_settings_t  *s    = settings_get();
+
+    widget_prefs_set(pctx->plug_symbol, pctx->sel, pctx->sel_count);
+    if (s) widget_prefs_save(s->data_dir, g_pedalboard.path);
+
+    wb_close_picker(pctx);
+    /* Close param editor (safe — we're inside the picker's event tree, not the editor's) */
+    ui_param_editor_close();
+    /* Full refresh: handles width changes and connection line repositioning */
+    ui_pedalboard_refresh();
+}
+
+static void wb_item_cb(lv_event_t *e)
+{
+    wb_item_ud_t    *ud   = lv_event_get_user_data(e);
+    wb_picker_ctx_t *pctx = ud->pctx;
+
+    /* Toggle selection */
+    bool already = false;
+    int  found_at = -1;
+    for (int i = 0; i < pctx->sel_count; i++) {
+        if (strcmp(pctx->sel[i], ud->symbol) == 0) {
+            already  = true;
+            found_at = i;
+            break;
+        }
+    }
+
+    if (already) {
+        /* Deselect: compact */
+        for (int i = found_at; i < pctx->sel_count - 1; i++)
+            memcpy(pctx->sel[i], pctx->sel[i + 1], PB_SYMBOL_MAX);
+        pctx->sel_count--;
+        lv_obj_set_style_bg_color(ud->btn, lv_color_hex(0x1E2840), 0);
+    } else {
+        if (pctx->sel_count >= WB_MAX_CTRL) {
+            ui_app_show_toast(TR(TR_BLOCK_MAX_CTRL));
+            return;
+        }
+        snprintf(pctx->sel[pctx->sel_count++], PB_SYMBOL_MAX, "%s", ud->symbol);
+        lv_obj_set_style_bg_color(ud->btn, lv_color_hex(0x1E4028), 0);
+    }
+}
+
+static void open_widget_prefs_picker(int instance_id,
+                                     const char *plug_symbol,
+                                     const char *plug_uri)
+{
+    const pm_plugin_info_t *pi = pm_plugin_by_uri(plug_uri);
+    if (!pi) return;
+
+    wb_picker_ctx_t *pctx = malloc(sizeof(*pctx));
+    if (!pctx) return;
+    memset(pctx, 0, sizeof(*pctx));
+    pctx->instance_id = instance_id;
+    snprintf(pctx->plug_symbol, PB_SYMBOL_MAX, "%s", plug_symbol);
+    snprintf(pctx->plug_uri,    PB_URI_MAX,    "%s", plug_uri);
+
+    /* Pre-fill selection from current prefs */
+    pctx->sel_count = widget_prefs_get(plug_symbol, pctx->sel);
+
+    /* Count CTRL_IN ports for picker height */
+    int n_ctrl = 0;
+    for (int k = 0; k < pi->port_count; k++)
+        if (pi->ports[k].type == PM_PORT_CONTROL_IN) n_ctrl++;
+    if (n_ctrl == 0) { free(pctx); return; }
+
+    int btn_h  = 40;
+    int list_h = n_ctrl * (btn_h + 4);
+    if (list_h > 400) list_h = 400;
+    int panel_h = 52 + list_h + 12 + 48 + 12;
+    if (panel_h > 600) panel_h = 600;
+
+    /* Backdrop */
+    lv_obj_t *back = lv_obj_create(lv_layer_top());
+    lv_obj_set_size(back, LV_PCT(100), LV_PCT(100));
+    lv_obj_set_style_bg_color(back, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(back, LV_OPA_70, 0);
+    lv_obj_set_style_border_width(back, 0, 0);
+    lv_obj_clear_flag(back, LV_OBJ_FLAG_SCROLLABLE);
+    pctx->backdrop = back;
+
+    /* Panel */
+    lv_obj_t *panel = lv_obj_create(back);
+    lv_obj_set_size(panel, 500, panel_h);
+    lv_obj_center(panel);
+    lv_obj_set_style_bg_color(panel, lv_color_hex(0x151E2E), 0);
+    lv_obj_set_style_border_color(panel, UI_COLOR_PRIMARY, 0);
+    lv_obj_set_style_border_width(panel, 2, 0);
+    lv_obj_set_style_radius(panel, 12, 0);
+    lv_obj_set_style_pad_all(panel, 12, 0);
+    lv_obj_set_flex_flow(panel, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(panel, 8, 0);
+    lv_obj_clear_flag(panel, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+
+    /* Title */
+    lv_obj_t *title = lv_label_create(panel);
+    lv_label_set_text(title, TR(TR_BLOCK_PICK_CTRL));
+    lv_obj_set_style_text_color(title, UI_COLOR_TEXT, 0);
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_18, 0);
+
+    /* Scrollable port list */
+    lv_obj_t *scroll = lv_obj_create(panel);
+    lv_obj_set_size(scroll, LV_PCT(100), 0);
+    lv_obj_set_flex_grow(scroll, 1);
+    lv_obj_set_style_bg_opa(scroll, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(scroll, 0, 0);
+    lv_obj_set_style_pad_all(scroll, 0, 0);
+    lv_obj_set_flex_flow(scroll, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(scroll, 4, 0);
+    lv_obj_add_flag(scroll, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_clear_flag(scroll, LV_OBJ_FLAG_CLICKABLE);
+
+    g_wb_item_count = 0;
+
+    for (int k = 0; k < pi->port_count && g_wb_item_count < WB_ITEM_MAX; k++) {
+        if (pi->ports[k].type != PM_PORT_CONTROL_IN) continue;
+        const pm_port_info_t *pm_port = &pi->ports[k];
+
+        bool selected = false;
+        for (int s = 0; s < pctx->sel_count; s++) {
+            if (strcmp(pctx->sel[s], pm_port->symbol) == 0) { selected = true; break; }
+        }
+
+        wb_item_ud_t *ud = &g_wb_items[g_wb_item_count++];
+        ud->pctx = pctx;
+        snprintf(ud->symbol, PB_SYMBOL_MAX, "%s", pm_port->symbol);
+
+        lv_obj_t *btn = lv_obj_create(scroll);
+        lv_obj_set_size(btn, LV_PCT(100), btn_h);
+        lv_obj_set_style_bg_color(btn, selected
+            ? lv_color_hex(0x1E4028) : lv_color_hex(0x1E2840), 0);
+        lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_width(btn, 0, 0);
+        lv_obj_set_style_radius(btn, 6, 0);
+        lv_obj_set_style_pad_all(btn, 6, 0);
+        lv_obj_set_flex_flow(btn, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(btn, LV_FLEX_ALIGN_START,
+                              LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+        lv_obj_clear_flag(btn, LV_OBJ_FLAG_SCROLLABLE);
+        ud->btn = btn;
+
+        lv_obj_t *lbl = lv_label_create(btn);
+        lv_label_set_text(lbl, pm_port->name[0] ? pm_port->name : pm_port->symbol);
+        lv_label_set_long_mode(lbl, LV_LABEL_LONG_DOT);
+        lv_obj_set_width(lbl, LV_PCT(100));
+        lv_obj_set_style_text_color(lbl, UI_COLOR_TEXT, 0);
+        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_14, 0);
+        lv_obj_clear_flag(lbl, LV_OBJ_FLAG_CLICKABLE);
+
+        lv_obj_add_event_cb(btn, wb_item_cb, LV_EVENT_CLICKED, ud);
+    }
+
+    /* Footer: Cancel + OK */
+    lv_obj_t *footer = lv_obj_create(panel);
+    lv_obj_set_size(footer, LV_PCT(100), 48);
+    lv_obj_set_flex_flow(footer, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(footer, LV_FLEX_ALIGN_END,
+                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_bg_opa(footer, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(footer, 0, 0);
+    lv_obj_set_style_pad_all(footer, 0, 0);
+    lv_obj_set_style_pad_column(footer, 8, 0);
+    lv_obj_clear_flag(footer, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *btn_cancel = lv_btn_create(footer);
+    lv_obj_set_size(btn_cancel, 120, 40);
+    lv_obj_set_style_bg_color(btn_cancel, UI_COLOR_BYPASS, 0);
+    lv_obj_t *lbl_cancel = lv_label_create(btn_cancel);
+    lv_label_set_text(lbl_cancel, TR(TR_CANCEL));
+    lv_obj_center(lbl_cancel);
+    lv_obj_add_event_cb(btn_cancel, wb_cancel_cb, LV_EVENT_CLICKED, pctx);
+
+    lv_obj_t *btn_ok = lv_btn_create(footer);
+    lv_obj_set_size(btn_ok, 120, 40);
+    lv_obj_set_style_bg_color(btn_ok, UI_COLOR_ACTIVE, 0);
+    lv_obj_t *lbl_ok = lv_label_create(btn_ok);
+    lv_label_set_text(lbl_ok, TR(TR_OK));
+    lv_obj_center(lbl_ok);
+    lv_obj_add_event_cb(btn_ok, wb_ok_cb, LV_EVENT_CLICKED, pctx);
+}
+
+static void on_widget_prefs_gear(int instance_id,
+                                 const char *plug_symbol,
+                                 const char *plug_uri,
+                                 void *ud)
+{
+    (void)ud;
+    /* Open picker on top of the param editor — do NOT close the editor here
+     * because this runs inside the gear button's event callback (a child of
+     * the editor modal) and lv_obj_del on the parent would be unsafe. The
+     * picker closes the editor from its own OK/Cancel callbacks instead. */
+    open_widget_prefs_picker(instance_id, plug_symbol, plug_uri);
+}
+
+/* ── Block rebuild ───────────────────────────────────────────────────────────── */
+
+void ui_pedalboard_rebuild_block(int instance_id)
+{
+    if (!g_pb_loaded || !g_canvas_scroll) return;
+    for (int i = 0; i < g_pedalboard.plugin_count; i++) {
+        if (g_pedalboard.plugins[i].instance_id != instance_id) continue;
+        pb_plugin_t *plug = &g_pedalboard.plugins[i];
+        int new_w = ui_plugin_block_width(plug);
+        if (new_w != g_block_w[i] || !g_block_obj[i]) {
+            /* Width changed (or block missing) — full refresh is safest */
+            ui_pedalboard_refresh();
+        } else {
+            lv_obj_t *parent = lv_obj_get_parent(g_block_obj[i]);
+            lv_coord_t x = lv_obj_get_x(g_block_obj[i]);
+            lv_coord_t y = lv_obj_get_y(g_block_obj[i]);
+            lv_obj_delete(g_block_obj[i]);
+            lv_obj_t *block = ui_plugin_block_create(
+                parent, plug,
+                on_block_tap, on_block_bypass, on_block_remove, on_block_param,
+                (void *)(intptr_t)instance_id);
+            lv_obj_set_pos(block, x, y);
+            g_block_obj[i] = block;
+        }
+        return;
+    }
+}
+
 void ui_pedalboard_init(lv_obj_t *parent)
 {
+    ui_param_editor_set_widget_prefs_cb(on_widget_prefs_gear, NULL);
     g_parent_obj = parent;
 
     /* Reset canvas pointers — previous LVGL objects may have been freed
@@ -2458,6 +2727,10 @@ void ui_pedalboard_load(const char *bundle_path,
     fprintf(stderr, "[ui_pedalboard] loaded '%s': %d plugins, %d connections\n",
             g_pedalboard.name, g_pedalboard.plugin_count, g_pedalboard.connection_count);
     g_pb_loaded = true;
+
+    /* Load sidecar widget control prefs (separate from mod-ui pedalboard files) */
+    mpt_settings_t *wp_s = settings_get();
+    if (wp_s) widget_prefs_load(wp_s->data_dir, bundle_path);
 
     /* ── Rebuild mod-host state ── */
 
@@ -2693,6 +2966,7 @@ void ui_pedalboard_delete(void)
 
     pb_init(&g_pedalboard);
     g_pb_loaded = false;
+    widget_prefs_clear();
 
     pb_bundle_delete(bundle_path);
 

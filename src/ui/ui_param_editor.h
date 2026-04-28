@@ -26,9 +26,22 @@ typedef void (*cv_map_cb_t)(int instance_id, const char *symbol,
                             float min, float max, char op_mode,
                             void *userdata);
 
+/* Called when the user taps the gear button to customize widget controls.
+ * plug_symbol: TTL instance symbol (pb_plugin_t.symbol).
+ * plug_uri:    LV2 URI of the plugin. */
+typedef void (*widget_prefs_cb_t)(int instance_id,
+                                  const char *plug_symbol,
+                                  const char *plug_uri,
+                                  void *userdata);
+
+/* Register a callback invoked when the gear button is tapped.
+ * Call once at startup (e.g. from ui_pedalboard_init). */
+void ui_param_editor_set_widget_prefs_cb(widget_prefs_cb_t cb, void *ud);
+
 void ui_param_editor_show(int instance_id,
                           const char *plugin_label,
                           const char *plugin_uri,
+                          const char *plugin_symbol,
                           pb_port_t *ports, int port_count,
                           pb_patch_t *patch_params, int patch_param_count,
                           bool enabled,

@@ -3,6 +3,7 @@
 #include "ui_app.h"
 #include "../i18n.h"
 #include "../plugin_manager.h"
+#include "../widget_prefs.h"
 
 #include <string.h>
 #include <stdio.h>
@@ -189,6 +190,11 @@ static void block_open_editor_cb(lv_event_t *e)
 
 static int displayed_ctrl_count(const pb_plugin_t *plug)
 {
+    /* Custom selection overrides default port count */
+    char custom[WIDGET_PREFS_MAX_CTRL][PB_SYMBOL_MAX];
+    int n = widget_prefs_get(plug->symbol, custom);
+    if (n > 0) return n;
+
     const pm_plugin_info_t *pi = pm_plugin_by_uri(plug->uri);
     if (!pi) return 0;
     return (pi->modgui_port_count > 0) ? pi->modgui_port_count : pi->ctrl_in_count;
@@ -381,16 +387,22 @@ lv_obj_t *ui_plugin_block_create(lv_obj_t *parent, pb_plugin_t *plug,
     const pm_plugin_info_t *pi_info = pm_plugin_by_uri(plug->uri);
     lv_color_t accent = ui_plugin_block_category_color(pi_info ? pi_info->category : "");
 
+    /* Check for user-customized control selection */
+    char custom_syms[WIDGET_PREFS_MAX_CTRL][PB_SYMBOL_MAX];
+    int  custom_count = widget_prefs_get(plug->symbol, custom_syms);
+    bool use_custom = (custom_count > 0);
+
     /* Block dimensions */
-    int n_displayed = pi_info
-        ? ((pi_info->modgui_port_count > 0)
-               ? pi_info->modgui_port_count
-               : pi_info->ctrl_in_count)
-        : 0;
+    int n_displayed = use_custom ? custom_count
+        : (pi_info
+            ? ((pi_info->modgui_port_count > 0)
+                   ? pi_info->modgui_port_count
+                   : pi_info->ctrl_in_count)
+            : 0);
     int block_w = (n_displayed > 4) ? BLOCK_W_2X : BLOCK_W_1X;
     int block_h = BLOCK_H;
 
-    /* Control grid geometry */
+    /* Control grid geometry — up to 4 cols for 2× blocks, 2 cols for 1× */
     int n_cols  = (n_displayed > 4) ? 4 : (n_displayed > 0 ? LV_MIN(n_displayed, 2) : 1);
     int n_rows  = (n_cols > 0) ? (n_displayed + n_cols - 1) / n_cols : 0;
     if (n_rows > 2) n_rows = 2;
@@ -463,16 +475,26 @@ lv_obj_t *ui_plugin_block_create(lv_obj_t *parent, pb_plugin_t *plug,
     int ctrl_drawn = 0;
 
     if (pi_info && n_displayed > 0) {
-        bool use_modgui = (pi_info->modgui_port_count > 0);
+        bool use_modgui = (!use_custom && pi_info->modgui_port_count > 0);
+        int  src_count  = use_custom  ? custom_count
+                        : use_modgui  ? pi_info->modgui_port_count
+                        :               pi_info->port_count;
 
-        for (int k = 0; k < (use_modgui ? pi_info->modgui_port_count
-                                        : pi_info->port_count)
-             && ctrl_drawn < max_ctrl; k++)
-        {
-            /* Resolve the pm_port_info_t to render */
+        for (int k = 0; k < src_count && ctrl_drawn < max_ctrl; k++) {
+            /* Resolve pm_port_info_t for this cell */
             const pm_port_info_t *pm_port = NULL;
-            if (use_modgui) {
-                /* Find the pm_port by symbol from the modgui curated list */
+            if (use_custom) {
+                /* Find port by custom symbol */
+                for (int j = 0; j < pi_info->port_count; j++) {
+                    if (pi_info->ports[j].type == PM_PORT_CONTROL_IN &&
+                        strcmp(pi_info->ports[j].symbol, custom_syms[k]) == 0)
+                    {
+                        pm_port = &pi_info->ports[j];
+                        break;
+                    }
+                }
+                if (!pm_port) continue; /* symbol not found — skip */
+            } else if (use_modgui) {
                 const char *sym = pi_info->modgui_ports[k].symbol;
                 for (int j = 0; j < pi_info->port_count; j++) {
                     if (pi_info->ports[j].type == PM_PORT_CONTROL_IN &&
@@ -482,7 +504,6 @@ lv_obj_t *ui_plugin_block_create(lv_obj_t *parent, pb_plugin_t *plug,
                         break;
                     }
                 }
-                /* If not found as a control port, skip it */
                 if (!pm_port) continue;
             } else {
                 if (pi_info->ports[k].type != PM_PORT_CONTROL_IN) continue;
