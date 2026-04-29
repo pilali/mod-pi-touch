@@ -41,13 +41,6 @@ static void do_load(void)
     pthread_mutex_unlock(&g_load_mutex);
 }
 
-static void *load_thread(void *arg)
-{
-    (void)arg;
-    do_load();
-    return NULL;
-}
-
 /* ─── Tuner init thread (large stack for FFTW planner) ──────────────────────── */
 
 static void *tuner_init_thread(void *arg)
@@ -87,9 +80,7 @@ void pre_fx_fini(void)
 
 void pre_fx_reload(void)
 {
-    pthread_t tid;
-    pthread_create(&tid, NULL, load_thread, NULL);
-    pthread_detach(tid);
+    do_load();
 }
 
 void pre_fx_apply_gate(void)
