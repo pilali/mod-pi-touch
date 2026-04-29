@@ -329,7 +329,7 @@ static lv_obj_t *make_section(lv_obj_t *parent, const char *title)
     lv_obj_t *box = lv_obj_create(parent);
     lv_obj_set_width(box, LV_PCT(100));
     lv_obj_set_height(box, LV_SIZE_CONTENT);
-    lv_obj_set_style_bg_color(box, lv_color_hex(0x222222), 0);
+    lv_obj_set_style_bg_color(box, UI_COLOR_SURFACE, 0);
     lv_obj_set_style_bg_opa(box, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(box, 0, 0);
     lv_obj_set_style_radius(box, 8, 0);
@@ -415,7 +415,7 @@ void ui_conductor_open(void)
     g_overlay = lv_obj_create(lv_layer_top());
     lv_obj_set_size(g_overlay, LV_PCT(100), LV_PCT(100));
     lv_obj_set_style_bg_color(g_overlay, lv_color_hex(0x000000), 0);
-    lv_obj_set_style_bg_opa(g_overlay, LV_OPA_70, 0);
+    lv_obj_set_style_bg_opa(g_overlay, LV_OPA_50, 0);
     lv_obj_set_style_border_width(g_overlay, 0, 0);
     lv_obj_set_style_pad_all(g_overlay, 0, 0);
     lv_obj_clear_flag(g_overlay, LV_OBJ_FLAG_SCROLLABLE);
@@ -426,7 +426,7 @@ void ui_conductor_open(void)
     lv_obj_t *panel = lv_obj_create(g_overlay);
     lv_obj_set_size(panel, 700, LV_SIZE_CONTENT);
     lv_obj_align(panel, LV_ALIGN_CENTER, 0, 0);
-    lv_obj_set_style_bg_color(panel, lv_color_hex(0x1E1E1E), 0);
+    lv_obj_set_style_bg_color(panel, UI_COLOR_BG, 0);
     lv_obj_set_style_bg_opa(panel, LV_OPA_COVER, 0);
     lv_obj_set_style_border_color(panel, UI_COLOR_PRIMARY, 0);
     lv_obj_set_style_border_width(panel, 2, 0);

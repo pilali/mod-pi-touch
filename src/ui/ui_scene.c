@@ -734,8 +734,7 @@ static void open_plugin_picker(int slot_idx)
     lv_obj_add_event_cb(backdrop, picker_backdrop_cb, LV_EVENT_CLICKED, NULL);
 
     lv_obj_t *panel = lv_obj_create(backdrop);
-    lv_obj_set_size(panel, 480, LV_SIZE_CONTENT);
-    lv_obj_set_style_max_height(panel, 540, 0);
+    lv_obj_set_size(panel, 480, 540);
     lv_obj_align(panel, LV_ALIGN_CENTER, 0, 0);
     lv_obj_set_style_bg_color(panel, UI_COLOR_BG, 0);
     lv_obj_set_style_border_color(panel, UI_COLOR_PRIMARY, 0);
@@ -754,8 +753,7 @@ static void open_plugin_picker(int slot_idx)
 
     lv_obj_t *list = lv_obj_create(panel);
     lv_obj_set_width(list, LV_PCT(100));
-    lv_obj_set_height(list, LV_SIZE_CONTENT);
-    lv_obj_set_style_max_height(list, 420, 0);
+    lv_obj_set_flex_grow(list, 1);
     lv_obj_set_style_bg_opa(list, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(list, 0, 0);
     lv_obj_set_style_pad_all(list, 0, 0);
@@ -916,8 +914,7 @@ static void open_param_picker(int slot_idx)
     lv_obj_add_event_cb(backdrop, param_picker_delete_cb, LV_EVENT_DELETE, pctx);
 
     lv_obj_t *panel = lv_obj_create(backdrop);
-    lv_obj_set_size(panel, 500, LV_SIZE_CONTENT);
-    lv_obj_set_style_max_height(panel, 580, 0);
+    lv_obj_set_size(panel, 500, 580);
     lv_obj_align(panel, LV_ALIGN_CENTER, 0, 0);
     lv_obj_set_style_bg_color(panel, UI_COLOR_BG, 0);
     lv_obj_set_style_border_color(panel, UI_COLOR_PRIMARY, 0);
@@ -937,8 +934,7 @@ static void open_param_picker(int slot_idx)
 
     lv_obj_t *list = lv_obj_create(panel);
     lv_obj_set_width(list, LV_PCT(100));
-    lv_obj_set_height(list, LV_SIZE_CONTENT);
-    lv_obj_set_style_max_height(list, 420, 0);
+    lv_obj_set_flex_grow(list, 1);
     lv_obj_set_style_bg_opa(list, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(list, 0, 0);
     lv_obj_set_style_pad_all(list, 0, 0);
