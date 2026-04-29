@@ -111,9 +111,25 @@ static int parse_response(const char *line, char *val_buf, size_t val_sz)
     return status;
 }
 
-/* ─── Command receive (one response per command, called under cmd_mutex) ─────── */
+/* ─── data_finish / output_data_ready deadlock prevention ─────────────────────
+ *
+ * Problem: fb_thread sees "data_finish" and tries to acquire cmd_mutex to send
+ * "output_data_ready".  If a command is already in progress (cmd_mutex held),
+ * mod-host stalls waiting for output_data_ready and never sends the command
+ * response — circular deadlock.
+ *
+ * Fix: fb_thread uses a non-blocking trylock.  If the lock is busy, it sets
+ * g_odr_pending.  recv_response_cmd() polls that flag every ODR_POLL_MS and
+ * handles output_data_ready inline (we already hold the mutex), then reads and
+ * discards the odr resp before continuing to wait for the command resp.
+ * ─────────────────────────────────────────────────────────────────────────── */
+#define ODR_POLL_MS 50
 
-static int recv_response(int fd, char *val_buf, size_t val_sz, int timeout_ms)
+static _Atomic bool g_odr_pending = false;
+
+/* Low-level receive: reads one null-terminated "resp N [val]" from fd.
+ * Caller holds cmd_mutex.  Does NOT check g_odr_pending. */
+static int recv_response_raw(int fd, char *val_buf, size_t val_sz, int timeout_ms)
 {
     char buf[HOST_RESP_MAX];
     int  buf_len = 0;
@@ -154,18 +170,115 @@ static int recv_response(int fd, char *val_buf, size_t val_sz, int timeout_ms)
         buf_len += n;
         buf[buf_len] = '\0';
 
-        /* Look for a complete null-terminated response */
         char *p = buf;
         while (p < buf + buf_len) {
             size_t mlen = strlen(p);
             if (p + mlen < buf + buf_len) {
-                /* Complete message */
                 int status = parse_response(p, val_buf, val_sz);
                 return status;
             }
             p += mlen;
-            if (p < buf + buf_len) p++; /* skip null byte */
+            if (p < buf + buf_len) p++;
         }
+    }
+}
+
+/* Send output_data_ready and discard its response.
+ * MUST be called while holding cmd_mutex (fd == cmd_fd). */
+static void send_odr_inline(int cmd_fd)
+{
+    const char odr[] = "output_data_ready";
+    char obuf[32];
+    memcpy(obuf, odr, sizeof(odr));
+    send(cmd_fd, obuf, sizeof(odr), 0);
+    char resp[64];
+    recv_response_raw(cmd_fd, resp, sizeof(resp), 1000);
+}
+
+/* Command receive: reads a command response, handling any data_finish that
+ * arrives concurrently via g_odr_pending.  Caller holds cmd_mutex.
+ *
+ * We track how many odr sends are outstanding (pending_odr) and discard
+ * exactly that many responses before returning the command response.
+ * This is safe regardless of whether mod-host sends odr_resp before or
+ * after the command resp. */
+static int recv_response(int fd, char *val_buf, size_t val_sz, int timeout_ms)
+{
+    char buf[HOST_RESP_MAX];
+    int  buf_len    = 0;
+    int  pending_odr = 0;
+
+    struct timespec deadline;
+    if (timeout_ms > 0) {
+        clock_gettime(CLOCK_MONOTONIC, &deadline);
+        deadline.tv_sec  += timeout_ms / 1000;
+        deadline.tv_nsec += (timeout_ms % 1000) * 1000000L;
+        if (deadline.tv_nsec >= 1000000000L) {
+            deadline.tv_sec++;
+            deadline.tv_nsec -= 1000000000L;
+        }
+    }
+
+    for (;;) {
+        /* Send odr for any pending data_finish signalled by fb_thread. */
+        if (atomic_exchange(&g_odr_pending, false)) {
+            const char odr[] = "output_data_ready";
+            char obuf[32];
+            memcpy(obuf, odr, sizeof(odr));
+            send(fd, obuf, sizeof(odr), 0);
+            pending_odr++;
+        }
+
+        /* Drain all complete messages in the buffer.
+         * Discard odr responses until the command response is found. */
+        bool found;
+        do {
+            found = false;
+            char *p = buf;
+            while (p < buf + buf_len) {
+                size_t mlen = strlen(p);
+                if (p + mlen < buf + buf_len) { /* complete null-terminated message */
+                    if (pending_odr > 0) {
+                        pending_odr--;
+                        p += mlen + 1;
+                        int leftover = (int)(buf + buf_len - p);
+                        if (leftover > 0) memmove(buf, p, (size_t)leftover);
+                        buf_len = leftover;
+                        found = true;
+                        break; /* restart inner scan after buffer shift */
+                    }
+                    return parse_response(p, val_buf, val_sz);
+                }
+                p += mlen;
+                if (p < buf + buf_len) p++;
+            }
+        } while (found);
+
+        /* Cap select at ODR_POLL_MS so we re-check g_odr_pending regularly. */
+        struct timeval tv = {.tv_sec = 0, .tv_usec = ODR_POLL_MS * 1000};
+        if (timeout_ms > 0) {
+            struct timespec now;
+            clock_gettime(CLOCK_MONOTONIC, &now);
+            long ms_left = (deadline.tv_sec  - now.tv_sec) * 1000
+                         + (deadline.tv_nsec - now.tv_nsec) / 1000000L;
+            if (ms_left <= 0) return -ETIMEDOUT;
+            if (ms_left < ODR_POLL_MS) {
+                tv.tv_sec  = 0;
+                tv.tv_usec = (long)(ms_left * 1000);
+            }
+        }
+
+        fd_set rfds;
+        FD_ZERO(&rfds);
+        FD_SET(fd, &rfds);
+        int r = select(fd + 1, &rfds, NULL, NULL, &tv);
+        if (r < 0)  return -errno;
+        if (r == 0) continue; /* poll interval elapsed — loop to check odr_pending */
+
+        int n = recv(fd, buf + buf_len, sizeof(buf) - buf_len - 1, 0);
+        if (n <= 0) return -EIO;
+        buf_len += n;
+        buf[buf_len] = '\0';
     }
 }
 
@@ -232,16 +345,20 @@ static void *fb_thread_func(void *arg)
                 break;
             }
             /* "data_finish" ends a feedback batch — send output_data_ready on
-             * the cmd socket to re-enable the next batch from mod-host. */
+             * the cmd socket to re-enable the next batch from mod-host.
+             *
+             * Use trylock to avoid deadlocking with a command in progress:
+             * if the mutex is held by a command sender, g_odr_pending signals
+             * recv_response() to handle it inline instead. */
             if (strcmp(p, "data_finish") == 0) {
-                const char odr[] = "output_data_ready";
-                char obuf[32];
-                memcpy(obuf, odr, sizeof(odr)); /* includes null terminator */
-                pthread_mutex_lock(&h->cmd_mutex);
-                send(h->cmd_fd, obuf, sizeof(odr), 0);
-                char resp[64];
-                recv_response(h->cmd_fd, resp, sizeof(resp), 1000);
-                pthread_mutex_unlock(&h->cmd_mutex);
+                if (pthread_mutex_trylock(&h->cmd_mutex) == 0) {
+                    /* No command in progress — handle immediately. */
+                    send_odr_inline(h->cmd_fd);
+                    pthread_mutex_unlock(&h->cmd_mutex);
+                } else {
+                    /* Command in progress — signal recv_response() to handle it. */
+                    atomic_store(&g_odr_pending, true);
+                }
             } else if (h->feedback_cb) {
                 h->feedback_cb(p, h->feedback_ud);
             }
@@ -269,9 +386,11 @@ int host_output_data_ready(void)
     char buf[32];
     memcpy(buf, odr, sizeof(odr));
     pthread_mutex_lock(&g_host.cmd_mutex);
+    /* Clear any pending flag — the odr we're about to send satisfies it. */
+    atomic_store(&g_odr_pending, false);
     send(g_host.cmd_fd, buf, sizeof(odr), 0);
     char resp[64];
-    int r = recv_response(g_host.cmd_fd, resp, sizeof(resp), 2000);
+    int r = recv_response_raw(g_host.cmd_fd, resp, sizeof(resp), 2000);
     pthread_mutex_unlock(&g_host.cmd_mutex);
     return r;
 }
